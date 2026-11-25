@@ -790,6 +790,10 @@ function launchSeat(seat: string, env: Record<string, string>) {
 
 function fixtureHerdr(env: Record<string, string>, log: string): void {
   writeFileSync(join(env.PATH!, 'herdr-app'), `#!${process.execPath}
+if (process.argv[2] === 'ls') {
+  console.log(JSON.stringify({ spaces: [{ id: 'sp1', name: 'sp1', folder: null, active: true, tabs: [] }] }));
+  process.exit(0);
+}
 require('node:fs').writeFileSync(${JSON.stringify(log)}, process.argv[4]);
 console.log(JSON.stringify({ tab: 'tb1', terminal: 't9' }));
 `, { mode: 0o755 });

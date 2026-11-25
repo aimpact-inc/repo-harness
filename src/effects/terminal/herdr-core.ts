@@ -83,6 +83,77 @@ export interface HcServerStatus {
  * terminal without a pane a pane in the person's window (a new tab, or `place` "right" / "down").
  */
 export type HerdrAppPlacement = 'tab.new' | 'pane.split' | 'pane.close' | 'terminal.keep';
+export type HerdrSeatPlacementCommand = 'tab.new' | 'hc.run';
+
+/** Maximum side-by-side panes packed into one Herdr.app tab before opening `<base> 2`, `<base> 3`, etc. */
+export const MAX_PANES_PER_TAB = 3;
+
+export interface HerdrAppTerminal {
+  readonly terminal: string;
+  readonly pane: string;
+  readonly name: string | null;
+  readonly status: string | null;
+  readonly app: string | null;
+}
+
+export interface HerdrAppTab {
+  readonly id: string;
+  readonly name: string | null;
+  readonly active: boolean;
+  readonly terminals: readonly HerdrAppTerminal[];
+  readonly paneCount: number;
+  /** Remote machine name from the enclosing space in `herdr-app ls`, when non-local. */
+  readonly machine?: string | null;
+}
+
+export interface HerdrAppSpace {
+  readonly id: string;
+  readonly name: string;
+  readonly folder: string | null;
+  readonly machine: string | null;
+  readonly active: boolean;
+  readonly tabs: readonly HerdrAppTab[];
+}
+
+export interface HerdrAppListResult {
+  readonly spaces: readonly HerdrAppSpace[];
+}
+
+export interface HerdrPlacementPlanInput {
+  readonly tabs: readonly HerdrAppTab[];
+  readonly baseTabName: string | null;
+  readonly preferredTerminals?: readonly string[];
+}
+
+export type HerdrPlacementDecision =
+  | { readonly action: 'pane.split'; readonly pane: string; readonly tabId: string; readonly tabName: string | null }
+  | { readonly action: 'tab.new'; readonly name: string | null };
+
+export interface HerdrSeatPlacementInput {
+  readonly space: string;
+  readonly folder: string;
+  readonly argv: readonly string[];
+  /** Optional initial prompt for runtimes that accept a positional interactive prompt (`claude`, `pi`, `codex`). Omit for `agy` (`-i`) and `codex exec`. */
+  readonly task?: string;
+  /** Only applies to `tab.new`; core tab adoption (`hc.run`) keeps background focus and takes no `focus` flag. */
+  readonly focus?: boolean;
+  readonly baseTabName: string | null;
+  readonly tabs: readonly HerdrAppTab[];
+  readonly preferredTerminals?: readonly string[];
+}
+
+export type HerdrSeatPlacement =
+  | {
+      readonly command: 'hc.run';
+      readonly space: string;
+      readonly tabId: string;
+      readonly pane: string;
+      readonly folder: string;
+      readonly machine: string | null;
+      readonly argv: readonly [string, ...string[]];
+      readonly tabName: string | null;
+    }
+  | { readonly command: 'tab.new'; readonly args: Readonly<Record<string, unknown>>; readonly tabName: string | null };
 
 /** The repo-harness label keys; the only source for every surface that writes or filters hc labels. */
 export const RH_LABEL = {
@@ -103,8 +174,8 @@ export const RH_LABEL = {
   /** A resident repo-harness program that is not a seat (#1509). */
   service: 'repo-harness.service',
 } as const;
-/** The keys that Herdr.app writes on a terminal that it shows in a pane: its space and the `space / tab` text. hc projects `where` as a top-level field only in `ls`. */
-export const HERDR_APP_LABEL = { space: 'herdr.space', where: 'where' } as const;
+/** The keys that Herdr.app writes on a terminal that it shows in a pane: its space, its tab, and the `space / tab` text. hc projects `where` as a top-level field only in `ls`. */
+export const HERDR_APP_LABEL = { space: 'herdr.space', tab: 'herdr.tab', where: 'where' } as const;
 /** `repo-harness.role` values. A surface that needs a new role adds it here. */
 export const RH_ROLE = { notifyRelay: 'notify-relay', taskSession: 'task-session' } as const;
 /** Terminals that carry this pair send blocked and done notices through the relay. */
@@ -515,6 +586,9 @@ export function hcEvents(labels: HcLabels, onItem: (item: HcStreamItem) => void,
 
 /** The argv of `herdr-app do <command> <json>`: the one source for the call below and for a command the console shows to copy. */
 export function herdrAppCommand(command: HerdrAppPlacement, args: Readonly<Record<string, unknown>>): readonly ['herdr-app', 'do', HerdrAppPlacement, string] {
+  if (command === 'pane.split' && (typeof args.pane !== 'string' || args.pane.trim().length === 0)) {
+    throw new HerdrCoreError('herdr-app', 'invalid_address', undefined, undefined, 'pane.split requires an explicit pane id');
+  }
   return ['herdr-app', 'do', command, JSON.stringify(args)];
 }
 
@@ -525,6 +599,256 @@ export const HERDR_APP_NOT_SENT: ReadonlySet<HerdrCoreErrorReason> = new Set<Her
 export function herdrAppDo(command: HerdrAppPlacement, args: Readonly<Record<string, unknown>>, options: HerdrCoreOptions = {}): Record<string, unknown> {
   const [program, ...rest] = herdrAppCommand(command, args);
   return invoke(program, rest, options);
+}
+
+const isBoolean = (value: unknown): value is boolean => typeof value === 'boolean';
+const appInvalid = (detail: string) => new HerdrCoreError('herdr-app', 'invalid_response', undefined, undefined, detail);
+
+function appOptional<T>(record: Readonly<Record<string, unknown>>, key: string, valid: (value: unknown) => value is T, where: string): T | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (!valid(value)) throw appInvalid(`${where} has an invalid ${key}`);
+  return value;
+}
+
+function isHerdrTerminalAddress(value: string): boolean {
+  if (isHcAddress(value)) return true;
+  return isRemoteHcAddress(value) && value.trim() === value && !value.startsWith('/') && !value.endsWith('/');
+}
+
+function herdrAppTerminal(value: unknown, where: string): HerdrAppTerminal {
+  if (!isRecord(value)) throw appInvalid(`${where} terminal is not an object`);
+  if (!isString(value.terminal) || !isHerdrTerminalAddress(value.terminal)) {
+    throw appInvalid(`${where} terminal has an invalid terminal address`);
+  }
+  if (!isString(value.pane) || value.pane.trim().length === 0) {
+    throw appInvalid(`${where} terminal ${value.terminal} has an invalid pane id`);
+  }
+  const label = `${where} terminal ${value.terminal}`;
+  return {
+    terminal: value.terminal,
+    pane: value.pane,
+    name: appOptional(value, 'name', orNull(isString), label) ?? null,
+    status: appOptional(value, 'status', orNull(isString), label) ?? null,
+    app: appOptional(value, 'app', orNull(isString), label) ?? null,
+  };
+}
+
+function herdrAppTab(value: unknown, where: string, machine: string | null): HerdrAppTab {
+  if (!isRecord(value) || !isString(value.id) || value.id.trim().length === 0) throw appInvalid(`${where} tab is missing id`);
+  if (!Array.isArray(value.terminals)) throw appInvalid(`${where} tab ${value.id} has no terminals array`);
+  const label = `${where} tab ${value.id}`;
+  const name = appOptional(value, 'name', orNull(isString), label) ?? null;
+  const active = appOptional(value, 'active', isBoolean, label) ?? false;
+  const terminals = value.terminals.map(entry => herdrAppTerminal(entry, label));
+  return { id: value.id, name, active, terminals, paneCount: terminals.length, ...(machine === null ? {} : { machine }) };
+}
+
+function herdrAppSpace(value: unknown): HerdrAppSpace {
+  if (!isRecord(value) || !isString(value.id) || value.id.trim().length === 0) throw appInvalid('space is missing id');
+  if (!isString(value.name)) throw appInvalid(`space ${value.id} is missing name`);
+  if (!Array.isArray(value.tabs)) throw appInvalid(`space ${value.id} has no tabs array`);
+  const label = `space ${value.id}`;
+  const folder = appOptional(value, 'folder', orNull(isString), label) ?? null;
+  const machine = appOptional(value, 'machine', orNull(isString), label) ?? null;
+  const active = appOptional(value, 'active', isBoolean, label) ?? false;
+  return {
+    id: value.id, name: value.name, folder, machine, active,
+    tabs: value.tabs.map(entry => herdrAppTab(entry, label, machine)),
+  };
+}
+
+/** Read-only `herdr-app ls`: spaces -> tabs -> terminals with pane IDs and per-tab pane counts. */
+export function herdrAppList(options: HerdrCoreOptions = {}): HerdrAppListResult {
+  const result = invoke('herdr-app', ['ls'], options);
+  if (!Array.isArray(result.spaces)) throw appInvalid('ls has no spaces array');
+  return { spaces: result.spaces.map(herdrAppSpace) };
+}
+
+/** Read-only tabs of one Herdr space from `herdr-app ls`, or an empty list when the space is not yet listed. */
+export function herdrAppSpaceTabs(spaceId: string, options: HerdrCoreOptions = {}): readonly HerdrAppTab[] {
+  return herdrAppList(options).spaces.find(space => space.id === spaceId)?.tabs ?? [];
+}
+
+const TAB_SUFFIX = /^(?:[2-9]|[1-9][0-9]+)$/u;
+
+function matchesTabBase(tabName: string | null, base: string): boolean {
+  if (tabName === null) return false;
+  if (tabName === base) return true;
+  return tabName.startsWith(`${base} `) && TAB_SUFFIX.test(tabName.slice(base.length + 1));
+}
+
+function nextTabName(tabs: readonly HerdrAppTab[], base: string): string {
+  const used = new Set(tabs.map(tab => tab.name).filter((name): name is string => name !== null));
+  if (!used.has(base)) return base;
+  let suffix = 2;
+  while (used.has(`${base} ${suffix}`)) suffix += 1;
+  return `${base} ${suffix}`;
+}
+
+/**
+ * Choose explicit-ID `pane.split` (into the rightmost pane of an eligible `< 3` pane tab) or `tab.new` (with `<base>`,
+ * `<base> 2`, ... fullness suffix). Never produces an untargeted split or relies on focus.
+ */
+export function planHerdrPlacement(input: HerdrPlacementPlanInput): HerdrPlacementDecision {
+  for (const preferred of input.preferredTerminals ?? []) {
+    const tab = input.tabs.find(entry => entry.terminals.some(term => term.terminal === preferred));
+    if (tab !== undefined && tab.paneCount < MAX_PANES_PER_TAB && tab.terminals.length > 0) {
+      return { action: 'pane.split', pane: tab.terminals[tab.terminals.length - 1]!.pane, tabId: tab.id, tabName: tab.name };
+    }
+  }
+  if (input.baseTabName !== null) {
+    const existing = input.tabs.find(entry => matchesTabBase(entry.name, input.baseTabName!) && entry.paneCount < MAX_PANES_PER_TAB && entry.terminals.length > 0);
+    if (existing !== undefined) {
+      return { action: 'pane.split', pane: existing.terminals[existing.terminals.length - 1]!.pane, tabId: existing.id, tabName: existing.name };
+    }
+    return { action: 'tab.new', name: nextTabName(input.tabs, input.baseTabName) };
+  }
+  return { action: 'tab.new', name: null };
+}
+
+const PERSISTENT_LOGIN_SHELL_SCRIPT = '"$@"; result=$?; [ ! -t 0 ] || exec "$0" -li; exit "$result"';
+
+/** Keep a foreground shell available after the agent exits, including in a direct Herdr tab split. */
+export function seatLoginShell(argv: readonly string[]): [string, ...string[]] {
+  const shell = process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh';
+  return [shell, '-lic', PERSISTENT_LOGIN_SHELL_SCRIPT, shell, ...argv];
+}
+
+function hasPersistentLoginShell(argv: readonly string[]): boolean {
+  return argv.some((arg, index) => arg === '-lic' && (argv[index + 1] ?? '').includes('exec "$0" -li'));
+}
+
+/**
+ * Build the `hc run` argv for an existing-tab split: append `'--', task` when supplied and wrap unwrapped argv in the
+ * persistent login shell so the agent gets login PATH and leaves an interactive shell in the target cwd on exit.
+ */
+export function prepareSplitArgv(argv: readonly string[], task?: string): readonly [string, ...string[]] {
+  if (argv.length === 0) throw new HerdrCoreError('hc', 'invalid_address', undefined, undefined, 'split argv cannot be empty');
+  const withTask: [string, ...string[]] = task === undefined ? [argv[0]!, ...argv.slice(1)] : [argv[0]!, ...argv.slice(1), '--', task];
+  return hasPersistentLoginShell(argv) ? withTask : seatLoginShell(withTask);
+}
+
+/**
+ * Merge locally-placed `hc.run` terminals into `tabs` when Herdr.app has not yet reflected an adopted terminal in
+ * `herdr-app ls`, so multi-seat loops never exceed `MAX_PANES_PER_TAB`.
+ */
+export function withPendingTabPlacements(
+  tabs: readonly HerdrAppTab[],
+  pending: ReadonlyMap<string, ReadonlySet<string>>,
+): readonly HerdrAppTab[] {
+  if (pending.size === 0) return tabs;
+  return tabs.map(tab => {
+    const added = pending.get(tab.id);
+    if (added === undefined || added.size === 0) return tab;
+    const seen = new Set(tab.terminals.map(entry => entry.terminal));
+    let extra = 0;
+    for (const terminal of added) {
+      if (!seen.has(terminal)) extra += 1;
+    }
+    return extra === 0 ? tab : { ...tab, paneCount: tab.paneCount + extra };
+  });
+}
+
+/** Record a newly placed `hc.run` terminal so back-to-back placements in one run see it before Herdr.app adopts it. */
+export function recordPendingTabPlacement(
+  pending: Map<string, Set<string>>,
+  placement: HerdrSeatPlacement,
+  result: Record<string, unknown> | void,
+): void {
+  if (placement.command !== 'hc.run' || result === undefined || typeof result.terminal !== 'string') return;
+  let terminals = pending.get(placement.tabId);
+  if (terminals === undefined) {
+    terminals = new Set<string>();
+    pending.set(placement.tabId, terminals);
+  }
+  terminals.add(result.terminal);
+}
+
+/**
+ * Build the unified seat placement: `hc.run` with `herdr.space` + `herdr.tab` + `--cwd <folder>` when joining an
+ * existing `< 3` pane tab (so `hc get --json` reports `terminal.cwd === folder` and the persistent shell starts in
+ * `folder`, because `herdr-app do pane.split` takes no directory option), or `herdr-app do tab.new` for a new tab.
+ */
+export function buildHerdrSeatPlacement(input: HerdrSeatPlacementInput): HerdrSeatPlacement {
+  const decision = planHerdrPlacement({
+    tabs: input.tabs,
+    baseTabName: input.baseTabName,
+    preferredTerminals: input.preferredTerminals,
+  });
+  if (decision.action === 'pane.split') {
+    if (input.folder.length === 0 || input.folder.includes('\0')) {
+      throw new HerdrCoreError('hc', 'invalid_address', undefined, undefined, 'split cwd is empty or contains a NUL byte');
+    }
+    const targetTab = input.tabs.find(entry => entry.id === decision.tabId);
+    return {
+      command: 'hc.run',
+      space: input.space,
+      tabId: decision.tabId,
+      pane: decision.pane,
+      folder: input.folder,
+      machine: targetTab?.machine ?? null,
+      argv: prepareSplitArgv(input.argv, input.task),
+      tabName: decision.tabName ?? input.baseTabName,
+    };
+  }
+  return {
+    command: 'tab.new',
+    args: {
+      ...(decision.name === null ? {} : { name: decision.name }),
+      space: input.space,
+      folder: input.folder,
+      argv: input.argv,
+      ...(input.task === undefined ? {} : { task: input.task }),
+      ...(input.focus === undefined ? {} : { focus: input.focus }),
+    },
+    tabName: decision.name,
+  };
+}
+
+const HERDR_ID_VALUE = /^[\x21-\x7e]{1,256}$/u;
+
+function validatedLocalHerdrId(id: string, machine: string | null): string {
+  const local = machine !== null && id.startsWith(`${machine}/`) ? id.slice(machine.length + 1) : id;
+  if (!HERDR_ID_VALUE.test(local)) throw new HerdrCoreError('hc', 'invalid_labels', undefined, undefined, 'invalid herdr.space or herdr.tab label');
+  return local;
+}
+
+function hcTabRunArgs(placement: Extract<HerdrSeatPlacement, { readonly command: 'hc.run' }>): string[] {
+  if (placement.folder.length === 0 || placement.folder.includes('\0')) {
+    throw new HerdrCoreError('hc', 'invalid_address', undefined, undefined, 'split cwd is empty or contains a NUL byte');
+  }
+  const { machine } = placement;
+  if (machine !== null && (!HERDR_ID_VALUE.test(machine) || machine.startsWith('-') || machine.includes('/'))) {
+    throw new HerdrCoreError('hc', 'invalid_address', undefined, undefined, `invalid Herdr machine ${JSON.stringify(machine)}`);
+  }
+  if (placement.argv.length === 0) {
+    throw new HerdrCoreError('hc', 'invalid_address', undefined, undefined, 'split argv cannot be empty');
+  }
+  const localSpace = validatedLocalHerdrId(placement.space, machine);
+  const localTab = validatedLocalHerdrId(placement.tabId, machine);
+  return [
+    '--bg', '--keep', '--no-parent',
+    ...(machine === null ? [] : ['--on', machine]),
+    '--cwd', placement.folder,
+    '--label', `${HERDR_APP_LABEL.space}=${localSpace}`,
+    '--label', `${HERDR_APP_LABEL.tab}=${localTab}`,
+    '--', ...placement.argv,
+  ];
+}
+
+/**
+ * Execute one `HerdrSeatPlacement`: `herdr-app do tab.new` for a new tab, or `hc run --bg --keep --no-parent --cwd`
+ * labeled with `herdr.space` and `herdr.tab` for Herdr.app adoption into an existing `< 3` pane tab.
+ */
+export function executeHerdrSeatPlacement(placement: HerdrSeatPlacement, options: HerdrCoreOptions = {}): Record<string, unknown> {
+  if (placement.command === 'tab.new') return herdrAppDo('tab.new', placement.args, options);
+  const created = hc('run', hcTabRunArgs(placement), options);
+  const validAddress = placement.machine === null ? isHcAddress : isHerdrTerminalAddress;
+  if (!isString(created.address) || !validAddress(created.address) || (created.state !== 'live' && created.state !== 'finished')) {
+    throw invalidResponse('terminal is missing address or state');
+  }
+  return { space: placement.space, tab: placement.tabId, terminal: created.address };
 }
 
 /** The single seat-terminal mapping for board reads, closeout selection and the observer. */

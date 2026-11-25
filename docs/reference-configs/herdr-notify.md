@@ -56,7 +56,7 @@ Commands for the topology steps:
 | Wait for a worker | `hc wait <t>` |
 | Close a worker pane | `herdr-app do pane.close --pane <pane>` |
 
-The board of a parent selects a worker, gatekeeper or reviewer seat by its `issue` label (an item of the parent) or its `pr` label (a pull request of the board). `--parent` is optional for that. It names the worker tab `#<n>` (`other` without it), so the worker rows keep it.
+The board of a parent selects a worker, gatekeeper or reviewer seat by its `issue` label (an item of the parent) or its `pr` label (a pull request of the board). `--parent` is optional for that. Worker tabs use `#<issue>` from `--issue` (`other` without `--issue`).
 
 A native `codex` worker seat in a linked contract worktree edits files and runs checks only. It runs no `git fetch`, `git commit` or `git push`. Its last message gives the commit subject and body, the PR title and body, and the check results. The orchestrator commits the worktree diff with that message and explicit paths only, pushes the branch and opens the PR. The orchestrator is the head owner of record and pushes each fix round; no other agent pushes to that PR. The Codex seat remains the content author and answers review threads through the orchestrator. (`pi` workers on `magpie/codex/*` commit, push, and run fix rounds directly in their worktrees.) A seat with the `net` tool group can use the network. A writable Codex seat with `net` can reach loopback services, including the Operator console and herdr-core socket (#1961).
 
@@ -93,7 +93,7 @@ Routing evaluates strictly left-to-right across the configured list after exclud
 
 `routing.claude_saving_below_remaining` defaults to 20. Claude saving mode applies when weekly remaining quota is below that percent. `routing.claude_hyper_at_or_above_remaining` defaults to 50. Claude hyper mode applies when weekly remaining quota is at or above that percent and saving does not apply; otherwise its mode is normal. Only in Claude hyper does a Claude advisor take its config entry; in normal, saving, exhausted and unknown it uses `opus` high, and the `advisor:` line of `rh quota` names it. Claude hyper routes workers as normal and does not change the orchestrator entry. Codex seats and Pi seats on `magpie/codex/` keep their configured model and effort at every quota level. A Codex advisor keeps its own configured model and effort too; a Pi advisor on `magpie/agy-cli/` uses its config entry at 50% or more `agy_gemini` weekly quota remaining and uses `magpie/agy-cli/gemini-4-neon` when the remaining quota is lower or unknown. A missing weekly reading gives an unknown mode. Quota modes are derived, never stored; the credit mode is the one stored owner choice. Reserved Claude advisor and orchestrator seats use `opus` high. Other Pi seats, tools, fleet and class lists stay as configured. An absent seats section uses defaults. Run `rh update` for the one-shot migration of stored sections (`planner` → `council`, `worker-important` → `worker-opus`, `worker-important-fast` → `worker-neon`, `gatekeeper-deep` removed, `agy_saving_below_remaining` added). When the stored section lacks `worker-neon-deep`, `rh update` adds it as `null` and preserves the saved route lists. Turn on the seat in Settings > Seats and add it to the routes you want. The Settings save checks the complete section before it writes.
 
-`rh seats launch` takes the space from `--space` or from the `herdr.space` label of the calling terminal, opens the argv in a `tab.new` of that space, and fails closed when Herdr.app opens no tab; `--json` prints the launch, the space and the placement. With `--repository-id`, the argv labels its own terminal before the agent starts: it runs `rh seats label`, which sets the seat labels on `HC_TERMINAL_ID`, and then starts the agent. The board finds seats only by these labels; a terminal without them leaves the execution axis `unavailable` (`no_seat_terminals`). When the label fails, the agent does not start and the terminal shows the error. Each start prints the new `terminal`. `<repository-id>` is the GitHub numeric repository id (`gh api repos/<owner>/<repo> --jq .id`). Leave out `--issue` and `--pr` for the orchestrator and the advisor.
+`rh seats launch` takes the space from `--space` or from the `herdr.space` label of the calling terminal, reads that space with `herdr-app ls`, joins a matching tab with fewer than 3 panes via `hc run --bg --keep --no-parent --cwd <folder> --label herdr.space=<id> --label herdr.tab=<tab>` (so `hc get --json` reports `terminal.cwd` equal to `--cwd` and the persistent shell starts there) or opens a new tab via `herdr-app do tab.new`, and fails closed when Herdr.app is unavailable or placement fails; `--json` prints the launch, the space and the placement. With `--repository-id`, the argv labels its own terminal before the agent starts: it runs `rh seats label`, which sets the seat labels on `HC_TERMINAL_ID`, and then starts the agent. The board finds seats only by these labels; a terminal without them leaves the execution axis `unavailable` (`no_seat_terminals`). When the label fails, the agent does not start and the terminal shows the error. Each start prints the new `terminal`. `<repository-id>` is the GitHub numeric repository id (`gh api repos/<owner>/<repo> --jq .id`). Leave out `--issue` and `--pr` for the orchestrator and the advisor.
 
 ### Seat reset
 
@@ -114,9 +114,9 @@ The reset log `reset-log.jsonl` tracks rewrites, retries and outcomes. A success
 
 ### Pane and tab names
 
-With `--repository-id`, `seats argv` also prints the pane name (`name`) and the base tab name (`tab`). Do not type a name.
+With `--repository-id`, `seats argv` also prints the pane name (`name`). `seats argv` always prints the base tab name (`tab`). Do not type a name.
 
-`herdr-app do tab.new` and `pane.split` set no terminal name: the `--name` of `tab.new` is the tab name, and `pane.split` takes no name. `rh seats launch` passes the base tab name as that `--name`. So a seat terminal started by the launch rows has no hc name. Only a Claude seat carries the pane name, as its session name (`-n`) in the argv. A Codex seat has no session-name flag and carries no name. Find a seat terminal with `rh board seats --json`, which reads its labels.
+`herdr-app do tab.new`, `pane.split`, and tab-adopted `hc run` (without `--name`) set no terminal name: the `--name` of `tab.new` is the tab name, and `pane.split` takes no name. `rh seats launch`, `rh board dispatch`, `rh board review`, and `rh seats council` add a pane to a matching tab with fewer than 3 panes via `hc run --bg --keep --no-parent --cwd <folder> --label herdr.space=<id> --label herdr.tab=<tab>` after confirming the tab with `herdr-app ls`, or pass the base tab name (or `<base> 2`, `<base> 3` when full) to `tab.new`. So a seat terminal started by the launch rows has no hc name. Only a Claude seat carries the pane name, as its session name (`-n`) in the argv. A Codex seat has no session-name flag and carries no name. Find a seat terminal with `rh board seats --json`, which reads its labels.
 
 The pane name is `<prefix>-<role>[-<item>][-<qualifier>]`: at most 32 characters of `a-z 0-9 -`. Examples: `rh-orch`, `rh-adv`, `rh-w-1508`, `rh-w-rel0252`, `rh-rv-1536-codex`, `aip-w-485-device`.
 
@@ -136,12 +136,12 @@ The pane name is `<prefix>-<role>[-<item>][-<qualifier>]`: at most 32 characters
 | Tab | Holds | Name |
 |---|---|---|
 | Tab 1 | the orchestrator (left), the advisor (right), one optional worker | `orch` |
-| Worker tab | up to 3 worker panes whose issues have the same parent | `#<parent>` |
-| Worker tab, no parent | up to 3 worker panes of issues without a parent | `other` |
+| Issue tab | the worker for `#<issue>`, plus its `gatekeeper` and `reviewer` split right (up to 3 panes side by side) | `#<issue>` |
+| Worker tab, no issue | up to 3 worker panes launched without `--issue` (for example release prep) | `other` |
 | Council tab | up to 3 blind `council` panes (`rh seats council`) | `council` |
-| Review tab | up to 3 reviewer panes (`gatekeeper`, `reviewer`) | `review` |
+| Review fallback tab | up to 3 reviewer panes (`gatekeeper`, `reviewer`) when the worker tab is absent or full (`PR#<pr>` with `--pr <n>`, else `review`) | `PR#<pr>` |
 
-A new pane goes into the first tab of its kind with fewer than 3 panes. When every tab of that kind is full, add ` 2`, ` 3` to the base name, for example `#1000 2`. A tab closes with its last pane. The space name stays the repository name.
+`rh seats launch`, `rh board dispatch`, `rh board review`, and `rh seats council` query `herdr-app ls` and place each new pane into the first matching tab with fewer than 3 panes via `hc run --bg --keep --no-parent --cwd <folder> --label herdr.space=<id> --label herdr.tab=<tab>` (adopted by Herdr.app into that tab with `terminal.cwd` equal to `<folder>`, because `pane.split` takes no directory option). Review seats first target the PR's live worker tab in that space (matched by `repo-harness.issue`, `repo-harness.pr`, or worktree `cwd`), then fall back to `PR#<pr>`. When every matching tab has 3 panes, they call `tab.new` with ` 2`, ` 3` added to the base name, for example `#2479 2` or `PR#2478 2`. A tab closes with its last pane. The space name stays the repository name.
 
 ### Test and Review Rules
 
