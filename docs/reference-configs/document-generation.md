@@ -5,7 +5,7 @@ Generated repos use a minimal documentation profile by default.
 ## Required
 
 - `docs/spec.md`: stable product or operator outcome.
-- `docs/architecture/index.md`: umbrella architecture ledger and diagram links.
+- `docs/architecture/archimap.html`: the single architecture entry. `docs/architecture/modules/` holds one capability doc for each module.
 - `tasks/lessons.md`: the one local task document. Issue/PR owns current and deferred work.
 - `.ai/harness/`: workflow policy, checks, handoff, failures, and run state.
 

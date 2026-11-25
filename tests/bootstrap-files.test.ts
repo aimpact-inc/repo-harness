@@ -535,7 +535,7 @@ describe("Bootstrap Script Contracts", () => {
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/active-worktree");
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/triage/inbox.md");
     expect(contract.artifacts.requiredFiles).toContain("docs/reference-configs/agentic-development-flow.md");
-    expect(contract.artifacts.requiredFiles).toContain("docs/architecture/index.md");
+    expect(contract.artifacts.requiredFiles).not.toContain("docs/architecture/index.md");
     expect(contract.artifacts.runtimeFiles).not.toContain(".ai/harness/architecture/events.jsonl");
     expect(contract.artifacts.runtimeFiles).not.toContain(".ai/harness/workstreams/events.jsonl");
     expect(contract.artifacts.requiredFiles).toContain("docs/reference-configs/external-tooling.md");

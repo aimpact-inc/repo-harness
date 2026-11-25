@@ -230,7 +230,6 @@
     "requiredFiles": [
       "docs/spec.md",
       "tasks/lessons.md",
-      "docs/architecture/index.md",
       ".ai/context/context-map.json",
       ".ai/context/capabilities.json",
       ".ai/context/capability-source-map.json",

@@ -1,7 +1,7 @@
 import { FileSyntaxError, parseJsonText } from "../../core/evidence/file-syntax";
 import { sha256Prefixed } from "../../core/evidence/sha256";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "fs";
-import { basename, join, relative, resolve, sep } from "path";
+import { join, relative, resolve, sep } from "path";
 import type { AdoptionMode } from "../../core/adoption/modes";
 import type { AdoptionOperation, AdoptionWarning, WriteFileOperation } from "../../core/adoption/operations";
 import { makeOperationId } from "../../core/adoption/operations";
@@ -321,17 +321,6 @@ function rootContextContent(): string {
   return readFileSync(join(TEMPLATE_ROOT, "root-context.md"), "utf-8");
 }
 
-function architectureIndexContent(): string {
-  return `# Architecture Index
-
-> Umbrella architecture ledger for current boundaries and diagrams.
-
-## Current Snapshot
-
-- Semantic diagram source: (none yet)
-`;
-}
-
 function deployReadmeContent(): string {
   return `# Deployment Operations
 
@@ -597,7 +586,6 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
   for (const state of STATE_FILES) operations.push(writeOperation(opts.repoRoot, state.path, state.content, "Ensure canonical harness state artifact exists", { ifMissing: true }));
   for (const file of [
     { path: "docs/researches/README.md", content: researchReadmeContent() },
-    { path: "docs/architecture/index.md", content: architectureIndexContent() },
     { path: "deploy/README.md", content: deployReadmeContent() },
     { path: "CLAUDE.md", content: rootContextContent() },
     { path: "AGENTS.md", content: rootContextContent() },
