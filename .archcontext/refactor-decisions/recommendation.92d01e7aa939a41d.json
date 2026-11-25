@@ -17,19 +17,19 @@
   ],
   "affectedNodeCount": 2,
   "regressesFrom": null,
-  "status": "accepted",
+  "status": "resolved",
   "observationMetrics": {
     "backwardEdgeCount": 1,
     "forwardEdgeCount": 1,
     "thinDirectionEdgeCount": 1,
     "totalEdgeCount": 2
   },
-  "reason": "Issue #3512: re-home the leaf files src/cli/mcp/result.ts (imports only redaction) and src/cli/mcp/version.ts (imports only package.json) into a new component below capability.runtime-harness.mcp-sidecar, so mcp-sidecar, component.mcp-sidecar.primary and general-repo-access depend on it in one direction.",
+  "reason": "component.mcp-sidecar.tool-result owns result.ts and version.ts; the pair cycle is absent at the verified head.",
   "actor": {
     "kind": "cli",
     "id": "cli-user"
   },
-  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "decidedAt": "2026-11-25T07:22:49.000Z",
   "provenance": {
     "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
     "assessmentDigest": "sha256:51101894a0cfd96c1c8077c8b5e294c121b71d55dbf01c457e03d443f6c3aa94",
@@ -37,6 +37,7 @@
   },
   "snapshotDigest": "sha256:658e87901c2e55d6a68392e990c38024bb0bf68f3512279ef132e0bc73ed8542",
   "evidenceDigest": "sha256:51101894a0cfd96c1c8077c8b5e294c121b71d55dbf01c457e03d443f6c3aa94",
+  "resolutionDigest": "sha256:25af04c3ff606840a0b5f2ee1b6ac6cfe333260b4bf194563b68ffecc9f47951",
   "scope": {
     "kind": "repository"
   },
