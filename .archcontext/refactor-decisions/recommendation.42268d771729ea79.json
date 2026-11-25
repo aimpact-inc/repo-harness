@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.42268d771729ea79",
+  "fingerprint": "sha256:f58fbc4dea1af407e54899be119b1fd115ae42b8201c2c528201230629884321",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.hook-adapters.edit-guards|component.hook-adapters.primary",
+    "subjectSelectorId": "subject.repository.d949fc7625980374"
+  },
+  "affectedNodeIds": [
+    "component.hook-adapters.edit-guards",
+    "component.hook-adapters.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 2,
+    "forwardEdgeCount": 3,
+    "thinDirectionEdgeCount": 2,
+    "totalEdgeCount": 5
+  },
+  "reason": "Resolved in #3505 by the shared Hook Contracts owner.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T09:56:03.000Z",
+  "provenance": {
+    "headSha": "068a42ab166d80d570bb3d7aed994dac37506ab1",
+    "assessmentDigest": "sha256:8973ba8dcb1ce6ba432768594cae2c1e20b242e91d89e11f73c874c3b6e34433",
+    "baselineSnapshotDigest": "sha256:d79ac6e8b10ead4696e8b8c8239aaf1efdcddf04b268ae2c062e73f9888cdbdb"
+  },
+  "snapshotDigest": "sha256:d79ac6e8b10ead4696e8b8c8239aaf1efdcddf04b268ae2c062e73f9888cdbdb",
+  "evidenceDigest": "sha256:8973ba8dcb1ce6ba432768594cae2c1e20b242e91d89e11f73c874c3b6e34433",
+  "resolutionDigest": "sha256:dbda0d86434472888f8c98056fa92b76569cccecd3b654f93cfb1a62285e76bc",
+  "scope": {
+    "kind": "repository"
+  },
+  "importNodeLimit": 100000,
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.d949fc7625980374",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.hook-adapters.edit-guards",
+        "component.hook-adapters.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.55deec48a718e5f1"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "relation",
+      "target": "relation.hook-adapters.edit-guards.route-runtime",
+      "required": true
+    }
+  ]
+}

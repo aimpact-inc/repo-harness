@@ -280,7 +280,7 @@ sequenceDiagram
 | host-installer → contracts | calls | `buildManagedHooks` 调用 `routesForHost`（`managed-entries.ts`） |
 | route-runtime → edit-guards | calls | `handlers` 绑定 `runMutationGuard` 和 `runBashMutationGuard`（`handler-registry.ts`） |
 | route-runtime → session-lifecycle | calls | `handlers` 绑定 Stop、SessionStart、subagent 和 inbox handler（`handler-registry.ts`） |
-| route-runtime、edit-guards、session-lifecycle → contracts | depends-on | runtime 和 handler 共用 input、结果类型和上下文结构。Stop 与 guard 共用目录清单，两个 guard 模块共用拒绝契约 |
+| route-runtime、edit-guards、session-lifecycle → contracts | depends-on | runtime 和 handler 共用 input、结果类型和上下文结构。Stop 的路径通知读取目录清单。两个 guard 模块共用拒绝契约 |
 | hook-root → edit-guards | calls | `hook-entry.ts` 为 safety guard 注册 install ledger reader |
 
 组件到其他 capability 的关系（生成区 §1.4 不显示组件级出向关系，所以列在这里）：

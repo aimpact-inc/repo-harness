@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.40d93de18a1e7689",
+  "fingerprint": "sha256:bc9130e88dfd3ba34d117a503bd9b111e01485f1f77877284f9dd364ec98cb78",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.hook-adapters.primary|component.hook-adapters.session-lifecycle",
+    "subjectSelectorId": "subject.repository.813d642a53adc50a"
+  },
+  "affectedNodeIds": [
+    "component.hook-adapters.primary",
+    "component.hook-adapters.session-lifecycle"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 7,
+    "forwardEdgeCount": 4,
+    "thinDirectionEdgeCount": 4,
+    "totalEdgeCount": 11
+  },
+  "reason": "Resolved in #3505 by the shared Hook Contracts owner.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T09:56:03.000Z",
+  "provenance": {
+    "headSha": "068a42ab166d80d570bb3d7aed994dac37506ab1",
+    "assessmentDigest": "sha256:75a56d05f05b9a8ddb70327ed14b8e5fc4cfbd1306f2910a670958ba955adc10",
+    "baselineSnapshotDigest": "sha256:ef396c4caa488714ef7236013608a8107084de7204a1dd87384e8e547f62d257"
+  },
+  "snapshotDigest": "sha256:ef396c4caa488714ef7236013608a8107084de7204a1dd87384e8e547f62d257",
+  "evidenceDigest": "sha256:75a56d05f05b9a8ddb70327ed14b8e5fc4cfbd1306f2910a670958ba955adc10",
+  "resolutionDigest": "sha256:7c5066cdd2e755a3b002557eef44578d93c33fdb3858cfc6e9e983886ace51f5",
+  "scope": {
+    "kind": "repository"
+  },
+  "importNodeLimit": 100000,
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.813d642a53adc50a",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.hook-adapters.primary",
+        "component.hook-adapters.session-lifecycle"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.2fb2065a43962bab"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "relation",
+      "target": "relation.hook-adapters.session-lifecycle.route-runtime",
+      "required": true
+    }
+  ]
+}
