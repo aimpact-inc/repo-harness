@@ -3635,6 +3635,40 @@ describe('Global Working Rules refresh during install and update', () => {
     expect(readFileSync(path, 'utf8')).toBe(edited);
   }), 60_000);
 
+  test.each(['AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'])('Pi install preserves the existing %s context', (name) => withRulesRuntime(({ home, run }) => {
+    const dir = join(home, '.pi', 'agent');
+    const path = join(dir, 'AGENTS.md');
+    const alternate = join(dir, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(alternate, userBefore);
+    const sameFile = existsSync(path); // AGENTS.MD is AGENTS.md on case-insensitive filesystems.
+    const result = run('en', false, 'both', ['pi']);
+    expect(result.exitCode).toBe(0);
+    if (sameFile) {
+      expect(readFileSync(path, 'utf8')).toStartWith(userBefore);
+    } else {
+      const piCandidate = name === 'CLAUDE.MD' && existsSync(join(dir, 'CLAUDE.md')) ? 'CLAUDE.md' : name;
+      expect(rulesStep(result)).toMatchObject({ status: 'skipped', detail: expect.stringContaining(`would take precedence over ${join(realpathSync(dir), piCandidate)} in Pi`) });
+      expect(existsSync(path)).toBe(false);
+      expect(readFileSync(alternate, 'utf8')).toBe(userBefore);
+    }
+  }), 30_000);
+
+  test('Pi update and a reporting-language save refuse a higher-priority context', () => withRulesRuntime(({ home, run }) => {
+    const dir = join(home, '.pi', 'agent');
+    expect(run('en', false, 'both', ['pi']).exitCode).toBe(0);
+    const path = join(dir, 'AGENTS.md');
+    const installed = readFileSync(path, 'utf8');
+    const override = join(dir, 'AGENTS.override.md');
+    writeFileSync(override, userBefore);
+    const result = run(undefined, true, 'both', ['pi']);
+    expect(result.exitCode).toBe(0);
+    expect(rulesStep(result)).toMatchObject({ status: 'skipped', detail: expect.stringContaining('AGENTS.override.md') });
+    expect(setReportingLanguage(home, ROOT, ['pi'], 'zh-CN')).toMatchObject({ status: 'skipped', changed_hosts: [] });
+    expect(readFileSync(path, 'utf8')).toBe(installed);
+    expect(readFileSync(override, 'utf8')).toBe(userBefore);
+  }), 30_000);
+
   test.skipIf(process.platform === 'win32')('install refuses links at the Pi rules file and both path components', () => {
     for (const components of [['.pi'], ['.pi', 'agent'], ['.pi', 'agent', 'AGENTS.md']]) {
       withRulesRuntime(({ home, run }) => {

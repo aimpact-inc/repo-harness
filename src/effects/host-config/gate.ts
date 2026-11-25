@@ -1,4 +1,4 @@
-import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
@@ -625,8 +625,39 @@ function withDirectoryIdentities(
   return { ...ledger, directories, directory_identities: filtered };
 }
 
+// Pi 1.6.0 resource-loader.js, loadContextFileFromDir, selects the first readable regular file.
+const PI_CONTEXT_OVERRIDE = 'AGENTS.override.md';
+const PI_CONTEXT_FILE = 'AGENTS.md';
+const PI_CONTEXT_FALLBACKS = ['AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'] as const;
+
 export function piGlobalRulesPathAt(home: string): string {
-  return join(home, '.pi', 'agent', 'AGENTS.md');
+  return join(home, '.pi', 'agent', PI_CONTEXT_FILE);
+}
+
+function readablePiContext(path: string): boolean {
+  try {
+    if (!statSync(path, { throwIfNoEntry: false })?.isFile()) return false;
+    accessSync(path, constants.R_OK);
+    return true;
+  } catch { return false; }
+}
+
+function piContextFallback(path: string, omit?: string): string | undefined {
+  return PI_CONTEXT_FALLBACKS.map(name => join(dirname(path), name)).find(candidate =>
+    readablePiContext(candidate) && (omit === undefined || realpathSync.native(candidate) !== omit));
+}
+
+function piContextOverride(path: string): string | undefined {
+  const override = join(dirname(path), PI_CONTEXT_OVERRIDE);
+  return readablePiContext(override) ? override : undefined;
+}
+
+/** Call after the Pi path guard, before reading or writing AGENTS.md. */
+export function piRulesPrecedenceConflict(path: string): string | null {
+  const override = piContextOverride(path);
+  if (override !== undefined) return `${override} takes precedence over ${path} in Pi`;
+  const fallback = readablePiContext(path) ? undefined : piContextFallback(path);
+  return fallback === undefined ? null : `${path} would take precedence over ${fallback} in Pi`;
 }
 
 export function piGlobalRulesHostPath(env: NodeJS.ProcessEnv, paths = hostConfigPaths(env)): HostPath {
@@ -839,6 +870,10 @@ function applyChanges(paths: HostConfigPaths, changes: readonly HostConfigFileCh
     const isMcp = path === antigravity?.mcp;
     const guarded = isHooks || isMcp || path === antigravity?.rules || path === user?.piRules;
     user?.checkFile(path);
+    if (path === user?.piRules) {
+      const conflict = piRulesPrecedenceConflict(path);
+      if (conflict !== null) throw new HostConfigError('host_config_invalid_path', conflict);
+    }
     const { observation, bytes } = observeFile(path);
     const preimage = expectedOf(observation, path);
     const content = decode(bytes, path);
@@ -2042,6 +2077,14 @@ function replaceRevertedAntigravityMcp(path: HostPath, bytes: Buffer, current: E
   undo = replaceAntigravityMcp(path, bytes, current, result);
 }
 
+function planPiRulesContainerRevert(path: HostPath, record: FileRecord, committed: boolean, plan: FileRevertPlan): FileRevertPlan {
+  if (record.kind !== 'created' || record.baseline.state !== 'known' || record.baseline.existed
+    || !committed || plan.write?.kind !== 'replace' || plan.write.content.length !== 0 || piContextOverride(path) !== undefined) return plan;
+  // A case-insensitive lookup of AGENTS.MD can name the same entry as AGENTS.md.
+  if (piContextFallback(path, realpathSync.native(path)) === undefined) return plan;
+  return { ...plan, entry: { path, action: 'removed', baseline: 'proved' }, write: { kind: 'remove' } };
+}
+
 /**
  * A file that hashes to `committed` with no external change and a backup (or
  * that rh created) reverts as a whole: the backup, or no file, is exactly the
@@ -2078,11 +2121,13 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
     const own = all.filter((entry) => matchesFilter(entry, filter) && (!fragmentOnly || (entry.kind === 'add'
       && (isHooks ? isAntigravityFragment(entry) : isAntigravityCodegraphFragment(entry)))));
     if ((filtered || fragmentOnly) && !own.length) continue;
-    const plan = planFileRevert({
-      path, format: record.format, kind: record.kind, hasBackup: !fragmentOnly && record.backup !== null, externalChange: record.external_change, committed: isCommitted(record, current),
+    const committed = isCommitted(record, current);
+    const revert = planFileRevert({
+      path, format: record.format, kind: record.kind, hasBackup: !fragmentOnly && record.backup !== null, externalChange: record.external_change, committed,
       existed: current.existed, requestedPresent: only !== undefined && requestedPresent(only[index]!), bytes, backup: () => readVault(paths, record.backup!), own, all,
       filtered: filtered || preserveContainer, preserveContainer, baseline: record.baseline, backupReference: record.backup,
     });
+    const plan = !filtered && path === user?.piRules ? planPiRulesContainerRevert(path, record, committed, revert) : revert;
     report.push(plan.entry);
     const removed = new Set(plan.removed);
     const write = plan.write;
@@ -2090,7 +2135,7 @@ function revertFiles(paths: HostConfigPaths, only: readonly string[] | undefined
       const files = { ...state.files };
       if (plan.record === 'drop') delete files[path];
       else if (plan.record === 'update' && write?.kind === 'replace') {
-        files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(write.content) }, external_change: record.external_change || !isCommitted(record, current) };
+        files[path] = { ...record, committed: { type: 'file', sha256: sha256Prefixed(write.content) }, external_change: record.external_change || !committed };
       }
       return { ...state, files, fragments: state.fragments.filter((entry) => !removed.has(entry)),
         retired: plan.record === 'drop' ? retire(state.retired, materialOf(record)) : state.retired };

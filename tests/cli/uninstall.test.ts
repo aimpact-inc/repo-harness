@@ -459,6 +459,24 @@ test.each(['outside edit', 'edited block', 'absent', 'same bytes', 'restored'] a
   if (state === 'restored' || state === 'edited block') expect(lstatSync(path).ino).toBe(inode!);
 }));
 
+test.each([true, false])('Pi rules uninstall removes only an empty created file that shadows a fallback (%s)', (withFallback) => fixture((home, env) => {
+  const root = join(import.meta.dir, '../..');
+  const path = join(home, '.pi', 'agent', 'AGENTS.md');
+  const fallback = join(home, '.pi', 'agent', 'CLAUDE.md');
+  expect(applyGlobalContextRefresh(preflightGlobalContextRefresh(root, home, ['pi'], 'en'), home).status).toBe('ok');
+  if (withFallback) writeFileSync(fallback, 'Personal Pi rules.\n');
+  const installed = readFileSync(path, 'utf8');
+  const preview = runUserUninstall({ target: 'both', env, dryRun: true });
+  expect(readFileSync(path, 'utf8')).toBe(installed);
+  const result = runUserUninstall({ target: 'both', env });
+  expect(result.status, result.lines.join('\n')).toBe('complete');
+  expect(result.items.find(item => item.path === path)).toEqual(preview.items.find(item => item.path === path));
+  if (withFallback) {
+    expect(existsSync(path)).toBe(false);
+    expect(readFileSync(fallback, 'utf8')).toBe('Personal Pi rules.\n');
+  } else expect(readFileSync(path, 'utf8')).toBe('');
+}));
+
 test.skipIf(process.platform === 'win32')('Pi rules uninstall refuses a replacement link to the installed bytes', () => fixture((home, env) => {
   const root = join(import.meta.dir, '../..');
   const path = join(home, '.pi', 'agent', 'AGENTS.md');

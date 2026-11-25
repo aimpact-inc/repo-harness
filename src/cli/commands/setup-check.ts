@@ -30,7 +30,7 @@ import { ReviewBaseUnresolvedError } from '../../effects/adoption/standard-plan'
 import type { AdoptionPlan } from '../../core/adoption/operations';
 import { isRepoHarnessSourceCheckout } from '../../effects/source-checkout';
 import { resolveRepoRoot } from '../hook/runtime';
-import { resolveUserConfigFile } from '../../effects/host-config/gate';
+import { piRulesPrecedenceConflict, resolveUserConfigFile } from '../../effects/host-config/gate';
 import {
   GLOBAL_RULES_EDITED,
   GLOBAL_RULES_UNBALANCED,
@@ -534,8 +534,11 @@ function globalRulesChecks(
       });
     };
     if (host === 'pi') {
-      try { resolveUserConfigFile({ ...env, HOME: home }, filePath); }
-      catch (error) { check('fail', (error as Error).message); continue; }
+      try {
+        const path = resolveUserConfigFile({ ...env, HOME: home }, filePath);
+        const conflict = piRulesPrecedenceConflict(path);
+        if (conflict !== null) { check('fail', conflict); continue; }
+      } catch (error) { check('fail', (error as Error).message); continue; }
     }
     const exists = existsSync(filePath);
     let content: string | null = null;

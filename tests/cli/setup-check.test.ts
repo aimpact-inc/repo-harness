@@ -297,8 +297,15 @@ describe('setup check command', () => {
       expect(report.agent_actions.find(({ id }) => id === 'global-rules.insert')?.targets).toContain(path);
       expect(existsSync(path)).toBe(false);
       mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
+      const alternate = join(home, '.pi', 'agent', 'CLAUDE.md');
+      writeFileSync(alternate, 'Personal rules.\n');
+      const conflict = run(selected);
+      expect(checkPi(conflict)).toMatchObject({ status: 'fail', detail: expect.stringContaining('CLAUDE.md') });
+      expect(conflict.agent_actions.find(({ id }) => id === 'global-rules.insert')?.targets).not.toContain(path);
       writeFileSync(path, currentRulesBlock());
       expect(checkPi(run(selected))?.status).toBe('ok');
+      writeFileSync(join(home, '.pi', 'agent', 'AGENTS.override.md'), 'Personal override.\n');
+      expect(checkPi(run(selected))).toMatchObject({ status: 'fail', detail: expect.stringContaining('AGENTS.override.md') });
     });
   });
 
