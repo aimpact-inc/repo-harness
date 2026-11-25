@@ -265,6 +265,7 @@ sequenceDiagram
 ### 2026-11-25 Account home resolver moved to primary (#3513)
 
 - `src/effects/repo-harness-home.ts` 从 `component.execution-primitives.repository-registry` 移到 `component.execution-primitives.primary`。只改模型，源码与 import 不变。
+- 两条 account home 依赖关系同时改到新 owner：`relation.execution-primitives.bot-registry.repository-registry` 与 `relation.execution-primitives.notify-read.repository-registry` 改成 `relation.execution-primitives.{bot-registry,notify-read}.primary`，文件名也随之改名。两者描述的都是 account home 解析，不是注册仓库记录。
 - 原因：目录锁与 process-group registry 导入这个零依赖文件，`repo-registry.ts` 又导入锁、`atomic-append` 与 `git/runner`，两个组件之间因此有 3 对 3 的文件级环。该文件只导入 `node:path`，属于原语层。
 - `rh arch refactor recommendations` 的 `recommendation.4a074a288f81d9ad` 不再出现。
 
