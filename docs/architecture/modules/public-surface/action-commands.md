@@ -1,5 +1,5 @@
 # public-surface/action-commands 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-action-commands" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4eecf511c729936e3c54350845aebca32665e4c24b0077bde2bf38e1aca72681" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-action-commands" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:cd006683223819e1d2ee3feb331df1a4415bc967161cdd774b64f7dc3598308d" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.public-surface.action-commands`(kind `capability`)
 > **Matched Prefixes**:`assets/skill-commands/**`、`assets/skills/**`、`assets/skill-version.json`、`.claude/.skill-version`、`src/core/skill-surface/**`、`scripts/skill-surface-select.ts`、`scripts/run-skill-routing-eval.ts`、`scripts/check-skill-version.ts`
@@ -75,6 +75,7 @@ flowchart LR
 - `component.action-commands.primary`:
   - `depends-on` → `component.action-commands.bundled-skills` — Name bundled skill packages as manifest package sources
 - `component.action-commands.skill-surface-catalog`:
+  - `calls` → `component.execution-primitives.host-roots` — Resolve the destination roots for the shell skill sync projection
   - `reads` → `component.action-commands.primary` — Read manifest.json as the single catalog authority
 - `component.action-commands.skill-surface-catalog-core`:
   - 無。

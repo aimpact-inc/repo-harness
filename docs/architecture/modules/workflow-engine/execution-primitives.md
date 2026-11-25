@@ -1,6 +1,6 @@
 # workflow-engine/execution-primitives 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ad2baff055778fd12f11186ccb68ac5a5d93a39b53554303285c23397245f322" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:56041c49d246d026aac6bff1664392c97a82c887975237622b8fc157f6ee2e33" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.execution-primitives`(kind `capability`)
 > **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
@@ -17,8 +17,10 @@ Runs bounded child processes and provides the canonical directory lock and Git c
 flowchart LR
   p1_capability_workflow_engine_execution_primitives_b3033934["Execution Primitives"]:::component
   p1_component_execution_primitives_bot_registry_5584811f["Bot Registry"]:::component
+  p1_component_execution_primitives_checkout_filesystem_8123fc5d["Checkout Filesystem Primitives"]:::component
   p1_component_execution_primitives_cli_layer_61a69b63["Execution Primitives (cli)"]:::component
   p1_component_execution_primitives_hc_client_0c8c8ef8["hc Client"]:::component
+  p1_component_execution_primitives_host_roots_5aec22e3["Host Root Resolution"]:::component
   p1_component_execution_primitives_notify_read_829d6cce["Notify Read Contract"]:::component
   p1_component_execution_primitives_notify_read_core_614397cc["Notify Read Contract (core)"]:::component
   p1_component_execution_primitives_primary_800678c8["Bounded Process And Lock Primitives"]:::component
@@ -30,10 +32,10 @@ flowchart LR
   p1_component_execution_primitives_task_message_claim_dbe6af55["Task Message Claim Primitives"]:::component
   p1_component_execution_primitives_task_session_record_e7a96008["Task Session Record"]:::component
   p1_component_execution_primitives_terminal_core_39d5e0ae["Terminal Pin and Pane Prefix"]:::component
-  p1_component_execution_primitives_bot_registry_5584811f -->|"Resolve the account home of the Bot records"| p1_component_execution_primitives_repository_registry_49e2fbe9
+  p1_component_execution_primitives_bot_registry_5584811f -->|"Resolve the account home of the Bot records"| p1_component_execution_primitives_primary_800678c8
   p1_component_execution_primitives_cli_layer_61a69b63 -->|"Register a Bot record for bots register"| p1_component_execution_primitives_bot_registry_5584811f
   p1_component_execution_primitives_notify_read_829d6cce -->|"Decode the relay delivery record with its one decoder#44; and give the empty record when no file exists"| p1_component_execution_primitives_notify_read_core_614397cc
-  p1_component_execution_primitives_notify_read_829d6cce -->|"Root the notify install record#44; notify.env and the relay delivery record in the account-level repo-harness home."| p1_component_execution_primitives_repository_registry_49e2fbe9
+  p1_component_execution_primitives_notify_read_829d6cce -->|"Root the notify install record#44; notify.env and the relay delivery record in the account-level repo-harness home."| p1_component_execution_primitives_primary_800678c8
   p1_capability_workflow_engine_execution_primitives_b3033934 -->|"Run a bounded child process"| p1_component_execution_primitives_primary_800678c8
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
   classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
@@ -41,8 +43,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:ddd9c076d52de2a54d69581a6b0f6be34e472155113555035a4654c128c7b748`).
-- Semantic nodes: `15`; declared relations: `5`.
+- Proof: `proven` (`sha256:e8ad6dfa719ee9e635a5bb78c68c1839c6c8228507d0cd2ea32185b0c41a21b5`).
+- Semantic nodes: `17`; declared relations: `5`.
 
 ### 1.2 模組職責表
 
@@ -108,15 +110,19 @@ flowchart LR
 組件出向關係:
 
 - `component.execution-primitives.bot-registry`:
-  - `reads` → `component.execution-primitives.repository-registry` — Resolve the account home of the Bot records
+  - `reads` → `component.execution-primitives.primary` — Resolve the account home of the Bot records
+- `component.execution-primitives.checkout-filesystem`:
+  - 無。
 - `component.execution-primitives.cli-layer`:
   - `calls` → `component.execution-primitives.bot-registry` — Register a Bot record for bots register
 - `component.execution-primitives.hc-client`:
   - `depends-on` → `capability.organization.board` — Implement the board host port (seat terminals by parent label and the hc version) and the attention host port (start watcher terminals with hc run, read watcher terminals, and send to and wait on seat terminals)
   - `calls` → `external.herdr-core` — Run the hc CLI for its callers and parse its JSON output. For the board and attention host ports, list seat and watcher terminals, read the hc version, start watcher terminals with hc run, and send to and wait on seat terminals.
+- `component.execution-primitives.host-roots`:
+  - 無。
 - `component.execution-primitives.notify-read`:
   - `reads` → `component.execution-primitives.notify-read-core` — Decode the relay delivery record with its one decoder, and give the empty record when no file exists
-  - `reads` → `component.execution-primitives.repository-registry` — Root the notify install record, notify.env and the relay delivery record in the account-level repo-harness home.
+  - `reads` → `component.execution-primitives.primary` — Root the notify install record, notify.env and the relay delivery record in the account-level repo-harness home.
 - `component.execution-primitives.notify-read-core`:
   - 無。
 - `component.execution-primitives.primary`:
@@ -144,13 +150,15 @@ flowchart LR
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
 | `component.execution-primitives.bot-registry` | Bot Registry | `1–2` 個文件 / `200–500` 行 | 未宣告 |
+| `component.execution-primitives.checkout-filesystem` | Checkout Filesystem Primitives | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.cli-layer` | Execution Primitives (cli) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.hc-client` | hc Client | `1–2` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.execution-primitives.host-roots` | Host Root Resolution | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.notify-read` | Notify Read Contract | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.execution-primitives.notify-read-core` | Notify Read Contract (core) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.primary` | Bounded Process And Lock Primitives | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.execution-primitives.public-projections` | Public Text and Worktree Views | `2–5` 個文件 / `100–200` 行 | 未宣告 |
-| `component.execution-primitives.repository-registry` | Repository Registry and Account Home | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.execution-primitives.repository-registry` | Repository Registry and Account Home | `1–2` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.execution-primitives.runtime-closeout` | Runtime Closeout | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.secret-patterns` | Secret Patterns | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.session-artifact-io` | Immutable Session Artifact I/O | `1–2` 個文件 / `50–100` 行 | 未宣告 |
@@ -160,7 +168,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:ddd9c076d52de2a54d69581a6b0f6be34e472155113555035a4654c128c7b748`); selectors `5/5`.
+> **Proof**: `proven` (`sha256:e8ad6dfa719ee9e635a5bb78c68c1839c6c8228507d0cd2ea32185b0c41a21b5`); selectors `5/5`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
