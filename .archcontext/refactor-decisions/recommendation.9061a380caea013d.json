@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.9061a380caea013d",
+  "fingerprint": "sha256:693b86f261daf8dc21106d61b345c5f2c74db1354e3bc892afc4cbf9a214151b",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.adoption.effects-layer|component.hook-adapters.host-config-effects",
+    "subjectSelectorId": "subject.repository.28e72a6fd77cfc6b"
+  },
+  "affectedNodeIds": [
+    "component.adoption.effects-layer",
+    "component.hook-adapters.host-config-effects"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 5,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 6
+  },
+  "reason": "Resolved in #3506 by moving the shared filesystem and root helpers under Execution Primitives.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:24:17.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:92c1c24362390d6df74d52ef3d15c55f9108b7fda2afb56c0a40f49d72251680",
+    "baselineSnapshotDigest": "sha256:6ba37c1c513d9ad70182a1caafa86348b2801433ace72f38d349722c97375472"
+  },
+  "snapshotDigest": "sha256:6ba37c1c513d9ad70182a1caafa86348b2801433ace72f38d349722c97375472",
+  "evidenceDigest": "sha256:92c1c24362390d6df74d52ef3d15c55f9108b7fda2afb56c0a40f49d72251680",
+  "resolutionDigest": "sha256:82b12fdc2bb4905a259b14f210980106c541617d63def2c61a9829179e5dd3c3",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.28e72a6fd77cfc6b",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.adoption.effects-layer",
+        "component.hook-adapters.host-config-effects"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.4834eacd3f941922"
+    }
+  ]
+}

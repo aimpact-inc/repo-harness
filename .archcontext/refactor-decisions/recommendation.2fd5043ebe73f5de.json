@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.2fd5043ebe73f5de",
+  "fingerprint": "sha256:6d0feaa88d32a55ada00282a31b21302caf104bffd5b103c8dfd0cd4734edfc1",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.adoption.effects-layer|component.global-runtime-reconciliation.primary",
+    "subjectSelectorId": "subject.repository.558cb26282abf546"
+  },
+  "affectedNodeIds": [
+    "component.adoption.effects-layer",
+    "component.global-runtime-reconciliation.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 4,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 5
+  },
+  "reason": "Resolved in #3506 by moving the shared filesystem and root helpers under Execution Primitives.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:24:17.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:253a43ee6592ebb49bd53378b215b9deec2cfbf1bed26a4092cb67359155d57c",
+    "baselineSnapshotDigest": "sha256:60a74faa535fccceb8b752660e3bd1468661c9a039e5fcaa9fc063afb6695f19"
+  },
+  "snapshotDigest": "sha256:60a74faa535fccceb8b752660e3bd1468661c9a039e5fcaa9fc063afb6695f19",
+  "evidenceDigest": "sha256:253a43ee6592ebb49bd53378b215b9deec2cfbf1bed26a4092cb67359155d57c",
+  "resolutionDigest": "sha256:1fa7fe8670181c0a418a4be9883754967351e67959b638b9ad432b3a8e594492",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.558cb26282abf546",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.adoption.effects-layer",
+        "component.global-runtime-reconciliation.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.8492a85c2f9a94e6"
+    }
+  ]
+}

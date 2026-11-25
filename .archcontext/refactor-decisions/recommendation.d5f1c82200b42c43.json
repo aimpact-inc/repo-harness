@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.d5f1c82200b42c43",
+  "fingerprint": "sha256:b7c88e7a03647a30b549aef3b763769572d148413de69c776a25079b2db293aa",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.global-runtime-reconciliation.primary|component.hook-adapters.host-config-effects",
+    "subjectSelectorId": "subject.repository.3b89511d4f9f7330"
+  },
+  "affectedNodeIds": [
+    "component.global-runtime-reconciliation.primary",
+    "component.hook-adapters.host-config-effects"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 2,
+    "forwardEdgeCount": 3,
+    "thinDirectionEdgeCount": 2,
+    "totalEdgeCount": 5
+  },
+  "reason": "Resolved in #3506 by moving the shared filesystem and root helpers under Execution Primitives.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:24:17.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:99f93e60db0e810724795033f342492d57ac2389b9c1695dbbf2da6bb766d9e2",
+    "baselineSnapshotDigest": "sha256:7a0f39c2ad15aa191212edac9d79dccd4c8b6d51adf084cecdcb2d4bb28c1132"
+  },
+  "snapshotDigest": "sha256:7a0f39c2ad15aa191212edac9d79dccd4c8b6d51adf084cecdcb2d4bb28c1132",
+  "evidenceDigest": "sha256:99f93e60db0e810724795033f342492d57ac2389b9c1695dbbf2da6bb766d9e2",
+  "resolutionDigest": "sha256:63ebfd2f17e4fd9982e2036b28f0fae84e87e132d2c61d0c84ed4550ebf56c3c",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.3b89511d4f9f7330",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.global-runtime-reconciliation.primary",
+        "component.hook-adapters.host-config-effects"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.cac68cdfe7c9b306"
+    }
+  ]
+}

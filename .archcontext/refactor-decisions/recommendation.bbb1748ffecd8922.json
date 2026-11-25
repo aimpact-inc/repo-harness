@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.bbb1748ffecd8922",
+  "fingerprint": "sha256:5a6d052a51a721083bb3182ee6113b3d57f34f1dcec98a6fd6fef17840a3f7f7",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "residual-cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "cycle:scc.2d72f4adae9bc242",
+    "subjectSelectorId": "subject.repository.d957b4242fab050c"
+  },
+  "affectedNodeIds": [
+    "component.adoption.effects-layer",
+    "component.global-runtime-reconciliation.primary",
+    "component.hook-adapters.host-config-effects"
+  ],
+  "affectedNodeCount": 3,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "cycleEdgeCount": 3,
+    "memberCount": 3
+  },
+  "reason": "Resolved in #3506 by moving the shared filesystem and root helpers under Execution Primitives.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:24:17.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:df97573a6ade97d61e2abdcd8ddedc9beab26870c8d5a60c331c255215b98520",
+    "baselineSnapshotDigest": "sha256:32b394a25b2dad31698492edd8114f6489e90a2d525703048b2b0b0069ad28a2"
+  },
+  "snapshotDigest": "sha256:32b394a25b2dad31698492edd8114f6489e90a2d525703048b2b0b0069ad28a2",
+  "evidenceDigest": "sha256:df97573a6ade97d61e2abdcd8ddedc9beab26870c8d5a60c331c255215b98520",
+  "resolutionDigest": "sha256:63113c43d4a31a863f01d2d119ffc8a682404ea5d907e3d77116ac1f2cdb4db2",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.residualCycleMemberCount",
+      "subjectSelectorId": "subject.repository.d957b4242fab050c",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.adoption.effects-layer",
+        "component.global-runtime-reconciliation.primary",
+        "component.hook-adapters.host-config-effects"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.d561b2d4f70079f8"
+    }
+  ]
+}
