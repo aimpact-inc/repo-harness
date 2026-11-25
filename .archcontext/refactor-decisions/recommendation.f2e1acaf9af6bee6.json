@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.f2e1acaf9af6bee6",
+  "fingerprint": "sha256:a68c4952046ea7abfdb6201798a9b8117154d05211ef1de1dfa0ae77c76f7440",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.global-runtime-reconciliation.primary|component.workflow-state.coordination-plane",
+    "subjectSelectorId": "subject.repository.a7ad2215cdba3673"
+  },
+  "affectedNodeIds": [
+    "component.global-runtime-reconciliation.primary",
+    "component.workflow-state.coordination-plane"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "accepted",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 2
+  },
+  "reason": "Issue #3508 moves fixed host GitHub CLI resolution to an execution primitive and preserves the acceptance receipt runtime path and worktree cleanup refusals.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:d94dacdb8df17501b7afea0a7079500b61894da2161ba74ae71b77bc9c191ecf",
+    "baselineSnapshotDigest": "sha256:3e77d3e289d93b54f4d6b291cd39427bc023aadd5fcddf94e874faa67755ca8e"
+  },
+  "snapshotDigest": "sha256:3e77d3e289d93b54f4d6b291cd39427bc023aadd5fcddf94e874faa67755ca8e",
+  "evidenceDigest": "sha256:d94dacdb8df17501b7afea0a7079500b61894da2161ba74ae71b77bc9c191ecf",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.a7ad2215cdba3673",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.global-runtime-reconciliation.primary",
+        "component.workflow-state.coordination-plane"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.976ff540321313b4"
+    }
+  ],
+  "killList": [
+    {
+      "kind": "symbol",
+      "target": "src/effects/runtime/protected-helper-platform.ts#resolveTrustedGhExecutable",
+      "required": true
+    }
+  ]
+}

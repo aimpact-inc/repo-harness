@@ -7,13 +7,13 @@ import { fileURLToPath } from 'node:url';
 import {
   nativeWindowsSystemToolsDirectory,
   resolveTrustedGhExecutable,
-  type ProtectedHelperFileAccess,
-} from '../../src/effects/runtime/protected-helper-platform';
+  type ExecutableFileAccess,
+} from '../../src/effects/runtime/trusted-executable';
 
 const GH = 'C:\\Program Files\\GitHub CLI\\gh.exe';
 const SYSTEM = 'C:\\Windows\\System32';
 type Kind = 'file' | 'directory' | 'symlink';
-function files(entries: Record<string, Kind>, redirected: Record<string, string> = {}): Pick<ProtectedHelperFileAccess, 'exists' | 'lstat' | 'realpath'> {
+function files(entries: Record<string, Kind>, redirected: Record<string, string> = {}): ExecutableFileAccess {
   return {
     exists: path => entries[path] !== undefined,
     lstat: path => ({
@@ -142,7 +142,7 @@ const nativeWindows = process.platform === 'win32' ? test : test.skip;
 // diagnostics below do not claim that the original cause is confirmed.
 const COLD_GH_LAUNCH_MS = 45_000;
 nativeWindows('native Windows executes the preinstalled fixed gh with hostile caller environment', () => {
-  const module = fileURLToPath(new URL('../../src/effects/runtime/protected-helper-platform.ts', import.meta.url));
+  const module = fileURLToPath(new URL('../../src/effects/runtime/trusted-executable.ts', import.meta.url));
   const code = `import {resolveTrustedGhExecutable} from ${JSON.stringify(module)};
 import {spawnSync} from 'node:child_process';
 const bin=resolveTrustedGhExecutable();

@@ -1,17 +1,18 @@
 import { parseJsonText } from '../../core/evidence/file-syntax';
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  realpathSync,
-  type Stats,
-} from 'fs';
+import { readFileSync } from 'fs';
 import { userInfo } from 'os';
 import { dirname, isAbsolute, join, win32 } from 'path';
-import { dlopen, FFIType, ptr } from 'bun:ffi';
 import { isRecord } from '../../core/evidence/is-record';
 import { mutateGlobalConfiguration } from '../configuration/global-configuration';
 import type { RuntimeTransactionContext } from '../locking/runtime-transaction-lock';
+import {
+  HOST_EXECUTABLE_FILE_ACCESS,
+  nativeWindowsSystemToolsDirectory,
+  requireWindowsAbsolute,
+  requireWindowsRegularFile,
+  sameWindowsPath,
+  type ExecutableFileAccess,
+} from './trusted-executable';
 
 export const WINDOWS_PROTECTED_HELPER_CONFIG_KEY = 'protectedHelperRuntime';
 
@@ -45,52 +46,14 @@ export interface ProtectedHelperPlatform {
   systemRoot?: string;
 }
 
-export interface ProtectedHelperFileAccess {
-  exists(path: string): boolean;
-  lstat(path: string): Stats;
-  realpath(path: string): string;
+export interface ProtectedHelperFileAccess extends ExecutableFileAccess {
   readFile(path: string): string;
 }
 
 const DEFAULT_FILE_ACCESS: ProtectedHelperFileAccess = {
-  exists: existsSync,
-  lstat: lstatSync,
-  realpath: realpathSync,
+  ...HOST_EXECUTABLE_FILE_ACCESS,
   readFile: (path) => readFileSync(path, 'utf-8'),
 };
-
-/** Optional gh is operator-owned. Only fixed host install paths are candidates. */
-export function resolveTrustedGhExecutable(
-  access: Pick<ProtectedHelperFileAccess, 'exists' | 'lstat' | 'realpath'> = DEFAULT_FILE_ACCESS,
-  options: { platform?: NodeJS.Platform; nativeSystemToolsDirectory?: string } = {},
-): string | undefined {
-  if ((options.platform ?? process.platform) === 'win32') {
-    // Use the existing OS-native source, never caller ProgramFiles/SystemRoot/PATH.
-    // Only the standard installation on the native system volume is supported.
-    const systemDirectory = requireWindowsAbsolute(
-      options.nativeSystemToolsDirectory ?? nativeWindowsSystemToolsDirectory(), 'native system directory',
-    );
-    const volume = win32.parse(systemDirectory).root;
-    if (!/^[a-z]:\\$/i.test(volume)) throw new Error('trusted gh requires a local native Windows system volume');
-    const candidate = win32.join(volume, 'Program Files', 'GitHub CLI', 'gh.exe');
-    if (!access.exists(candidate)) return undefined;
-    const actual = requireRegularFile(candidate, 'gh.exe', access);
-    if (!sameWindowsPath(actual, candidate)) throw new Error('trusted gh must stay at the fixed host install path');
-    return actual;
-  }
-  for (const candidate of [
-    '/opt/homebrew/bin/gh',
-    '/usr/local/bin/gh',
-    '/usr/bin/gh',
-    '/home/linuxbrew/.linuxbrew/bin/gh',
-  ]) {
-    if (!access.exists(candidate)) continue;
-    const actual = access.realpath(candidate);
-    const stat = access.lstat(actual);
-    if (stat.isFile() && (stat.mode & 0o111) !== 0) return actual;
-  }
-  return undefined;
-}
 
 type ResolveOptions = {
   platform?: NodeJS.Platform;
@@ -120,27 +83,6 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[], 
   if (missing.length > 0) throw new Error(`${label} is missing field: ${missing.join(', ')}`);
 }
 
-function requireWindowsAbsolute(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !win32.isAbsolute(value)) {
-    throw new Error(`Windows protected-helper ${label} must be an absolute Windows path`);
-  }
-  return win32.normalize(value);
-}
-
-function requireRegularFile(path: string, label: string, access: Pick<ProtectedHelperFileAccess, 'exists' | 'lstat' | 'realpath'>): string {
-  if (!access.exists(path)) throw new Error(`Windows protected-helper ${label} is missing: ${path}`);
-  const source = access.lstat(path);
-  if (source.isSymbolicLink() || !source.isFile()) {
-    throw new Error(`Windows protected-helper ${label} must be a non-symlink regular file: ${path}`);
-  }
-  const actual = access.realpath(path);
-  const target = access.lstat(actual);
-  if (target.isSymbolicLink() || !target.isFile()) {
-    throw new Error(`Windows protected-helper ${label} must resolve to a regular file: ${path}`);
-  }
-  return win32.normalize(actual);
-}
-
 function requireDirectory(path: string, label: string, access: ProtectedHelperFileAccess): string {
   if (!access.exists(path)) throw new Error(`Windows protected-helper ${label} is missing: ${path}`);
   const source = access.lstat(path);
@@ -155,35 +97,9 @@ function requireDirectory(path: string, label: string, access: ProtectedHelperFi
   return win32.normalize(actual);
 }
 
-function sameWindowsPath(left: string, right: string): boolean {
-  return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
-}
-
 function pathInsideWindowsRoot(path: string, root: string): boolean {
   const relative = win32.relative(root, path);
   return relative === '' || (!relative.startsWith('..') && !win32.isAbsolute(relative));
-}
-
-export function nativeWindowsSystemToolsDirectory(): string {
-  if (process.platform !== 'win32') {
-    throw new Error('native Windows system directory is unavailable on this platform');
-  }
-  const kernel32 = dlopen('kernel32.dll', {
-    GetSystemDirectoryW: {
-      args: [FFIType.ptr, FFIType.u32],
-      returns: FFIType.u32,
-    },
-  });
-  try {
-    const buffer = new Uint16Array(32_768);
-    const length = kernel32.symbols.GetSystemDirectoryW(ptr(buffer), buffer.length);
-    if (!Number.isSafeInteger(length) || length < 1 || length >= buffer.length) {
-      throw new Error('GetSystemDirectoryW did not return a usable native system directory');
-    }
-    return win32.normalize(Buffer.from(buffer.buffer, 0, length * 2).toString('utf16le'));
-  } finally {
-    kernel32.close();
-  }
 }
 
 export function validateWindowsProtectedHelperContract(
@@ -217,12 +133,12 @@ export function validateWindowsProtectedHelperContract(
   const requestedSystemTools = requireWindowsAbsolute(raw.system_tools_dir, 'system_tools_dir');
   const requestedTemp = requireWindowsAbsolute(raw.temp_dir, 'temp_dir');
   const gitRoot = requireDirectory(requestedRoot, 'git_root', access);
-  const gitBin = requireRegularFile(requestedGit, 'git_bin', access);
-  const bashBin = requireRegularFile(requestedBash, 'bash_bin', access);
+  const gitBin = requireWindowsRegularFile(requestedGit, 'git_bin', access);
+  const bashBin = requireWindowsRegularFile(requestedBash, 'bash_bin', access);
   const posixToolsDir = requireDirectory(requestedPosixTools, 'posix_tools_dir', access);
   const systemToolsDir = requireDirectory(requestedSystemTools, 'system_tools_dir', access);
   const tempDir = requireDirectory(requestedTemp, 'temp_dir', access);
-  requireRegularFile(win32.join(systemToolsDir, 'taskkill.exe'), 'taskkill.exe', access);
+  requireWindowsRegularFile(win32.join(systemToolsDir, 'taskkill.exe'), 'taskkill.exe', access);
 
   for (const [label, path] of [
     ['git_bin', gitBin],
@@ -395,7 +311,7 @@ export function discoverWindowsProtectedHelperContract(options: DiscoverOptions 
   const env = options.env ?? process.env;
   const access = options.fileAccess ?? DEFAULT_FILE_ACCESS;
   const discoveredGit = executableFromPath('git', env, access);
-  let gitBin = requireRegularFile(discoveredGit, 'discovered git.exe', access);
+  let gitBin = requireWindowsRegularFile(discoveredGit, 'discovered git.exe', access);
   const gitParent = win32.basename(win32.dirname(gitBin)).toLowerCase();
   if (gitParent !== 'cmd' && gitParent !== 'bin') {
     throw new Error(`Windows protected-helper install requires Git for Windows cmd\\git.exe or bin\\git.exe (found ${gitBin})`);
