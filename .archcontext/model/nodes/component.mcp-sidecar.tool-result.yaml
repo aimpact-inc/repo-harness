@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "archcontext.node/v2",
+  "id": "component.mcp-sidecar.tool-result",
+  "kind": "component",
+  "name": "Tool Result and Version",
+  "status": "active",
+  "parent": "capability.runtime-harness.mcp-sidecar",
+  "layer": "cli",
+  "summary": "Holds the shared MCP tool result envelope and the package version that every MCP tool block uses.",
+  "responsibilities": [
+    "Build the text and error tool results and redact the error message with redactMcpText.",
+    "Report the repo-harness package version to the server, the doctor and the reader tools."
+  ],
+  "source": {
+    "include": [
+      "src/cli/mcp/result.ts",
+      "src/cli/mcp/version.ts"
+    ]
+  }
+}

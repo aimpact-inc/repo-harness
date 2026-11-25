@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.92d01e7aa939a41d",
+  "fingerprint": "sha256:11569ac3254bf9302076f00bcd2a196589cd7812acef1a42c9768ac17498eaa6",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:capability.runtime-harness.mcp-sidecar|capability.runtime-mcp.general-repo-access",
+    "subjectSelectorId": "subject.repository.cfc6d61e2dc347fd"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-harness.mcp-sidecar",
+    "capability.runtime-mcp.general-repo-access"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 2
+  },
+  "reason": "component.mcp-sidecar.tool-result owns result.ts and version.ts; the pair cycle is absent at the verified head.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:22:49.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:51101894a0cfd96c1c8077c8b5e294c121b71d55dbf01c457e03d443f6c3aa94",
+    "baselineSnapshotDigest": "sha256:658e87901c2e55d6a68392e990c38024bb0bf68f3512279ef132e0bc73ed8542"
+  },
+  "snapshotDigest": "sha256:658e87901c2e55d6a68392e990c38024bb0bf68f3512279ef132e0bc73ed8542",
+  "evidenceDigest": "sha256:51101894a0cfd96c1c8077c8b5e294c121b71d55dbf01c457e03d443f6c3aa94",
+  "resolutionDigest": "sha256:25af04c3ff606840a0b5f2ee1b6ac6cfe333260b4bf194563b68ffecc9f47951",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.cfc6d61e2dc347fd",
+      "nodeId": null,
+      "memberNodeIds": [
+        "capability.runtime-harness.mcp-sidecar",
+        "capability.runtime-mcp.general-repo-access"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.764875273adddc7c"
+    }
+  ]
+}
