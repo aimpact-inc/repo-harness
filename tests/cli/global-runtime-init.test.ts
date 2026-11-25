@@ -170,7 +170,7 @@ test('update renames retired seats, remaps routing, strips disallowed fleet role
       planner: { runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ['net', 'read', 'shell'], fleet: ['deep-reasoner', 'explorer'] },
       'worker-important': { ...workerOpus, fleet: ['deep-reasoner', 'explorer'] },
       'worker-important-fast': { ...workerNeon, fleet: ['deep-reasoner', 'explorer'] },
-      'gatekeeper-deep': { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex', model: 'gpt-6.1-terra' },
+      'gatekeeper-deep': { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex', model: 'gpt-6.2-sol' },
       advisor: { ...rest.advisor, runtime: 'claude', model: 'sonnet', fleet: ['deep-reasoner', 'explorer'] },
       'worker-light': { ...rest['worker-light']!, fleet: ['explorer'] },
       routing: {
@@ -255,7 +255,7 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
       advisor: { ...DEFAULT_SEATS_CONFIG.advisor, advisor_model: null, fleet: [...fleet, 'gatekeeper'] },
       worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'custom-codex-model', effort: 'low', tools: ['edit', 'read', 'shell'], fleet: legacyFleet },
       'worker-opus': { ...DEFAULT_SEATS_CONFIG['worker-opus'], model: 'custom-claude-model', fleet: legacyFleet },
-      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/codex/gpt-6.1-terra', fleet: legacyFleet },
+      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/codex/gpt-6.2-sol', fleet: legacyFleet },
       routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker-light', 'worker'], claude_saving_below_remaining: 35 },
     };
     const agents = { enabled: ['claude', 'codex', 'pi'], uses: { review: [], docs: [] }, default_docs: null };

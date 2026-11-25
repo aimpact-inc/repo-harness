@@ -539,7 +539,7 @@ describe('agent settings routes', () => {
   test('Hosts refuses to disable Codex until all seats using it move', async () => {
     const codexSeats = {
       ...DEFAULT_SEATS_CONFIG,
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra' },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.2-sol' },
       'worker-deep': { ...DEFAULT_SEATS_CONFIG['worker-deep'], runtime: 'codex' as const, model: 'gpt-6.2-sol' },
       gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6.2-sol' },
     };
@@ -656,7 +656,7 @@ describe('seat settings contract without transport', () => {
       expect(result.status).toBe(200);
       expect((await readSeatsSettings(env)).config.worker.model).toBe(addedModel);
     }
-    const gpt = { ...worker, model: 'magpie/codex/gpt-6.1-terra', effort: 'high' };
+    const gpt = { ...worker, model: 'magpie/codex/gpt-6.2-sol', effort: 'high' };
     expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, worker: { ...gpt, fleet: ['explorer'] } } }, []).execute()).status).toBe(200);
     expect((await readSeatsSettings(env)).config.worker).toMatchObject({ runtime: 'pi', model: gpt.model, effort: 'high', fleet: ['explorer'] });
     expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, reviewer: { ...section.reviewer!, runtime: 'pi', model: 'zai/glm-5.3' } } }, []).execute()).status).toBe(200);
@@ -916,7 +916,7 @@ describe('seat settings contract without transport', () => {
     expect(() => route.decode({ expected_revision: settings.config.revision, seats: {
       ...settings.defaults, 'worker-light': null, routing: { ...settings.defaults.routing, simple_fast: ['worker-light'] },
     } }, [])).toThrow('seats_settings_request_invalid');
-    const changedRuntime = { ...settings.defaults, 'worker-opus': { ...settings.defaults['worker-opus'], runtime: 'codex', model: 'gpt-6.1-terra' } };
+    const changedRuntime = { ...settings.defaults, 'worker-opus': { ...settings.defaults['worker-opus'], runtime: 'codex', model: 'gpt-6.2-sol' } };
     expect(() => route.decode({ expected_revision: settings.config.revision, seats: changedRuntime }, []))
       .toThrow('seats_settings_request_invalid');
     expect(readFileSync(path, 'utf8')).toBe(original);
@@ -1013,6 +1013,24 @@ describe('seat settings routes', () => {
     if (code === 'seat_runtime_not_allowed') {
       expect(body.error.next_action).toBe('Use agy only on orchestrator, advisor, council, worker seats, or gatekeeper-fallback.');
     }
+    expect(sha256(harness.configPath)).toBe(revision);
+  });
+
+  test.each([
+    ['codex', 'gpt-6.1-terra', 'seats.worker.model uses retired model gpt-6.1-terra. Choose another worker model such as gpt-6.2-sol.'],
+    ['pi', 'magpie/codex/gpt-6.1-terra', 'seats.worker.model uses retired model magpie/codex/gpt-6.1-terra. Choose another worker model such as magpie/codex/gpt-6.2-sol.'],
+  ] as const)('decode and settings save fail closed on retired %s Terra model (%s)', async (runtime, model, expectedMessage) => {
+    const retiredSeats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime, model } };
+    expect(() => decodeSeatsConfig(retiredSeats)).toThrow(expectedMessage);
+
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const { revision, ...section } = (await seats(harness)).config;
+    const candidate = { ...section, worker: { ...section.worker, runtime, model } };
+    const response = await post(harness, { expected_revision: revision, seats: candidate }, 'seats');
+    expect(response.status).toBe(422);
+    expect((await response.json()).error).toMatchObject({ code: 'seat_model_invalid', message: expectedMessage });
+    await expect(applySeatsSettings({ expected_revision: revision, seats: candidate }, { HOME: harness.home }))
+      .rejects.toMatchObject({ code: 'seat_model_invalid', message: expectedMessage });
     expect(sha256(harness.configPath)).toBe(revision);
   });
 

@@ -71,8 +71,8 @@ if (args === 'login status') { console.error('Logged in using ChatGPT'); process
 require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + '\\n');
-  if (message.method === 'model/list') console.log(JSON.stringify({ id: message.id, result: { data: [{ model: 'gpt-6.1-terra' }], nextCursor: null } }));
-  if (message.method === 'config/read') console.log(JSON.stringify({ id: message.id, result: { config: { model: 'gpt-6.1-terra' } } }));
+  if (message.method === 'model/list') console.log(JSON.stringify({ id: message.id, result: { data: [{ model: 'gpt-6.2-sol' }], nextCursor: null } }));
+  if (message.method === 'config/read') console.log(JSON.stringify({ id: message.id, result: { config: { model: 'gpt-6.2-sol' } } }));
   if (message.method === 'account/rateLimits/read') process.stdout.write(JSON.stringify({ id: message.id, result: { rateLimits: {
     primary: { usedPercent: Number(require('node:fs').readFileSync(require('node:path').join(process.env.HOME, 'codex-used'), 'utf8')),
       windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 84 * 3600 },
@@ -1427,12 +1427,12 @@ describe("rh seats argv", () => {
   });
 
   test("a Pi GPT worker passes configured thinking and model, and draws on the ChatGPT account", () => {
-    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.1-terra", fleet: [] };
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "pi" as const, model: "magpie/codex/gpt-6.2-sol", fleet: [] };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker }, home => {
       writeFileSync(join(home, 'codex-used'), '51');
-      expect(bare(launch(home, "worker").argv).slice(0, 7)).toEqual(["pi", "--provider", "magpie", "--model", "codex/gpt-6.1-terra", "--thinking", "high"]);
+      expect(bare(launch(home, "worker").argv).slice(0, 7)).toEqual(["pi", "--provider", "magpie", "--model", "codex/gpt-6.2-sol", "--thinking", "high"]);
       writeFileSync(join(home, 'codex-used'), '10');
-      expect(bare(launch(home, "worker").argv).slice(0, 7)).toEqual(["pi", "--provider", "magpie", "--model", "codex/gpt-6.1-terra", "--thinking", "high"]);
+      expect(bare(launch(home, "worker").argv).slice(0, 7)).toEqual(["pi", "--provider", "magpie", "--model", "codex/gpt-6.2-sol", "--thinking", "high"]);
       writeFileSync(join(home, 'codex-used'), '95');
       const exhausted = argv(home, "worker", "--json");
       expect([exhausted.status, JSON.parse(exhausted.stderr).error]).toEqual([1, "seat_quota_exhausted"]);
@@ -1448,6 +1448,21 @@ describe("rh seats argv", () => {
     expect(routes).toContain("gatekeeper: gatekeeper (codex seats.gatekeeper.model");
     const reading = decodeCodexRateLimitsResult({ rateLimits: { primary: { usedPercent: 95, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 84 * 3600 } } }, new Date().toISOString());
     expect(formatSeatRoutes({ ...seats, routing: { ...seats.routing, simple_fast: ["worker"] as const } }, seatAccountQuotas([classifyQuotaReading(reading, Date.now())], seats.routing))).toContain("route simple_fast: none (chatgpt exhausted)");
+  });
+
+  test.each([
+    ["codex", "gpt-6.1-terra", "seats.worker.model uses retired model gpt-6.1-terra. Choose another worker model such as gpt-6.2-sol."],
+    ["pi", "magpie/codex/gpt-6.1-terra", "seats.worker.model uses retired model magpie/codex/gpt-6.1-terra. Choose another worker model such as magpie/codex/gpt-6.2-sol."],
+  ] as const)("seats argv refuses a saved retired %s Terra model before launching", (runtime, model, expectedMessage) => {
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime, model } };
+    withHome(seats, home => {
+      const result = argv(home, "worker", "--json");
+      expect([result.status, result.stdout, JSON.parse(result.stderr)]).toEqual([1, "", {
+        ok: false,
+        error: "seat_model_invalid",
+        message: expectedMessage,
+      }]);
+    });
   });
 
   test("an exhausted or reserved agy Gemini group blocks workers while keeping advisor and Claude/GPT seats available", () => {
@@ -1616,9 +1631,9 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   test("quota preserves Codex models and Pi, changes Claude control-seat effort, and stops exhaustion", () => {
     const seats = { ...DEFAULT_SEATS_CONFIG,
       advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: 'claude' as const, model: 'fable', effort: 'high', tools: ['mcp', 'net', 'read', 'shell'] as const },
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra', effort: 'high' },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.2-sol', effort: 'high' },
       'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], runtime: 'claude' as const, model: 'sonnet', effort: 'medium' },
-      gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6.1-terra', effort: 'high' },
+      gatekeeper: { ...DEFAULT_SEATS_CONFIG.gatekeeper, runtime: 'codex' as const, model: 'gpt-6.2-sol', effort: 'high' },
     };
     withHome(seats, home => {
       writeFileSync(join(home, 'codex-used'), '10');
@@ -1786,7 +1801,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
 
   test("the schedule group changes no Codex or Pi argv, and a stored config without it decodes unchanged", () => {
     for (const runtime of ["codex", "pi"] as const) {
-      const base = { ...DEFAULT_SEATS_CONFIG.advisor, runtime, model: runtime === "pi" ? "magpie/codex/gpt-6-astra" : "gpt-6.1-terra", effort: null, fleet: [] };
+      const base = { ...DEFAULT_SEATS_CONFIG.advisor, runtime, model: runtime === "pi" ? "magpie/codex/gpt-6-astra" : "gpt-6.2-sol", effort: null, fleet: [] };
       const argvWith = (seatTools: string[]) => withHome({ ...DEFAULT_SEATS_CONFIG, advisor: { ...base, tools: seatTools } }, home => { out.push(launch(home, "advisor").argv); });
       const out: string[][] = [];
       argvWith(["mcp", "net", "read", "shell"]);
@@ -1827,14 +1842,14 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("the Codex argv holds only flags that Codex applies; the fleet goes into the launch instructions only", () => {
-    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra", tools: ["edit", "read", "shell"] } };
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.2-sol", tools: ["edit", "read", "shell"] } };
     const handoff = "As a Codex worker seat in a linked contract worktree, edit files and run checks only. Do not run `git fetch`, `git commit` or `git push`. In your last message, give the commit subject and body, the PR title and body, and the check results. The orchestrator commits your worktree diff with that message and explicit paths only, pushes the branch and opens the PR. It is the head owner of record and pushes each fix round; no other agent pushes to that PR. You remain the content author and answer review threads through the orchestrator.";
     withHome(seats, (home) => {
       const result = argv(home, "worker");
       expect(result.status).toBe(0);
       const args: string[] = JSON.parse(result.stdout);
       const instructions = args.at(-1)!;
-      expect(bare(args).slice(0, -1)).toEqual(["codex", "-m", "gpt-6.1-terra", "-c", 'model_reasoning_effort="high"', "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false", "-c", 'web_search="disabled"', "-c"]);
+      expect(bare(args).slice(0, -1)).toEqual(["codex", "-m", "gpt-6.2-sol", "-c", 'model_reasoning_effort="high"', "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false", "-c", 'web_search="disabled"', "-c"]);
       expect(instructions).toStartWith('developer_instructions="You are a worker seat.');
       expect(JSON.parse(instructions.slice("developer_instructions=".length))).toContain(handoff);
       expect(JSON.parse(instructions.slice("developer_instructions=".length))).toContain("These limits are instructions only; the host does not enforce them. Keep them yourself. Do not use the task list tools. Do not use MCP tools. Do not write to GitHub.");
@@ -1850,7 +1865,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
     const seats = {
       ...DEFAULT_SEATS_CONFIG,
       advisor: { runtime: "codex", model: null, effort: null, tools: ["mcp", "read", "shell"], fleet: [] },
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra", tools: ["edit", "read", "shell"] },
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.2-sol", tools: ["edit", "read", "shell"] },
     };
     withHome(seats, (home) => {
       const worker = launch(home, "worker");
@@ -1867,7 +1882,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("a writable Codex seat enables sandbox network with net, and other seats keep net", () => {
-    const codexWorker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra" };
+    const codexWorker = { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.2-sol" };
     withHome({ ...DEFAULT_SEATS_CONFIG, worker: codexWorker }, (home) => {
       const worker = launch(home, "worker");
       expect(worker.argv).toEqual(expect.arrayContaining(["workspace-write", "sandbox_workspace_write.network_access=true"]));
@@ -2084,7 +2099,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   test("the pane name and the tab name come from the registry prefix of the primary checkout, one per role", () => {
     const seats = { ...DEFAULT_SEATS_CONFIG,
       advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "claude" as const, model: "opus", effort: "high", tools: ["mcp", "net", "read", "shell"] as const },
-      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.1-terra" } };
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: "codex" as const, model: "gpt-6.2-sol" } };
     withHome(seats, (home) => {
       withRepository(home, "rh", (repo, worktree) => {
         const named = (cwd: string, ...args: string[]) => JSON.parse(run(registryEnv(home), [...args, "--repository-id", "1186405141", "--json"], cwd).stdout);

@@ -857,7 +857,7 @@ describe('rh seats launch availability', () => {
   });
   test('a missing default runtime reports a redacted pool hint and starts no tab', () => {
     const f = poolFixture('pi');
-    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra' } };
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'gpt-6.2-sol' } };
     writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
     const tab = join(f.home, 'tab.json');
     fixtureHerdr(f.env, tab);
@@ -865,6 +865,23 @@ describe('rh seats launch availability', () => {
     expect([refused.status, refused.stdout, JSON.parse(refused.stderr)]).toEqual([1, '', {
       ok: false, error: 'seat_provider_unavailable',
       message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi magpie\/agy-cli\/gemini-4-neon, pi magpie\/codex\/gpt-6\.2-sol, pi zai\/glm-5\.3-flash, pi magpie\/group\/deepseek-v4\.1-flash, pi magpie\/agy-cli\/gemini-4-hydrogen/u),
+    }]);
+    expect(existsSync(tab)).toBe(false);
+    expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
+  });
+
+  test.each([
+    ['codex', 'gpt-6.1-terra', 'seats.worker.model uses retired model gpt-6.1-terra. Choose another worker model such as gpt-6.2-sol.'],
+    ['pi', 'magpie/codex/gpt-6.1-terra', 'seats.worker.model uses retired model magpie/codex/gpt-6.1-terra. Choose another worker model such as magpie/codex/gpt-6.2-sol.'],
+  ] as const)('rh seats launch refuses a saved retired %s Terra model before probing or opening a tab', (runtime, model, expectedMessage) => {
+    const f = poolFixture('codex', 'pi');
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime, model } };
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const refused = launchSeat('worker', f.env);
+    expect([refused.status, refused.stdout, JSON.parse(refused.stderr)]).toEqual([1, '', {
+      ok: false, error: 'seat_model_invalid', message: expectedMessage,
     }]);
     expect(existsSync(tab)).toBe(false);
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);

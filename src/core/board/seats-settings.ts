@@ -219,6 +219,26 @@ const ASTRA_MODEL_ENTRIES = Object.freeze([
   Object.freeze({ runtime: 'codex' as const, model: 'gpt-6.2-astra' }),
 ]);
 
+const RETIRED_SEAT_MODEL_IDS = Object.freeze(['gpt-6.1-terra'] as const);
+const RETIRED_SEAT_MODEL_DISPLAY = Object.freeze(['gpt-6.1-terra', `${PI_CODEX_MODEL_PREFIX}gpt-6.1-terra`] as const);
+
+function retiredSeatModelLabel(model: string | null): string | null {
+  if (model === null) return null;
+  const lower = model.toLowerCase();
+  const base = lower.slice(lower.lastIndexOf('/') + 1);
+  const retired = RETIRED_SEAT_MODEL_IDS.find(id => id === base);
+  if (retired === undefined) return null;
+  return RETIRED_SEAT_MODEL_DISPLAY.find(known => known === lower) ?? retired;
+}
+
+function assertActiveSeatModel(id: SeatId | null, field: string, runtime: SeatRuntime, model: string | null): void {
+  const retired = retiredSeatModelLabel(model);
+  if (retired === null) return;
+  const path = id === null ? field : `seats.${id}.${field}`;
+  const suggestion = runtime === 'pi' ? `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol` : 'gpt-6.2-sol';
+  throw new AgySeatSettingsError('seat_model_invalid', id, field, `${path} uses retired model ${retired}. Choose another worker model such as ${suggestion}.`);
+}
+
 export const isCouncilModelEntry = (runtime: SeatRuntime, model: string | null): boolean =>
   model !== null && COUNCIL_MODEL_ENTRIES.some(entry => entry.runtime === runtime && entry.model === model);
 
@@ -387,16 +407,16 @@ export interface SeatsSettingsResultV1 {
 
 /** A decoder refusal. `field` names the seat field, never its value, so a report cannot carry a secret (#3244). */
 class SeatsDecodeError extends Error {
-  constructor(code: string, readonly field: string | null) {
-    super(field === null ? code : `${code}: ${field}`);
+  constructor(code: string, readonly field: string | null, readonly detail: string | null = null) {
+    super(detail ?? (field === null ? code : `${code}: ${field}`));
   }
 }
 
 type AgySeatErrorCode = 'seat_runtime_not_allowed' | 'seat_model_invalid' | 'seat_effort_invalid' | 'seat_tool_not_allowed' | 'seat_fleet_not_allowed';
 
 export class AgySeatSettingsError extends SeatsDecodeError {
-  constructor(readonly code: AgySeatErrorCode, id: SeatId, field: string) {
-    super(code, `seats.${id}.${field}`);
+  constructor(readonly code: AgySeatErrorCode, id: SeatId | null, field: string, detail?: string) {
+    super(code, id === null ? field : `seats.${id}.${field}`, detail ?? null);
   }
 }
 
@@ -418,6 +438,7 @@ function invalid(code: string, field: string | null = null): never {
 
 /** The one message for an invalid stored seats section; it names the refused seat field when the decoder knows it. */
 export function seatsConfigInvalidMessage(error: unknown): string {
+  if (error instanceof SeatsDecodeError && error.detail !== null) return error.detail;
   const field = error instanceof SeatsDecodeError ? error.field : null;
   return `The seats section of the repo-harness configuration is not valid${field === null ? '' : ` at ${field}`}.`;
 }
@@ -490,6 +511,7 @@ function decodeSeat(id: SeatId, value: unknown, code: string, fromSettingsReques
   const model = record.model === null ? null
     : seatModelShapeValid(runtime, record.model) ? record.model
       : runtime === 'agy' ? null : at('model');
+  assertActiveSeatModel(id, 'model', runtime, model);
   if (runtime !== 'agy') {
     if (isCouncilSeat(id) && !isCouncilModelEntry(runtime, model)) at('model');
     if (!isCouncilSeat(id) && isAstraModelEntry(runtime, model)) at('model');
@@ -526,14 +548,17 @@ function decodePiSubAgentModels(value: unknown, code: string): PiSubAgentModels 
     if (!Object.hasOwn(record, role)) continue;
     const model = record[role];
     if (!seatModelShapeValid('pi', model)) invalid(code, `seats.pi_sub_agent_models.${role}`);
+    assertActiveSeatModel(null, `seats.pi_sub_agent_models.${role}`, 'pi', model);
     models[role] = model;
   }
   return models;
 }
 
-function decodeModel(value: unknown, code: string): SeatModelV1 {
+function decodeModel(value: unknown, code: string, field?: string): SeatModelV1 {
   const record = object(value, ['model', 'effort'], code);
-  return { model: nullableToken(record.model, code), effort: nullableToken(record.effort, code) };
+  const model = nullableToken(record.model, code);
+  if (field !== undefined) assertActiveSeatModel(null, field, 'codex', model);
+  return { model, effort: nullableToken(record.effort, code) };
 }
 
 function decodeRouting(value: unknown, code: string): SeatRoutingV1 {
@@ -557,7 +582,7 @@ function decodeRouting(value: unknown, code: string): SeatRoutingV1 {
     codex_credit_mode: CODEX_CREDIT_MODES.includes(record.codex_credit_mode as CodexCreditMode) ? record.codex_credit_mode as CodexCreditMode : invalid(code),
     codex_credit_floor: typeof record.codex_credit_floor === 'number' && Number.isFinite(record.codex_credit_floor) && record.codex_credit_floor >= 0
       ? record.codex_credit_floor : invalid(code),
-    low_quota_explorer: decodeModel(record.low_quota_explorer, code),
+    low_quota_explorer: decodeModel(record.low_quota_explorer, code, 'seats.routing.low_quota_explorer.model'),
     unavailable_pi_providers: ascending(record.unavailable_pi_providers, isPiProvider, code) };
 }
 
@@ -586,7 +611,10 @@ function validateLegacyRetiredReviewSeat(fieldName: string, value: unknown, code
   try {
     decodeSeat('gatekeeper', value, code, false);
   } catch (error) {
-    if (error instanceof AgySeatSettingsError) throw new AgySeatSettingsError(error.code, 'gatekeeper', error.field?.replace('seats.gatekeeper.', '') ?? 'runtime');
+    if (error instanceof AgySeatSettingsError) {
+      const suffix = error.field?.replace('seats.gatekeeper.', '') ?? 'runtime';
+      throw new AgySeatSettingsError(error.code, null, `seats.${fieldName}.${suffix}`, error.detail?.replace('seats.gatekeeper.', `seats.${fieldName}.`) ?? undefined);
+    }
     if (error instanceof SeatsDecodeError) invalid(code, error.field?.replace('seats.gatekeeper', `seats.${fieldName}`) ?? `seats.${fieldName}`);
     throw error;
   }

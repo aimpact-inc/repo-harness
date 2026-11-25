@@ -483,7 +483,7 @@ describe('agents page seats section', () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();
     if (read.state !== 'ok') throw new Error('fixture read failed');
-    const advisor: SeatConfigV1 = { ...read.settings.config.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6.1-terra', advisor_model: null, fleet: ['explorer'] };
+    const advisor: SeatConfigV1 = { ...read.settings.config.advisor, runtime: 'pi', model: 'magpie/codex/gpt-6-luna', advisor_model: null, fleet: ['explorer'] };
     const ranges = { ...read.settings.ranges, runtimes: read.settings.ranges.runtimes.map(runtime => ({ ...runtime, enabled: true })) };
     // Like the server, a read after a save returns the saved section.
     const stored = () => (posts.length === 0 ? { ...read.settings.config, advisor } : { revision: REVISION_B, ...posts.at(-1)!.seats });

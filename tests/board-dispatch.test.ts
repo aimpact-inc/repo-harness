@@ -537,3 +537,92 @@ ${agyCatalogScript([{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test.each([
+  ['codex', 'gpt-6.1-terra', 'seats.worker.model uses retired model gpt-6.1-terra. Choose another worker model such as gpt-6.2-sol.'],
+  ['pi', 'magpie/codex/gpt-6.1-terra', 'seats.worker.model uses retired model magpie/codex/gpt-6.1-terra. Choose another worker model such as magpie/codex/gpt-6.2-sol.'],
+] as const)('runDispatch refuses a saved retired %s Terra model before posting a claim or launching a pane', async (runtime, model, expectedMessage) => {
+  const home = mkdtempSync(join(tmpdir(), 'dispatch-retired-terra-'));
+  try {
+    mkdirSync(join(home, '.repo-harness'), { recursive: true });
+    const seats = {
+      ...DEFAULT_SEATS_CONFIG,
+      worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime, model },
+      routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker'] as const },
+    };
+    writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    const coordinator = {
+      url: 'https://example.test/c1',
+      created_at: '2026-11-09T09:00:00Z',
+      body: 'repo-harness issue claim\nStatus: active\nRole: coordinator\nAgent: claude-opus\nBranch: main\nScope: parent\n',
+    };
+    const ghCalls: string[][] = [];
+    let launched = false;
+    const ghRunner = (args: readonly string[]) => {
+      ghCalls.push([...args]);
+      if (args.includes('repos/{owner}/{repo}')) return { status: 0, stdout: JSON.stringify({ id: 1 }), stderr: '' };
+      return {
+        status: 0,
+        stderr: '',
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              databaseId: 1,
+              nameWithOwner: 'o/r',
+              defaultBranchRef: { name: 'main' },
+              issue: {
+                number: 100,
+                title: 'parent',
+                url: 'https://github.com/o/r/issues/100',
+                state: 'OPEN',
+                labels: { pageInfo: { hasNextPage: false }, nodes: [] },
+                milestone: null,
+                comments: {
+                  pageInfo: { hasPreviousPage: false, startCursor: null },
+                  nodes: [
+                    { url: coordinator.url, createdAt: coordinator.created_at, authorAssociation: 'OWNER', body: coordinator.body },
+                    { url: 'https://example.test/plan', createdAt: '2026-11-09T10:00:00Z', authorAssociation: 'OWNER', body: planBody(4, [1]) },
+                  ],
+                },
+                subIssues: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [{
+                    number: 1,
+                    title: 'issue 1',
+                    url: 'https://github.com/o/r/issues/1',
+                    state: 'OPEN',
+                    labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: 'route:simple_fast' }] },
+                    milestone: null,
+                    comments: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+                    blockedBy: { pageInfo: { hasNextPage: false }, nodes: [] },
+                    timelineItems: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+                  }],
+                },
+              },
+            },
+            repairs: { issueCount: 0, nodes: [] },
+          },
+        }),
+      };
+    };
+    const host = {
+      seatTerminals: () => ({ status: 'observed' as const, terminals: [] }),
+    } as unknown as Parameters<typeof runDispatch>[0]['host'];
+    await expect(runDispatch({
+      repo_root: home,
+      repository: 'o/r',
+      parent: 100,
+      space: 's1',
+      host,
+      launch: async () => { launched = true; return { argv: ['codex'], tab: '#100', runtime }; },
+      dry_run: false,
+      bundle: null,
+      gh_runner: ghRunner,
+      env: { ...process.env, HOME: home },
+    })).rejects.toMatchObject({ code: 'seat_model_invalid', message: expectedMessage });
+    expect(launched).toBe(false);
+    expect(ghCalls.some(args => args[0] === 'issue' && args[1] === 'comment')).toBe(false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
