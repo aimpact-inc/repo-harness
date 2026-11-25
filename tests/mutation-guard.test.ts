@@ -4,6 +4,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'os';
 import { dirname, isAbsolute, join } from 'path';
 import { execFileSync, spawnSync } from 'child_process';
+import { ANTIGRAVITY_GUARD_DENIAL } from '../src/cli/hook/host-adapter';
+import { runBashMutationGuard } from '../src/cli/hook/mutation-bash';
 import { runMutationGuard } from '../src/cli/hook/mutation-guard';
 import { bashSafetyDenial, ledgerCreated, registerInstallLedger } from '../src/cli/hook/safety-hook';
 import { createdPaths } from '../src/effects/host-config/path-records';
@@ -479,7 +481,7 @@ describe('safety hook: edit route', () => {
       expect(existsSync(join(cwd, '.ai/harness/state/circuit-breaker.json'))).toBe(false);
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
-  posixOnly('Antigravity asks for protected HOME writes and leaves brain artifacts writable', () => {
+  posixOnly('Antigravity denies protected HOME writes with fixed text in every mode and leaves brain artifacts writable', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'agy-guard-')));
     const [cwd, home, scratch] = ['repo', 'home', 'tmp'].map(name => join(root, name));
     const savedTmp = process.env.TMPDIR;
@@ -487,24 +489,48 @@ describe('safety hook: edit route', () => {
       for (const dir of [cwd, home, scratch]) mkdirSync(dir);
       initRepo(cwd);
       process.env.TMPDIR = scratch;
-      const edit = (file_path: string) => runMutationGuard({
-        repoRoot: cwd, payload: { tool_input: { file_path } }, identity: hookIdentity({ host: 'antigravity' }),
-        env: { HOME: home, REPO_HARNESS_WORKTREE_ROOT: scratch },
+      const agyEnv = { HOME: home, REPO_HARNESS_WORKTREE_ROOT: scratch };
+      const agyId = hookIdentity({ host: 'antigravity' });
+      const edit = (file_path: string, extra: Record<string, unknown> = {}) => runMutationGuard({
+        repoRoot: cwd, payload: { ...extra, tool_input: { file_path } }, identity: agyId, env: agyEnv,
       });
-      const ask = { decision: 'ask' as const, reason: expect.stringContaining('[UserFileGuard] I2:') };
+      const bash = (command: string, extra: Record<string, unknown> = {}) => runBashMutationGuard({
+        repoRoot: cwd, payload: { ...extra, cwd, tool_input: { command } }, identity: agyId, env: agyEnv,
+      });
+      const denied = (guard: 'UserFileGuard' | 'CredentialGuard') => ({
+        exitCode: 2,
+        stdout: '',
+        stderr: `[${guard}] ${ANTIGRAVITY_GUARD_DENIAL}\n  Fix: Ask the user to review the operation and run it locally.\n`,
+      });
       const gemini = join(home, '.gemini');
       for (const file of ['antigravity/brain/s/notes.md', 'antigravity-cli/brain/s/notes.md', 'antigravity-ide/brain/s/notes.md',
         'config/AGENTS.md', 'antigravity-cli/antigravity-oauth-token']) {
         const path = join(gemini, file);
         mkdirSync(dirname(path), { recursive: true });
         writeFileSync(path, 'synthetic fixture');
-        expect(edit(path)).toEqual({ exitCode: 0, stdout: '', stderr: '', ...(file.includes('/brain/') ? {} : { permission: ask }) });
+        expect(edit(path)).toEqual(file.includes('/brain/') ? { exitCode: 0, stdout: '', stderr: '' } : denied('UserFileGuard'));
       }
+      // Even a payload carrying a prompting Claude permission_mode must still fail closed on Antigravity.
+      expect(edit(join(gemini, 'config/AGENTS.md'), { permission_mode: 'default' })).toEqual(denied('UserFileGuard'));
       const brain = join(gemini, 'antigravity/brain');
       renameSync(brain, join(gemini, 'antigravity/parked'));
       symlinkSync(gemini, brain);
-      expect(edit(join(brain, 'config/AGENTS.md')).permission).toEqual(ask);
-      expect(failureRecords(cwd)).toEqual([]);
+      expect(edit(join(brain, 'config/AGENTS.md'))).toEqual(denied('UserFileGuard'));
+      // Bash I2 UserFileGuard denies with fixed text; I1 CredentialGuard remains unchanged.
+      const protectedFile = join(gemini, 'config/AGENTS.md');
+      expect(bash(`printf x > ${protectedFile}`, { permission_mode: 'default' })).toEqual(denied('UserFileGuard'));
+      expect(bash('cat .env')).toEqual(denied('CredentialGuard'));
+      const records = failureRecords(cwd);
+      expect(records.map(record => ({ guard: record.guard, action: record.action, reason: record.reason }))).toEqual([
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'UserFileGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+        { guard: 'CredentialGuard', action: 'block', reason: ANTIGRAVITY_GUARD_DENIAL },
+      ]);
+      expect(JSON.stringify(records)).not.toContain('AGENTS.md');
+      expect(JSON.stringify(records)).not.toContain('antigravity-oauth-token');
     } finally {
       if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
       rmSync(root, { recursive: true, force: true });
@@ -612,6 +638,95 @@ describe('safety hook: edit route', () => {
         if (existsSync(join(cwd, '.ai/harness/failures'))) chmodSync(join(cwd, '.ai/harness/failures'), 0o755);
         rmSync(root, { recursive: true, force: true });
       }
+    }
+  }, 60_000);
+  posixOnly('denial refuses symlinked failure-log leaf and ancestor paths without touching outside files', () => {
+    const sentinel = '{"keep":true}\n';
+    const cases: ReadonlyArray<{
+      readonly label: string;
+      readonly setup: (cwd: string, outside: string) => { readonly sentinelPath?: string; readonly absentPath?: string };
+    }> = [
+      {
+        label: 'leaf symlink to outside file',
+        setup: (cwd, outside) => {
+          const sentinelPath = join(outside, 'settings.json');
+          writeFileSync(sentinelPath, sentinel);
+          mkdirSync(join(cwd, '.ai/harness/failures'), { recursive: true });
+          symlinkSync(sentinelPath, join(cwd, '.ai/harness/failures/latest.jsonl'));
+          return { sentinelPath };
+        },
+      },
+      {
+        label: 'dangling leaf symlink outside repository',
+        setup: (cwd, outside) => {
+          const absentPath = join(outside, 'created.jsonl');
+          mkdirSync(join(cwd, '.ai/harness/failures'), { recursive: true });
+          symlinkSync(absentPath, join(cwd, '.ai/harness/failures/latest.jsonl'));
+          return { absentPath };
+        },
+      },
+      {
+        label: 'leaf symlink to stdout',
+        setup: (cwd) => {
+          mkdirSync(join(cwd, '.ai/harness/failures'), { recursive: true });
+          symlinkSync('/dev/stdout', join(cwd, '.ai/harness/failures/latest.jsonl'));
+          return {};
+        },
+      },
+      {
+        label: 'ancestor symlink at .ai/harness/failures',
+        setup: (cwd, outside) => {
+          const dir = join(outside, 'failures-dir');
+          mkdirSync(dir, { recursive: true });
+          const sentinelPath = join(dir, 'latest.jsonl');
+          writeFileSync(sentinelPath, sentinel);
+          symlinkSync(dir, join(cwd, '.ai/harness/failures'));
+          return { sentinelPath };
+        },
+      },
+      {
+        label: 'ancestor symlink at .ai/harness',
+        setup: (cwd, outside) => {
+          const dir = join(outside, 'harness-dir');
+          mkdirSync(join(dir, 'failures'), { recursive: true });
+          writeFileSync(join(dir, 'workflow-contract.json'), '{}\n');
+          const sentinelPath = join(dir, 'failures/latest.jsonl');
+          writeFileSync(sentinelPath, sentinel);
+          rmSync(join(cwd, '.ai/harness'), { recursive: true, force: true });
+          symlinkSync(dir, join(cwd, '.ai/harness'));
+          return { sentinelPath };
+        },
+      },
+    ];
+    for (const { label, setup } of cases) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-log-symlink-')));
+      const [cwd, home, outside] = ['repo', 'home', 'outside'].map(name => join(root, name));
+      try {
+        for (const dir of [cwd, home, outside]) mkdirSync(dir, { recursive: true });
+        initRepo(cwd);
+        const { sentinelPath, absentPath } = setup(cwd, outside);
+        const agyId = hookIdentity({ host: 'antigravity' });
+        const agyEnv = { HOME: home, REPO_HARNESS_WORKTREE_ROOT: join(root, 'wt') };
+        const expectedStderr = `[UserFileGuard] ${ANTIGRAVITY_GUARD_DENIAL}\n  Fix: Ask the user to review the operation and run it locally.\n[UserFileGuard] Failure log not written.\n`;
+        expect({ label, edit: runMutationGuard({ repoRoot: cwd, payload: { tool_input: { file_path: OUTSIDE } }, identity: agyId, env: agyEnv }) })
+          .toEqual({ label, edit: { exitCode: 2, stdout: '', stderr: expectedStderr } });
+        expect({ label, bash: runBashMutationGuard({ repoRoot: cwd, payload: { cwd, tool_input: { command: `rm ${OUTSIDE}` } }, identity: agyId, env: agyEnv }) })
+          .toEqual({ label, bash: { exitCode: 2, stdout: '', stderr: expectedStderr } });
+        const hook = spawnSync(process.execPath, [HOOK_ENTRY, 'PreToolUse', '--route', 'edit'], {
+          cwd,
+          encoding: 'utf-8',
+          input: JSON.stringify({ cwd, toolCall: { name: 'write_file', args: { Path: OUTSIDE } } }),
+          env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: home, HOOK_HOST: 'antigravity' },
+        });
+        expect({ label, status: hook.status, stdout: hook.stdout, stderr: hook.stderr }).toEqual({
+          label,
+          status: 0,
+          stdout: `${JSON.stringify({ decision: 'deny', reason: ANTIGRAVITY_GUARD_DENIAL })}\n`,
+          stderr: '',
+        });
+        if (sentinelPath) expect(readFileSync(sentinelPath, 'utf8')).toBe(sentinel);
+        if (absentPath) expect(existsSync(absentPath)).toBe(false);
+      } finally { rmSync(root, { recursive: true, force: true }); }
     }
   }, 60_000);
   posixOnly('unparseable patch fails closed and an outside target stops the batch', () => {

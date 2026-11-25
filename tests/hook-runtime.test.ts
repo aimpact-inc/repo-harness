@@ -17,7 +17,7 @@ import { agentNoticeFixture, registryNoticeFixture, registryProjectedFixture, re
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveCompatibleNodeRuntime } from '../src/effects/architecture/archctx-provider';
-import { HOST_ADAPTERS } from '../src/cli/hook/host-adapter';
+import { ANTIGRAVITY_GUARD_DENIAL, HOST_ADAPTERS } from '../src/cli/hook/host-adapter';
 import { runHook } from '../src/cli/hook/runtime';
 import { buildTaskMessageEvent } from '../src/core/fleet/admitted-task-message';
 import { sendTaskMessage } from '../src/effects/fleet/task-inbox';
@@ -335,6 +335,24 @@ describe('host envelopes on the real hook entry (#678)', () => {
       .toEqual({ exitCode: 0, stdout: '', stderr: '' });
     expect(render({ ...outcome, event: 'Stop', routeId: 'default', additionalContext: null, systemMessage: 'Protected paths changed' }))
       .toEqual({ exitCode: 0, stdout: '', stderr: '' });
+  });
+
+  test('Antigravity adapter disables ask and renders guard ask or deny decisions as fixed deny', () => {
+    expect(HOST_ADAPTERS.antigravity.capabilities.ask).toBe(false);
+    const render = HOST_ADAPTERS.antigravity.render;
+    const base = { event: 'PreToolUse' as const, repoRoot: null, exitCode: 0, reason: 'ok', additionalContext: null, diagnostics: '' };
+    const fixedDeny = { exitCode: 0, stdout: `${JSON.stringify({ decision: 'deny', reason: ANTIGRAVITY_GUARD_DENIAL })}\n`, stderr: '' };
+    for (const routeId of ['bash', 'edit'] as const) {
+      expect(render({ ...base, routeId, permission: { decision: 'ask', reason: 'OPAQUE-ASK-REASON' } })).toEqual(fixedDeny);
+      expect(render({ ...base, routeId, permission: { decision: 'deny', reason: 'OPAQUE-DENY-REASON' } })).toEqual(fixedDeny);
+      expect(render({ ...base, routeId, exitCode: 2, reason: 'blocked' })).toEqual(fixedDeny);
+    }
+    expect(render({
+      ...base, routeId: 'edit', exitCode: 1, reason: 'invalid-payload',
+      permission: { decision: 'deny', reason: 'rh hook: malformed write_file input' },
+    })).toEqual({
+      exitCode: 0, stdout: `${JSON.stringify({ decision: 'deny', reason: 'rh hook: malformed write_file input' })}\n`, stderr: '',
+    });
   });
 
   test('edit and session advisories reach both hosts as additionalContext', () => {

@@ -280,14 +280,6 @@ function expectAntigravityDeny(result: { status: number | null; stdout: string; 
   expect(result.stderr).toBe('');
 }
 
-function expectAntigravityForceAsk(result: { status: number | null; stdout: string; stderr: string }) {
-  expect([result.status, result.stderr]).toEqual([0, '']);
-  expect(JSON.parse(result.stdout)).toEqual({
-    decision: 'force_ask',
-    reason: '[UserFileGuard] I2: This tool call may overwrite or remove an existing file outside the allowed roots.',
-  });
-}
-
 describe.skipIf(process.platform === 'win32')('Antigravity hook protocol', () => {
   test('canonicalizes a symlink cwd, ignores a forged root, and passes only on confirmed absence', () => withAntigravityFixture(f => {
     const link = join(f.root, 'nested-link');
@@ -325,13 +317,13 @@ describe.skipIf(process.platform === 'win32')('Antigravity hook protocol', () =>
     expect([unknown.status, unknown.stdout]).toEqual([2, '']);
   }));
 
-  test('keeps clean Bash silent and asks before either file tool overwrites a protected file', () => withAntigravityFixture(f => {
+  test('keeps clean Bash silent and denies when either file tool overwrites a protected file', () => withAntigravityFixture(f => {
     const input = { cwd: f.cwd, toolCall: { name: 'run_command', args: { CommandLine: 'echo okay' } } };
     const allowed = f.run('PreToolUse', 'bash', input);
     expect([allowed.status, allowed.stdout, allowed.stderr]).toEqual([0, '', '']);
     for (const name of ['write_file', 'edit_file']) {
       const toolCall = { name, args: { Path: '/etc/hosts' } };
-      expectAntigravityForceAsk(f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall }));
+      expectAntigravityDeny(f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall }), GUARD_DENIAL);
     }
   }));
 
@@ -370,7 +362,7 @@ process.exit(runHookCli(process.argv.slice(2)));
     expectAntigravityDeny(result, GUARD_DENIAL);
     // The ambient worktree override would otherwise admit this existing outside file.
     const edit = f.run('PreToolUse', 'edit', { cwd: f.cwd, toolCall: { name: 'write_file', args: { Path: '/etc/hosts' } } }, extraEnv);
-    expectAntigravityForceAsk(edit);
+    expectAntigravityDeny(edit, GUARD_DENIAL);
     // An allowlisted seat variable would survive bootstrap if Bun loaded .env.
     const auditEntry = join(f.config, 'audit-entry.ts');
     writeFileSync(auditEntry, `
@@ -387,17 +379,21 @@ process.exit(runHookCli(process.argv.slice(2)));
     for (const marker of [startup, ambient]) expect(output).not.toContain(marker);
   }));
 
-  test('Bash force_ask and deny keep opaque command words out of the response, stderr, and failure log', () => withAntigravityFixture(f => {
+  test('Bash UserFileGuard and CredentialGuard denials keep opaque command words out of the response, stderr, and failure log', () => withAntigravityFixture(f => {
     const marker = 'OPAQUE-SECRET-MARKER-3251';
     const invoke = (CommandLine: string) => f.run('PreToolUse', 'bash', { cwd: f.cwd, toolCall: { name: 'run_command', args: { CommandLine } } });
     const command = `rm "$UNKNOWN/${marker}"`;
-    const asked = invoke(command);
-    expectAntigravityForceAsk(asked);
-    const denied = invoke(`${command}; cat .env`);
-    expectAntigravityDeny(denied, GUARD_DENIAL);
+    const userFileDenied = invoke(command);
+    expectAntigravityDeny(userFileDenied, GUARD_DENIAL);
+    const credDenied = invoke(`${command}; cat .env`);
+    expectAntigravityDeny(credDenied, GUARD_DENIAL);
     const log = readFileSync(f.failures, 'utf8');
-    expect(JSON.parse(log)).toMatchObject({ guard: 'CredentialGuard', action: 'block', reason: GUARD_DENIAL });
-    expect(asked.stdout + denied.stdout + log).not.toContain(marker);
+    const records = log.trim().split('\n').map(line => JSON.parse(line));
+    expect(records).toMatchObject([
+      { guard: 'UserFileGuard', action: 'block', reason: GUARD_DENIAL },
+      { guard: 'CredentialGuard', action: 'block', reason: GUARD_DENIAL },
+    ]);
+    expect(userFileDenied.stdout + credDenied.stdout + log).not.toContain(marker);
   }));
 
   test('resolves an opted-in checkout from workspacePaths when cwd is an agent dir, refuses .env reads, and fails closed on ambiguity or invalid entries', () => withAntigravityFixture(f => {
@@ -428,11 +424,13 @@ process.exit(runHookCli(process.argv.slice(2)));
     }
 
     // I2 UserFileGuard still resolves relative Bash targets against wire.cwd (outside repoRoot and tmp), not repoRoot.
-    expectAntigravityForceAsk(
+    expectAntigravityDeny(
       f.run('PreToolUse', 'bash', { cwd: '/etc', workspacePaths: ['/etc', f.repo], toolCall: { name: 'run_command', args: { CommandLine: 'rm hosts' } } }),
+      GUARD_DENIAL,
     );
-    expectAntigravityForceAsk(
+    expectAntigravityDeny(
       f.run('PreToolUse', 'edit', { ...multi, toolCall: { name: 'write_file', args: { Path: '/etc/hosts' } } }),
+      GUARD_DENIAL,
     );
 
     // PreInvocation and Stop resolve the opted-in checkout too instead of skipping as not-in-git-repo.

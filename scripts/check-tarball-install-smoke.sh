@@ -844,7 +844,7 @@ invoke('SessionStart', hooks.SessionStart[0]);
 for (const [handler, toolCall, decision] of [
   [bash, { name: 'run_command', args: { CommandLine: 'cat .env' } }, 'deny'],
   // The hook only judges the target path. It never opens or edits this file.
-  [edit, { name: 'write_file', args: { Path: '/etc/hosts' } }, 'force_ask'],
+  [edit, { name: 'write_file', args: { Path: '/etc/hosts' } }, 'deny'],
 ]) {
   if (invoke('PreToolUse', handler, { toolCall })?.decision !== decision) {
     throw new Error(`Expected Antigravity ${toolCall.name} to return ${decision}`);
