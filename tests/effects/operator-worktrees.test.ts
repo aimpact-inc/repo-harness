@@ -14,7 +14,7 @@ import { startWorktreeCollector } from '../../src/effects/operator/worktree-coll
 import { collectOrphanWorktrees } from '../../src/effects/operator/worktree-orphans-worker';
 import { repoHarnessRepoIdFor, type RepoHarnessRegisteredRepo } from '../../src/effects/repo-registry';
 import * as processProbe from '../../src/effects/git/worktree-processes';
-import { worktreeProcesses, type LinuxWorktreeProcessProbe, type WindowsProcessInspection, type WindowsWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
+import { classifyWindowsDeniedToken, worktreeProcesses, type LinuxWorktreeProcessProbe, type WindowsProcessInspection, type WindowsWorktreeProcessProbe } from '../../src/effects/git/worktree-processes';
 import { decodeWorktreeCleanupRequest, decodeWorktreeCleanupResult, worktreeDigestRow } from '../../src/core/operator/worktree-cleanup';
 import { decodeWorktreeCleanupChildOutput, runWorktreeCleanup, selectionDigest, type WorktreeProcessProbe } from '../../src/effects/operator/worktree-cleanup';
 import { OperatorWriteRefusal } from '../../src/effects/operator/write-run';
@@ -132,17 +132,17 @@ describe('read-only worktree judgment and lifecycle', () => {
     ...overrides,
   });
 
-  test('windows process probe normalizes local paths, skips system/protected/UIAccess/exited entries, and leaves remote paths untouched', () => {
+  test('windows process probe normalizes handle-canonicalized and local paths and skips out-of-scope entries', () => {
     const resolved: string[] = [];
     const byPid: Record<number, WindowsProcessInspection> = {
       100: { status: 'ok', cwd: 'c:\\users\\win\\repo\\' },
       101: { status: 'ok', cwd: '\\\\?\\C:\\Users\\win\\junc-wt\\' },
       102: { status: 'ok', cwd: 'C:\\' },
-      103: { status: 'ok', cwd: '\\\\server\\share\\dir\\' },
-      104: { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\sub\\' },
-      105: { status: 'ok', cwd: 'Z:\\mapped\\dir\\' },
-      106: { status: 'exited' },
-      107: { status: 'other_user' },
+      103: { status: 'ok', cwd: '\\\\?\\C:\\Users\\win\\repo-wt-subst\\', canonical: true },
+      104: { status: 'ok', cwd: '\\\\?\\UNC\\server\\share\\sub\\', canonical: true },
+      105: { status: 'exited' },
+      106: { status: 'other_user' },
+      107: { status: 'inaccessible' },
       108: { status: 'protected' },
       109: { status: 'ui_access' },
     };
@@ -158,11 +158,10 @@ describe('read-only worktree judgment and lifecycle', () => {
       { pid: 100, cwd: 'C:\\Users\\win\\repo' },
       { pid: 101, cwd: 'C:\\Users\\win\\repo-wt-1' },
       { pid: 102, cwd: 'C:\\' },
-      { pid: 103, cwd: '\\\\server\\share\\dir' },
+      { pid: 103, cwd: 'C:\\Users\\win\\repo-wt-subst' },
       { pid: 104, cwd: '\\\\server\\share\\sub' },
-      { pid: 105, cwd: 'Z:\\mapped\\dir' },
     ]);
-    expect(resolved.some(path => path.startsWith('\\\\server') || path.startsWith('Z:'))).toBe(false);
+    expect(resolved.some(path => path.includes('repo-wt-subst') || path.startsWith('\\\\server'))).toBe(false);
     expect(protectsCwd('C:\\Users\\win\\repo-wt-1', 'c:\\users\\win\\repo-wt-1\\sub\\', 'win32')).toBe(true);
     expect(protectsCwd('C:\\Users\\win\\repo-wt-1', '\\\\?\\C:/Users/win/repo-wt-1', 'win32')).toBe(true);
     expect(protectsCwd('C:\\Users\\win\\repo-wt-1', 'C:\\Users\\win\\repo-wt-10', 'win32')).toBe(false);
@@ -175,8 +174,34 @@ describe('read-only worktree judgment and lifecycle', () => {
     ['missing own process', { pids: () => [101] }],
     ['mismatched own CWD', { inspect: () => ({ status: 'ok', cwd: 'C:\\elsewhere\\' }) } as Partial<WindowsWorktreeProcessProbe>],
     ['relative CWD', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'relative\\path' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['removed SUBST or unrecognized drive', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'X:\\repo-wt-alias\\' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['unresolved mapped network drive', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: 'Z:\\mapped\\dir\\' } } as Partial<WindowsWorktreeProcessProbe>],
+    ['unresolvable local alias or junction', { realpath: (path: string) => { if (path.includes('repo-wt-1')) throw new Error('ENOENT'); return path; } }],
+    ['unresolvable non-canonical UNC path', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: '\\\\server\\share\\dir\\' }, realpath: (path: string) => { if (path.startsWith('\\\\')) throw new Error('ENOENT'); return path; } } as Partial<WindowsWorktreeProcessProbe>],
+    ['volume GUID path without DOS drive', { inspect: (pid: number) => pid === 100 ? { status: 'ok', cwd: 'C:\\Users\\win\\repo\\' } : { status: 'ok', cwd: '\\\\?\\Volume{0000}\\repo-wt-1', canonical: true } } as Partial<WindowsWorktreeProcessProbe>],
   ])('windows probe fails closed on %s', (_name, overrides) => {
     expect(worktreeProcesses(Date.now() + 5000, undefined, winProbe(overrides))).toBeNull();
+  });
+
+  test('windows denied token classification skips only proven exited, protected, or Session 0 system services', () => {
+    const base = { stillActive: true as boolean | null, protectedProcess: false, ownIsSystemService: false, sessionId: 0 as number | null, systemServiceAccounts: ['LocalSystem'] as readonly string[] | null };
+    expect(classifyWindowsDeniedToken({ ...base, stillActive: false })).toEqual({ status: 'exited' });
+    expect(classifyWindowsDeniedToken({ ...base, stillActive: null })).toEqual({ status: 'failed' });
+    expect(classifyWindowsDeniedToken({ ...base, protectedProcess: true, systemServiceAccounts: null })).toEqual({ status: 'protected' });
+    for (const account of ['', 'LocalSystem', '.\\LocalSystem', 'NT AUTHORITY\\LocalService', 'NT AUTHORITY\\NetworkService', 'NT SERVICE\\TrustedInstaller']) {
+      expect(classifyWindowsDeniedToken({ ...base, systemServiceAccounts: [account] })).toEqual({ status: 'other_user' });
+    }
+    for (const overrides of [
+      { sessionId: 1 },
+      { sessionId: null },
+      { ownIsSystemService: true },
+      { systemServiceAccounts: null },
+      { systemServiceAccounts: [] },
+      { systemServiceAccounts: ['M2\\win'] },
+      { systemServiceAccounts: ['LocalSystem', 'M2\\win'] },
+    ]) {
+      expect(classifyWindowsDeniedToken({ ...base, ...overrides })).toEqual({ status: 'denied' });
+    }
   });
 
   test('windows probe fails closed when its deadline is already reached', () => {
