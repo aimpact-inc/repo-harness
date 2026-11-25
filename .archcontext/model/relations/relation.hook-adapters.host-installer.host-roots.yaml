@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.hook-adapters.host-installer.host-roots
+kind: calls
+source: component.hook-adapters.host-installer
+target: component.execution-primitives.host-roots
+intent: Resolve the destination root for each host skill projection
