@@ -18,17 +18,17 @@
   ],
   "affectedNodeCount": 3,
   "regressesFrom": null,
-  "status": "accepted",
+  "status": "resolved",
   "observationMetrics": {
     "cycleEdgeCount": 3,
     "memberCount": 3
   },
-  "reason": "Issue #3511 moves the providers.ts wiring out of archctx-closure into its own component, so archctx-closure, owners and architecture-read form no cycle; no code changes.",
+  "reason": "Resolved in #3511",
   "actor": {
     "kind": "cli",
     "id": "cli-user"
   },
-  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "decidedAt": "2026-11-25T07:24:05.000Z",
   "provenance": {
     "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
     "assessmentDigest": "sha256:0123966c1e4177437868745e5d39528c01f0aec7e3a843028565675fde96d515",
@@ -36,6 +36,7 @@
   },
   "snapshotDigest": "sha256:0343dafdec74fd8a5e0a3961097f7afa5eb3030fb067b3eeb114f1387e746f3a",
   "evidenceDigest": "sha256:0123966c1e4177437868745e5d39528c01f0aec7e3a843028565675fde96d515",
+  "resolutionDigest": "sha256:c9f76175efc33a8ca37cbc73f303911fa7291a267b10472488905eab748e916d",
   "scope": {
     "kind": "repository"
   },
