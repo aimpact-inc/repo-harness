@@ -16,16 +16,16 @@
   ],
   "affectedNodeCount": 1,
   "regressesFrom": null,
-  "status": "accepted",
+  "status": "resolved",
   "observationMetrics": {
     "entrypointBypassCount": 69
   },
-  "reason": "Declare the host-installer public surface as entrypoints in #3527",
+  "reason": "Resolved in #3527",
   "actor": {
     "kind": "cli",
     "id": "cli-user"
   },
-  "decidedAt": "2026-11-25T08:19:59.000Z",
+  "decidedAt": "2026-11-25T08:36:37.000Z",
   "provenance": {
     "headSha": "89c1f791c00a592c3d29e7a45f944a22fd083835",
     "assessmentDigest": "sha256:bf2e138d1ca7aec2cb39d4174f0e79379696d7ddd47088af5f0469be6cefe54e",
@@ -33,6 +33,7 @@
   },
   "snapshotDigest": "sha256:113d4e38f57b68852bc3f7d63c8fd294d093bfd5491bf98e1b5c86fb719c4e13",
   "evidenceDigest": "sha256:bf2e138d1ca7aec2cb39d4174f0e79379696d7ddd47088af5f0469be6cefe54e",
+  "resolutionDigest": "sha256:5fe14e0a9f912e4234b39a3815397faadff77cf5d447a14d7a2ee1c9fd6c4353",
   "scope": {
     "kind": "repository"
   },
