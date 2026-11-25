@@ -446,6 +446,9 @@ test('High acceptance: PASS rows of the head from two distinct claims, one recor
   const family = (edit: (data: Json) => void, pulls?: (data: Json) => void) => pr1491(replay({ parent: (data) => { parent(data); edit(data); }, pulls })).writer_family;
   const refs1479 = (data: Json) => { data.repository.pr1491.body += '\nRefs #1479\n'; };
   const second = (runtime: string) => (data: Json) => { issueNode(data, 1479).comments.nodes.push(claim(runtime, 'feat/1475-hc-transport')); };
+  expect(['gpt-6.1-terra', 'magpie/codex/gpt-6.1-terra'].map(model => family(second(model), data => {
+    data.repository.pr1491.body = 'Closes #1479';
+  }))).toEqual(['openai', 'openai']);
   expect([
     family((data) => { const node = issueNode(data, 1475).comments.nodes.find((entry: Json) => entry.body.includes('Model: claude')); node.body = node.body.replace(/\nModel: .*/u, ''); }),
     family((data) => { const node = issueNode(data, 1475).comments.nodes.find((entry: Json) => entry.body.includes('Model: claude')); node.body = node.body.replace(/Model: .*/u, 'Model: magpie/deepseek-v4'); }),

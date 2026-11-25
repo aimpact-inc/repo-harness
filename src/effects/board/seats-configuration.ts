@@ -24,6 +24,7 @@ import {
   WORKER_SEAT_IDS,
   SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
+  retiredSeatModelField,
   seatsConfigInvalidMessage,
   seatHostId,
   seatModelShapeValid,
@@ -43,7 +44,7 @@ import {
   type SeatTool,
 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
-import { MAGPIE_EXTENSION_PATH, SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, recommendedModelIds, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
+import { MAGPIE_EXTENSION_PATH, SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, catalogProbeModelIds, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
 import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
 import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
@@ -64,6 +65,7 @@ export type SeatsConfigurationErrorCode =
   | AgySeatSettingsError['code']
   | 'seat_runtime_not_enabled'
   | 'seat_model_invalid'
+  | 'seat_model_retired'
   | 'seat_effort_invalid'
   | 'seat_effort_unverified'
   | 'seat_tool_not_allowed'
@@ -311,7 +313,7 @@ async function probeAgyPool(): Promise<SeatPoolProbe> {
   const probe = await readAgyCatalog();
   switch (probe.kind) {
     case 'available': return { id: 'agy', installation: 'available', sign_in: 'logged_in', models: 'ok',
-      listed: [...recommendedModelIds('agy')].filter(id => probe.models.some(model => model.id === id)).map(id => ({ id, disabled: false })) };
+      listed: [...catalogProbeModelIds('agy')].filter(id => probe.models.some(model => model.id === id)).map(id => ({ id, disabled: false })) };
     case 'signed_out': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'logged_out', models: 'unauthenticated' };
     case 'catalog_unknown': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'unknown', models: 'unknown' };
     case 'not_installed': return emptySeatPoolProbe('agy', 'not_installed');
@@ -338,7 +340,7 @@ async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: st
     const catalog = await listModels(installed, { cwd: process.cwd(), timeoutMs: SEAT_POOL_MEMBER_MS });
     if (catalog.kind === 'unauthenticated') return { ...probe, models: 'unauthenticated' };
     if (catalog.kind !== 'ok') return probe;
-    const wanted = recommendedModelIds(id);
+    const wanted = catalogProbeModelIds(id);
     return { ...probe, models: 'ok', listed: catalog.models.filter(model => wanted.has(model.id))
       .map(model => ({ id: model.id, disabled: model.disabled !== undefined })) };
   } catch {
@@ -657,6 +659,8 @@ export async function applySeatsSettings(
   request: { readonly expected_revision: string; readonly seats: SeatsConfigV1 },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<SeatsSettingsResultV1> {
+  const retired = retiredSeatModelField(request.seats);
+  if (retired !== null) throw new SeatsConfigurationError('seat_model_retired', `The model at ${retired} is retired. Choose another model.`);
   try {
     // The catalog read can take a minute, so it runs before the configuration lock. The expected revision refuses a
     // section that changed after this read.

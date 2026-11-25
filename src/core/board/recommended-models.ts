@@ -8,7 +8,7 @@ import {
   catalogModelIds,
   type AgentTargetOverride,
 } from './model-catalog';
-import { DEFAULT_SEATS_CONFIG, PI_CODEX_MODEL_PREFIX, SEAT_IDS, type SeatId, type SeatModelEntryV1 } from './seats-settings';
+import { DEFAULT_SEATS_CONFIG, PI_CODEX_MODEL_PREFIX, RETIRED_SEAT_MODELS, SEAT_IDS, type SeatId, type SeatModelEntryV1 } from './seats-settings';
 
 // Per-agent Codex target overrides — the only model/effort remaps in the fleet.
 // Every role carries an explicit target so Codex model/effort never drift with
@@ -22,8 +22,6 @@ const CARBON = catalogEntry('carbon', 'magpie');
 const PI_HYDROGEN = catalogEntry('hydrogen', 'magpie');
 const PI_SOL = catalogEntry('sol', 'magpie');
 const SOL = catalogEntry('sol', 'native');
-const PI_TERRA = catalogEntry('terra', 'magpie');
-const TERRA = catalogEntry('terra', 'native');
 const ASTRA = catalogEntry('astra', 'native');
 const PI_ASTRA = catalogEntry('astra', 'magpie');
 export const AGY_ADVISOR_STARTER = catalogEntry('neon', 'native');
@@ -45,8 +43,6 @@ const WORKER = Object.freeze([
   ...AGY_NEON_VARIANTS,
   PI_SOL,
   SOL,
-  PI_TERRA,
-  TERRA,
   GLM_FLASH,
   DEEPSEEK_FLASH,
   PI_HYDROGEN,
@@ -88,10 +84,11 @@ const defaults = [...SEAT_IDS.map(id => DEFAULT_SEATS_CONFIG[id]?.model), DEFAUL
 
 /**
  * The model ids that may appear outside the launch argv (#3250): every catalog id, every recommended id,
- * every default id, and each recommended Codex id on the Pi Codex route, which runs the same model on the same account.
+ * every default id, and each recommended Codex id on the Pi Codex route. Includes retired ids for saved seats and claims.
  */
 export const SHIPPED_MODEL_IDS: ReadonlySet<string> = new Set([
   ...catalogModelIds(),
+  ...RETIRED_SEAT_MODELS.map(item => item.model),
   ...recommended.map(item => item.model),
   ...defaults,
   ...recommended.filter(item => item.runtime === 'codex').map(item => `${PI_CODEX_MODEL_PREFIX}${item.model}`),

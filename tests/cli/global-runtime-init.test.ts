@@ -255,7 +255,7 @@ test('update strips retired fleet roles once and leaves the saved seats ready fo
       advisor: { ...DEFAULT_SEATS_CONFIG.advisor, advisor_model: null, fleet: [...fleet, 'gatekeeper'] },
       worker: { ...DEFAULT_SEATS_CONFIG.worker, runtime: 'codex' as const, model: 'custom-codex-model', effort: 'low', tools: ['edit', 'read', 'shell'], fleet: legacyFleet },
       'worker-opus': { ...DEFAULT_SEATS_CONFIG['worker-opus'], model: 'custom-claude-model', fleet: legacyFleet },
-      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/codex/gpt-6.1-terra', fleet: legacyFleet },
+      'worker-light': { ...DEFAULT_SEATS_CONFIG['worker-light']!, model: 'magpie/codex/gpt-6.2-sol', fleet: legacyFleet },
       routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker-light', 'worker'], claude_saving_below_remaining: 35 },
     };
     const agents = { enabled: ['claude', 'codex', 'pi'], uses: { review: [], docs: [] }, default_docs: null };

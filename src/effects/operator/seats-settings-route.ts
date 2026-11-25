@@ -34,6 +34,7 @@ export const SEATS_CONFIGURATION_FAILURES: Readonly<Record<SeatsConfigurationErr
   seat_runtime_not_enabled: { status: 422, next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.' },
   seat_runtime_not_allowed: { status: 422, next_action: 'Use agy only on orchestrator, advisor, council, worker seats, or gatekeeper-fallback.' },
   seat_model_invalid: { status: 422, next_action: 'Choose or type a model for the named field, then save again.' },
+  seat_model_retired: { status: 422, next_action: 'Replace the retired model in the named field, then save again.' },
   seat_effort_invalid: { status: 422, next_action: CHOOSE_FROM_RANGES },
   seat_effort_unverified: { status: 503, next_action: 'Sign in to agy so that it lists its models, or set the agy seat effort to Default, then save again.' },
   seat_tool_not_allowed: { status: 422, next_action: CHOOSE_FROM_RANGES },

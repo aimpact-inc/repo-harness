@@ -3,7 +3,7 @@ import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { agySeatLimits, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isRetiredSeatModel, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, retiredSeatModelField, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
 import type { OperatorTranslate } from './i18n';
 import type { QuotaSection } from './quota';
@@ -218,11 +218,16 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   const council = isCouncilSeat(seat);
   const check = (on: boolean) => (on ? ' ✓' : '');
   const suggested = range.models.filter(entry => entry.runtime === draft.runtime).map(entry => entry.model);
+  const retired = isRetiredSeatModel(draft.model);
   const models = [
     ...(agy || council ? [] : [{ value: null, label: t('seats.model.hostDefault') }]),
     ...suggested.map(model => ({ value: model as string | null, label: model })),
-    // A typed or stored model outside the seat's recommended list stays visible as a choice.
-    ...(draft.model !== null && !suggested.includes(draft.model) ? [{ value: draft.model as string | null, label: draft.model }] : []),
+    // Keep the current value visible even when it is outside the recommendations.
+    ...(draft.model !== null && !suggested.includes(draft.model) ? [{
+      value: draft.model as string | null,
+      label: retired ? t('seats.model.retired', { model: draft.model }) : draft.model,
+      off: retired,
+    }] : []),
   ];
   // An agy seat offers the menu of its model. A stored effort outside it stays visible; it is struck out when the menu is known.
   const agyMenu = agy ? agyEffortMenu(draft.model, ranges.agy_models) : null;
@@ -525,6 +530,7 @@ function SeatsBody({ form, agents, setup, quota, t }: {
     return seat !== null && !settings.ranges.runtimes.find(entry => entry.id === seat.runtime)!.enabled ? [{ id, runtime: seat.runtime }] : [];
   });
   const refused = draft === null ? null : sectionRefusal(settings.config.revision, draft);
+  const retiredField = draft === null ? null : retiredSeatModelField(draft);
   return (
     <div className="flex flex-col gap-5" data-seats-page>
       <p className="text-sm text-kumo-subtle">{t('seats.lead')}</p>
@@ -593,7 +599,8 @@ function SeatsBody({ form, agents, setup, quota, t }: {
           </span>
         ))}
         {refused !== null && <span className="text-xs text-kumo-warning" data-save-refused={refused}>{t('seats.savebar.refused', { code: refused })}</span>}
-        <Button variant="primary" onClick={form.submit} disabled={form.request === null || locked || notEnabled.length > 0 || refused !== null} data-save="seats">
+        {retiredField !== null && <span className="text-xs text-kumo-warning" data-retired-model-field={retiredField}>{t('seats.savebar.retired', { field: retiredField })}</span>}
+        <Button variant="primary" onClick={form.submit} disabled={form.request === null || locked || notEnabled.length > 0 || refused !== null || retiredField !== null} data-save="seats">
           {form.save.kind === 'saving' ? t('settings.saving') : t('settings.save')}
         </Button>
       </div>

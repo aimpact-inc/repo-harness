@@ -102,6 +102,16 @@ test('dispatch skips a signed-out worker and uses the next available seat in tha
     detail: expect.stringContaining('claude: Runtime signed out. See seats.worker-opus.model.') });
 });
 
+test('dispatch skips a retired worker model that the native catalog disables', () => {
+  const worker = { ...NATIVE_SEATS_PRESET.worker, model: 'gpt-6.1-terra' };
+  const seats = { ...DEFAULT_SEATS_CONFIG, worker, routing: { ...DEFAULT_SEATS_CONFIG.routing, simple_fast: ['worker'] as const } };
+  const probe: SeatPoolProbe = { id: 'codex', installation: 'available', sign_in: 'logged_in', models: 'ok', listed: [{ id: worker.model, disabled: true }] };
+  const plan = planDispatch({ seats, quota: NORMAL, terminals: [], parent: read([issue(1, { labels: ['route:simple_fast'] })]),
+    modelBlock: (id, seat) => seatModelBlock(id, seat, seats, [probe], () => false) });
+  expect(plan.decisions[0]).toMatchObject({ action: 'skip', reason: 'no_route',
+    detail: expect.stringContaining('codex: Model disabled by the runtime. See seats.worker.model.') });
+});
+
 test('the worker limit counts live seats of the parent and stops further dispatch', () => {
   const live = (issueNumber: string) => ({ state: 'live' as const, labels: { seat: 'worker', issue: issueNumber, parent: '100' } });
   const plan = planDispatch({
@@ -269,6 +279,10 @@ test('the claim names the model from the context; a seat with no model writes no
   expect(bodies[2]).not.toContain(secret);
   expect(bodies[2]).toContain('\nModel: seats.worker-opus.model\n');
   expect(bodies[2]).toContain('Dispatch reading: route important_deep: worker-opus (claude seats.worker-opus.model');
+  for (const model of ['gpt-6.1-terra', 'magpie/codex/gpt-6.1-terra']) {
+    await executeDispatch(planOf(['route:important_deep']), { ...context, model: () => model }, run.base);
+    expect(bodies.at(-1)).toContain(`\nModel: ${model}\n`);
+  }
 });
 
 test('dispatch refuses before any writes without an active coordinator claim', async () => {

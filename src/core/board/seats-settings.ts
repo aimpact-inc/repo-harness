@@ -101,6 +101,18 @@ export interface SeatConfigV1 {
 
 /** A Pi seat on this model prefix runs a Codex-range GPT model through magpie: it draws on the same ChatGPT account as a Codex seat. */
 export const PI_CODEX_MODEL_PREFIX = 'magpie/codex/';
+
+const RETIRED_CODEX_MODEL = 'gpt-6.1-terra';
+/** Saved and historical IDs retain their original routes. */
+export const RETIRED_SEAT_MODELS = [
+  { runtime: 'codex', model: RETIRED_CODEX_MODEL },
+  { runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}${RETIRED_CODEX_MODEL}` },
+] as const satisfies readonly SeatModelEntryV1[];
+
+export function isRetiredSeatModel(model: string | null | undefined): boolean {
+  return RETIRED_SEAT_MODELS.some(entry => entry.model === model);
+}
+
 export const isPiCodexSeat = (seat: { readonly runtime: SeatRuntime; readonly model: string | null }): boolean =>
   seat.runtime === 'pi' && seat.model?.startsWith(PI_CODEX_MODEL_PREFIX) === true;
 
@@ -259,7 +271,7 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
       orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ORCHESTRATOR_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       advisor: Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_ADVISOR_SEAT_TOOLS, fleet: EMPTY_FLEET }),
       council: null,
-      worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.1-terra', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
+      worker: Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-deep': Object.freeze({ runtime: 'codex', model: 'gpt-6.2-sol', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-opus': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
       'worker-neon': Object.freeze({ runtime: 'agy', model: 'gemini-4-neon-high', advisor_model: null, effort: null, tools: AGY_WORKER_SEAT_TOOLS, fleet: EMPTY_FLEET }),
@@ -275,7 +287,7 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
     orchestrator: Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: ORCHESTRATOR_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     advisor: Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'xhigh', tools: Object.freeze(['mcp', 'net', 'read', 'shell'] as const), fleet: SEAT_SCAFFOLD_SUB_AGENTS }),
     council: null,
-    worker: Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.1-terra`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
+    worker: Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     'worker-deep': Object.freeze({ runtime: 'pi', model: `${PI_CODEX_MODEL_PREFIX}gpt-6.2-sol`, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     'worker-opus': Object.freeze({ runtime: 'claude', model: 'opus', advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
     'worker-neon': Object.freeze({ runtime: 'pi', model: PI_NEON_MODEL, advisor_model: null, effort: 'high', tools: WORKER_TOOLS, fleet: EXPLORER_ONLY_FLEET }),
@@ -580,6 +592,15 @@ function decodeSeatsRecord(record: Record<string, unknown>, code: string, fromSe
 
 function decodeSeats(value: unknown, code: string): SeatsConfigV1 {
   return decodeSeatsRecord(object(value, SECTION_KEYS, code, REQUIRED_SECTION_KEYS), code);
+}
+
+/** Find a retired model in a section submitted for save. */
+export function retiredSeatModelField(seats: SeatsConfigV1): string | null {
+  const id = SEAT_IDS.find(seat => isRetiredSeatModel(seats[seat]?.model));
+  if (id !== undefined) return `seats.${id}.model`;
+  if (isRetiredSeatModel(seats.routing.low_quota_explorer.model)) return 'seats.routing.low_quota_explorer.model';
+  const role = SEAT_SCAFFOLD_SUB_AGENTS.find(name => isRetiredSeatModel(seats.pi_sub_agent_models?.[name]));
+  return role === undefined ? null : `seats.pi_sub_agent_models.${role}`;
 }
 
 function validateLegacyRetiredReviewSeat(fieldName: string, value: unknown, code: string): void {

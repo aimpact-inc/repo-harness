@@ -446,6 +446,27 @@ describe('agents page seats section', () => {
     expect(posts[0]!.seats['worker-opus'].model).toBe('claude-opus-9');
   });
 
+  test('a saved retired worker model stays visible and blocks Save until replaced', async () => {
+    const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
+    const read = await settingsStores(NOW, 'busy').seats.read();
+    if (read.state !== 'ok') throw new Error('fixture read failed');
+    const worker = { ...read.settings.config.worker, runtime: 'codex' as const, model: 'gpt-6.1-terra' };
+    await mount({ ...seatsProps(posts), readSeatsSettings: async () => ({ state: 'ok', settings: {
+      ...read.settings, config: { ...read.settings.config, worker },
+    } }) });
+    await click(document.querySelector<HTMLElement>('[data-pane="worker"]')!);
+    const retired = buttonWithText('gpt-6.1-terra (retired)');
+    expect(retired.getAttribute('aria-pressed')).toBe('true');
+    expect(retired.hasAttribute('disabled')).toBe(true);
+    expect(document.querySelector('[data-retired-model-field="seats.worker.model"]')?.textContent).toContain('Choose another model');
+    expect(seatsSave().disabled).toBe(true);
+
+    await click(buttonWithText('gpt-6.2-sol'));
+    expect(seatsSave().disabled).toBe(false);
+    await click(seatsSave());
+    expect(posts[0]?.seats.worker.model).toBe('gpt-6.2-sol');
+  });
+
   test('Pi Neon clears the orchestrator note and can be added to a frontend route', async () => {
     const posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[] = [];
     const read = await settingsStores(NOW, 'busy').seats.read();

@@ -13,7 +13,7 @@ import {
   type QuotaReport,
 } from '../../src/core/board/quota';
 import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccount, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
-import { AGY_HYDROGEN_VARIANTS, LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
+import { AGY_HYDROGEN_VARIANTS, LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, catalogModelIds, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
 import { SHIPPED_MODEL_IDS } from '../../src/core/board/recommended-models';
 import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET, type CodexCreditMode, type SeatConfigV1 } from '../../src/core/board/seats-settings';
@@ -220,6 +220,13 @@ describe('seat quota routing', () => {
     expect(AGY_HYDROGEN_VARIANTS.map(entry => entry.model)).toEqual(['low', 'medium', 'high', 'xhigh'].map(effort => `gemini-4-hydrogen-${effort}`));
     expect(resolveCatalogRoute('hydrogen', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen', effort: 'high' });
     expect(catalogEntry('sol', 'magpie')).toEqual({ runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' });
+    expect(isCatalogModelPermittedOnSeat('worker', catalogEntry('sol', 'native'))).toBe(true);
+    expect(DEFAULT_SEATS_CONFIG.worker).toMatchObject({ runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol', effort: 'high' });
+    expect(NATIVE_SEATS_PRESET.worker).toMatchObject({ runtime: 'codex', model: 'gpt-6.2-sol', effort: 'high' });
+    for (const retired of ['gpt-6.1-terra', 'magpie/codex/gpt-6.1-terra']) {
+      expect(catalogModelIds().has(retired)).toBe(false);
+      expect(SHIPPED_MODEL_IDS.has(retired)).toBe(true);
+    }
     expect(seatAccount({ runtime: 'agy', model: 'gemini-4-hydrogen-high' })).toBe('agy_gemini');
     expect(seatAccount({ runtime: 'agy', model: 'claude-opus-5-5-high' })).toBe('agy_other');
     expect(seatAccount({ runtime: 'agy', model: 'gpt-oss-120b-medium' })).toBe('agy_other');
@@ -672,7 +679,10 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
     ] } } }); break;
     case 'initialize': out({ id: message.id, result: {} }); break;
     case 'initialized': break;
-    case 'model/list': out({ id: message.id, result: { data: [{ model: 'gpt-6.2-sol' }, { model: 'gpt-6.2-astra', hidden: true }], nextCursor: null } }); break;
+    case 'model/list': out({ id: message.id, result: { data: [
+      { model: 'gpt-6.2-sol' }, { model: 'gpt-6.2-astra', hidden: true },
+      ...(mode === 'terra_listed' ? [{ model: 'gpt-6.1-terra' }] : []),
+    ], nextCursor: null } }); break;
     case 'config/read': out({ id: message.id, result: { config: { model: 'private-free-id' } } }); break;
     default: process.exit(9);
   }
@@ -702,7 +712,6 @@ describe('rh seats pool', () => {
     expect(pool.seats.find(row => row.seat === 'worker')?.pool).toMatchObject([
       { model: 'magpie/agy-cli/gemini-4-neon', account: 'agy_gemini', reason: 'pi on PATH; provider not checked' },
       { model: 'magpie/codex/gpt-6.2-sol', account: 'chatgpt', reason: 'pi on PATH; provider not checked' },
-      { model: 'magpie/codex/gpt-6.1-terra', account: 'chatgpt', reason: 'pi on PATH; provider not checked' },
       { model: 'zai/glm-5.3-flash', reason: 'pi on PATH; provider not checked' },
       { model: 'magpie/agy-cli/gemini-4-hydrogen', account: 'agy_gemini', reason: 'pi on PATH; provider not checked' },
     ]);
@@ -771,7 +780,6 @@ ${agyCatalogScript(catalogs[branch], branch === 'unsupported' ? '1.4.9' : undefi
       ['gemini-4-neon-low', 'not_installed'], ['gemini-4-neon-medium', 'not_installed'],
       ['gemini-4-neon-high', 'not_installed'], ['gemini-4-neon-xhigh', 'not_installed'],
       ['magpie/codex/gpt-6.2-sol', 'not_installed'],
-      ['magpie/codex/gpt-6.1-terra', 'not_installed'], ['gpt-6.1-terra', 'not_listed'],
       ['zai/glm-5.3-flash', 'not_installed'], ['magpie/group/deepseek-v4.1-flash', 'not_installed'],
       ['magpie/agy-cli/gemini-4-hydrogen', 'not_installed'],
       ...['low', 'medium', 'high', 'xhigh'].map(effort => [`gemini-4-hydrogen-${effort}`, 'not_installed']),
@@ -859,10 +867,28 @@ describe('rh seats launch availability', () => {
     const refused = launchSeat('worker', f.env);
     expect([refused.status, refused.stdout, JSON.parse(refused.stderr)]).toEqual([1, '', {
       ok: false, error: 'seat_provider_unavailable',
-      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi magpie\/agy-cli\/gemini-4-neon, pi magpie\/codex\/gpt-6\.2-sol, pi magpie\/codex\/gpt-6\.1-terra, pi zai\/glm-5\.3-flash, pi magpie\/group\/deepseek-v4\.1-flash, pi magpie\/agy-cli\/gemini-4-hydrogen/u),
+      message: expect.stringMatching(/The worker seat cannot launch\. codex: Runtime not found on PATH\. See seats\.worker\.model\..*Available pool for worker: pi magpie\/agy-cli\/gemini-4-neon, pi magpie\/codex\/gpt-6\.2-sol, pi zai\/glm-5\.3-flash, pi magpie\/group\/deepseek-v4\.1-flash, pi magpie\/agy-cli\/gemini-4-hydrogen/u),
     }]);
     expect(existsSync(tab)).toBe(false);
     expect(existsSync(f.env.SEAT_POOL_LOG)).toBe(false);
+  });
+
+  test('a saved retired worker uses the native runtime catalog before launch', () => {
+    const f = poolFixture('codex');
+    const model = 'gpt-6.1-terra';
+    const seats = { ...DEFAULT_SEATS_CONFIG, worker: { ...NATIVE_SEATS_PRESET.worker, model } };
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    const tab = join(f.home, 'tab.json');
+    fixtureHerdr(f.env, tab);
+    const refused = launchSeat('worker', f.env);
+    expect([refused.status, refused.stdout]).toEqual([1, '']);
+    expect(JSON.parse(refused.stderr)).toMatchObject({ error: 'seat_provider_unavailable',
+      message: expect.stringContaining('codex: Model missing from the runtime catalog. See seats.worker.model.') });
+    expect(existsSync(tab)).toBe(false);
+
+    const started = launchSeat('worker', { ...f.env, SEAT_POOL_CODEX: 'terra_listed' });
+    expect(started.status, started.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(tab, 'utf8')).argv).toContain(model);
   });
 
   test('a signed-out runtime refuses a stored free id before quota or tab start', () => {
@@ -1082,7 +1108,7 @@ describe('rh quota', () => {
     const lines = text.stdout.trim().split('\n');
     expect(lines.slice(0, 2).map(line => line.split(' | ')[0])).toEqual(['claude: exhausted', 'chatgpt: normal']);
     expect(lines.slice(2, 4)).toEqual(['claude mode: saving (5% left < 20%)', 'codex mode: normal (90% left)']);
-    for (const expected of ['route simple_fast: worker (pi magpie/codex/gpt-6.1-terra high',
+    for (const expected of ['route simple_fast: worker (pi magpie/codex/gpt-6.2-sol high',
       'route simple_deep: worker-deep (pi magpie/codex/gpt-6.2-sol medium',
       'gatekeeper: gatekeeper (pi magpie/codex/gpt-6.2-sol high',
       'advisor: advisor (pi magpie/codex/gpt-6.2-sol)']) expect(text.stdout).toContain(expected);
