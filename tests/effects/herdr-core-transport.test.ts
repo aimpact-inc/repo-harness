@@ -1,10 +1,13 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpWorkspace } from '../helpers/repo-fixture';
 import {
-  HerdrCoreError, RH_LABEL, RH_NOTIFY_LABELS, RH_NOTIFY_RELAY, hcEvents, hcGet, hcKill, hcLabel, hcList, hcListAsync, hcRead, hcRm, hcRun,
-  hcKeys, hcSend, hcServerStatusAsync, hcWait, herdrAppCommand, herdrAppDo, type HcLabels, type HcStreamItem,
+  HERDR_APP_NOT_SENT, HerdrCoreError, MAX_PANES_PER_TAB, RH_LABEL, RH_NOTIFY_LABELS, RH_NOTIFY_RELAY,
+  buildHerdrSeatPlacement, hcEvents, hcGet, hcKill, hcLabel, hcList, hcListAsync, hcRead, hcRm, hcRun,
+  hcKeys, hcSend, hcServerStatusAsync, hcWait, herdrAppCommand, herdrAppDo, herdrAppList, herdrAppSpaceTabs,
+  injectSplitCwd, planHerdrPlacement, prepareSplitArgv, type HcLabels, type HcStreamItem, type HerdrAppTab,
 } from '../../src/effects/terminal/herdr-core';
 import { NOTIFY_SECRET_KEYS } from '../../src/core/decision/notify-secret-keys';
 
@@ -233,6 +236,121 @@ test('herdr-app do sends one JSON object and reads its stdout error', () => {
   expect(herdrAppCommand('terminal.keep', { terminal: 't12' })).toEqual(['herdr-app', 'do', 'terminal.keep', '{"terminal":"t12"}']);
   expect(herdrAppDo('terminal.keep', { terminal: 't12' }, { env: keep.env })).toEqual({ pane: 'p4', terminal: 't12' });
   expect(keep.argv()).toEqual(['do', 'terminal.keep', '{"terminal":"t12"}']);
+  // Untargeted pane.split is refused before spawning herdr-app (and classified as not-sent).
+  for (const args of [{ direction: 'right' }, { direction: 'right', pane: '' }, { direction: 'right', pane: '   ' }, { direction: 'right', pane: 12 }]) {
+    const untargeted = failure(() => herdrAppDo('pane.split', args, { env: ok.env }));
+    expect([untargeted.program, untargeted.reason, HERDR_APP_NOT_SENT.has(untargeted.reason)]).toEqual(['herdr-app', 'invalid_address', true]);
+  }
+});
+
+test('herdrAppList decodes local and remote spaces with tab pane counts and rejects malformed responses', () => {
+  const layout = {
+    spaces: [
+      {
+        id: 'sp1', name: 'repo-harness', folder: '/repo', machine: null, active: true,
+        tabs: [
+          {
+            id: 'tb1', name: '#2479', active: true, settled: false,
+            terminals: [
+              { terminal: 't10', pane: 'p1', status: 'working', app: 'pi', name: null, sub_agents: [] },
+              { terminal: 't11', pane: 'p2', status: 'idle', app: 'codex', name: null, sub_agents: [] },
+            ],
+          },
+          { id: 'tb-mod', name: 'board', active: false, settled: false, terminals: [] },
+        ],
+      },
+      {
+        id: 'mini-cf/sp2', name: 'remote', folder: '/srv/repo', machine: 'mini-cf', active: false,
+        tabs: [
+          {
+            id: 'mini-cf/tb9', name: 'council', active: true, settled: false,
+            terminals: [{ terminal: 'mini-cf/t6j7', pane: 'mini-cf/p9', status: null, app: null, name: null, sub_agents: [] }],
+          },
+        ],
+      },
+    ],
+  };
+  const ok = fake('ok', layout);
+  const parsed = herdrAppList({ env: ok.env });
+  expect(ok.argv()).toEqual(['ls']);
+  expect(parsed.spaces.map(space => [space.id, space.machine, space.tabs.map(tab => [tab.id, tab.name, tab.paneCount, tab.terminals.map(t => [t.terminal, t.pane])])]))
+    .toEqual([
+      ['sp1', null, [['tb1', '#2479', 2, [['t10', 'p1'], ['t11', 'p2']]], ['tb-mod', 'board', 0, []]]],
+      ['mini-cf/sp2', 'mini-cf', [['mini-cf/tb9', 'council', 1, [['mini-cf/t6j7', 'mini-cf/p9']]]]],
+    ]);
+  expect(herdrAppSpaceTabs('sp1', { env: ok.env }).map(tab => tab.id)).toEqual(['tb1', 'tb-mod']);
+  expect(herdrAppSpaceTabs('sp-missing', { env: ok.env })).toEqual([]);
+  expect(failure(() => herdrAppList({ env: fake('app-error').env })).reason).toBe('failed');
+  for (const bad of [
+    {},
+    { spaces: [{}] },
+    { spaces: [{ id: 'sp1', name: 'r', tabs: [{ id: 'tb1', terminals: [{ terminal: 'bad', pane: 'p1' }] }] }] },
+    { spaces: [{ id: 'sp1', name: 'r', tabs: [{ id: 'tb1', terminals: [{ terminal: 't1', pane: ' ' }] }] }] },
+  ]) {
+    expect(failure(() => herdrAppList({ env: fake('ok', bad).env })).reason).toBe('invalid_response');
+  }
+});
+
+test('planHerdrPlacement packs up to 3 panes via rightmost pane.split and suffixes overflow tabs', () => {
+  const tab = (id: string, name: string | null, panes: readonly [string, string][]): HerdrAppTab => ({
+    id, name, active: false, paneCount: panes.length,
+    terminals: panes.map(([terminal, pane]) => ({ terminal, pane, name: null, status: null, app: null })),
+  });
+  expect(MAX_PANES_PER_TAB).toBe(3);
+  // Existing < 3 pane tab splits right of its rightmost pane.
+  expect(planHerdrPlacement({ tabs: [tab('tb1', '#2479', [['t1', 'p1'], ['t2', 'p2']])], baseTabName: '#2479' }))
+    .toEqual({ action: 'pane.split', pane: 'p2', tabId: 'tb1', tabName: '#2479' });
+  // Prefix boundary: #10 does not match #100.
+  expect(planHerdrPlacement({ tabs: [tab('tb1', '#100', [['t1', 'p1']])], baseTabName: '#10' }))
+    .toEqual({ action: 'tab.new', name: '#10' });
+  // Full 3-pane tab opens <base> 2; once <base> 2 exists with < 3 panes it splits there; when both are full opens <base> 3.
+  const full1 = tab('tb1', '#2479', [['t1', 'p1'], ['t2', 'p2'], ['t3', 'p3']]);
+  expect(planHerdrPlacement({ tabs: [full1], baseTabName: '#2479' })).toEqual({ action: 'tab.new', name: '#2479 2' });
+  const open2 = tab('tb2', '#2479 2', [['t4', 'p4']]);
+  expect(planHerdrPlacement({ tabs: [full1, open2], baseTabName: '#2479' }))
+    .toEqual({ action: 'pane.split', pane: 'p4', tabId: 'tb2', tabName: '#2479 2' });
+  const full2 = tab('tb2', '#2479 2', [['t4', 'p4'], ['t5', 'p5'], ['t6', 'p6']]);
+  expect(planHerdrPlacement({ tabs: [full1, full2], baseTabName: '#2479' })).toEqual({ action: 'tab.new', name: '#2479 3' });
+  // Preferred worker terminal splits right of that worker tab's rightmost pane while < 3 panes; falls back to PR#<pr> when full.
+  expect(planHerdrPlacement({ tabs: [tab('tb1', '#2479', [['t10', 'p1'], ['t11', 'p2']])], baseTabName: 'PR#2485', preferredTerminals: ['t10'] }))
+    .toEqual({ action: 'pane.split', pane: 'p2', tabId: 'tb1', tabName: '#2479' });
+  expect(planHerdrPlacement({ tabs: [tab('tb1', '#2479', [['t10', 'p1'], ['t11', 'p2'], ['t12', 'p3']])], baseTabName: 'PR#2485', preferredTerminals: ['t10'] }))
+    .toEqual({ action: 'tab.new', name: 'PR#2485' });
+  // A 0-terminal mod tab cannot be split and still reserves its base name.
+  expect(planHerdrPlacement({ tabs: [tab('tb0', 'council', [])], baseTabName: 'council' }))
+    .toEqual({ action: 'tab.new', name: 'council 2' });
+});
+
+test.skipIf(process.platform === 'win32')('injectSplitCwd and prepareSplitArgv inject cd inside selfLabelingArgv and execute in the target directory with task', () => {
+  const root = tmpWorkspace('split-cwd'); roots.push(root);
+  const worktree = join(root, "wt 'quoted' $HOME");
+  mkdirSync(worktree, { recursive: true });
+  const canonicalWorktree = realpathSync(worktree);
+  // Unwrapped argv wraps in /bin/sh -c with cd -- <quoted> && exec "$@" and passes -- <task> cleanly (even leading '-').
+  const probe = ['/bin/sh', '-c', 'printf "%s|%s|%s" "$(pwd)" "$1" "$2"', 'probe'];
+  const splitUnwrapped = prepareSplitArgv(probe, worktree, '-lead-dash prompt');
+  const runUnwrapped = spawnSync(splitUnwrapped[0]!, splitUnwrapped.slice(1), { cwd: root, encoding: 'utf8' });
+  expect([runUnwrapped.status, runUnwrapped.stdout]).toEqual([0, `${canonicalWorktree}|--|-lead-dash prompt`]);
+  // Labeled argv injects cd inside the existing selfLabelingArgv /bin/sh -c script right before exec "$@".
+  const fakeBun = join(root, 'fake-bun');
+  writeFileSync(fakeBun, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const labeled = [
+    '/bin/sh', '-c', 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"; "$0" "$1" seats label worker --repository-id 1 --issue 42 && shift 2 && exec "$@"',
+    fakeBun, 'cli.ts', '', ...probe,
+  ];
+  const splitLabeled = prepareSplitArgv(labeled, worktree, 'Task: issue #42');
+  expect(splitLabeled[2]).toContain(`&& shift 2 && cd -- '${worktree.replaceAll("'", "'\\''")}' && exec "$@"`);
+  // Idempotent when called twice.
+  expect(injectSplitCwd(splitLabeled, worktree)).toEqual(splitLabeled);
+  const runLabeled = spawnSync(splitLabeled[0]!, splitLabeled.slice(1), { cwd: root, encoding: 'utf8' });
+  expect([runLabeled.status, runLabeled.stdout]).toEqual([0, `${canonicalWorktree}|--|Task: issue #42`]);
+  // buildHerdrSeatPlacement emits pane.split without folder/task fields when splitting, and tab.new with folder/task when creating a tab.
+  const tabWithPane: HerdrAppTab = { id: 'tb1', name: '#42', active: true, paneCount: 1, terminals: [{ terminal: 't1', pane: 'p1', name: null, status: null, app: null }] };
+  const splitPlacement = buildHerdrSeatPlacement({ space: 'sp1', folder: worktree, argv: labeled, task: 'Task: issue #42', baseTabName: '#42', tabs: [tabWithPane] });
+  expect(splitPlacement.command).toBe('pane.split');
+  expect(splitPlacement.args).toEqual({ direction: 'right', pane: 'p1', argv: splitLabeled });
+  const tabPlacement = buildHerdrSeatPlacement({ space: 'sp1', folder: worktree, argv: labeled, task: 'Task: issue #42', focus: false, baseTabName: '#42', tabs: [] });
+  expect(tabPlacement).toEqual({ command: 'tab.new', tabName: '#42', args: { name: '#42', space: 'sp1', folder: worktree, argv: labeled, task: 'Task: issue #42', focus: false } });
 });
 
 test('server status: the core id and version are read; a bad version, a missing core id or an hc error fail', async () => {

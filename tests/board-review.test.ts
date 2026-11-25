@@ -1,14 +1,14 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReviewPacket, planReview, reviewPacket, type ReviewDecisionV1, type ReviewSeat } from '../src/core/board/review';
-import { executeReview, withReviewLock, type ReviewPorts } from '../src/effects/board/review';
+import { executeReview, matchingWorkerTerminals, withReviewLock, type ReviewPorts } from '../src/effects/board/review';
 import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION } from '../src/effects/board/agy-review-session';
 import { effectiveGatekeeper, seatAccountQuotas } from '../src/core/board/seat-routing';
-import { HerdrCoreError, RH_LABEL } from '../src/effects/terminal/herdr-core';
-import type { BoardPullRequestV1, BoardV1 } from '../src/core/board/board';
+import { HerdrCoreError, RH_LABEL, type HerdrAppTab, type HerdrSeatPlacementCommand } from '../src/effects/terminal/herdr-core';
+import type { BoardPullRequestV1, BoardSeatTerminalReadV1, BoardV1 } from '../src/core/board/board';
 import type { BoardCommentPageV1, BoardCommentV1, BoardPullRequestReadV1 } from '../src/core/board/source';
 import { parseAcceptanceRecord, renderAcceptanceDispositionComment } from '../src/core/board/protocol-comments';
 import { labeledSeatArgv, SeatProviderUnavailableError } from '../src/cli/commands/seats';
@@ -142,7 +142,9 @@ function ports(overrides: Partial<ReviewPorts> = {}): ReviewPorts & { comments: 
     comments, tabs,
     worktree: () => ({ path: '/tmp/w' }),
     comment: (_pr, body) => { comments.push(body); return `https://example.test/c${comments.length}`; },
-    openTab: args => { tabs.push(args); },
+    listSpaceTabs: () => [],
+    seatTerminals: () => [],
+    placePane: (_command, args) => { tabs.push(args); },
     launch: async seat => ({ argv: ['agent'], tab: 'review', runtime: seat === 'reviewer' ? 'claude' : 'codex' }),
     ...overrides,
   };
@@ -219,7 +221,7 @@ console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
   writeFileSync(agy, `#!/bin/sh\nprintf '%s\\n' "$${AGY_REVIEW_LAUNCH_ENV}"\n`, { mode: 0o700 });
   const tab = Promise.withResolvers<Readonly<Record<string, unknown>>>();
   const events: string[] = [];
-  const p = ports({ agy: { hc, env }, openTab: tab.resolve, launch: async (seat, labels, _cwd, route) => {
+  const p = ports({ agy: { hc, env }, placePane: (_cmd, args) => { tab.resolve(args); }, launch: async (seat, labels, _cwd, route) => {
     expect(seat).toBe('gatekeeper');
     expect(route).toBe(gatekeeper);
     return { argv: labeledSeatArgv(seat, labels, [agy, '--agent', 'rh-gatekeeper-fallback'], env, 'new'), tab: 'review', runtime: 'agy' };
@@ -276,7 +278,7 @@ test('a dry run, and a worktree off the head, write no marker and open no seat',
 });
 
 test('a launch that sent nothing releases the marker; an ambiguous one keeps it', async () => {
-  const failing = (reason: 'missing' | 'timeout') => ports({ openTab: () => { throw new HerdrCoreError('herdr-app', reason); } });
+  const failing = (reason: 'missing' | 'timeout') => ports({ placePane: () => { throw new HerdrCoreError('herdr-app', reason); } });
   const notSent = failing('missing');
   await expect(executeReview(high, context, notSent)).rejects.toThrow();
   expect(notSent.comments[1]).toContain('Claim: https://example.test/c1\nStatus: released');
@@ -360,7 +362,7 @@ test('a disposed gatekeeper FAIL supplies no family to a model-less gatekeeper P
 test('a reviewer that sent nothing releases its own marker and leaves the started gatekeeper alone', async () => {
   // The gatekeeper's marker and PASS row of an earlier run stay; only the failed reviewer marker is released.
   const passed = page(marker(SHA), record(SHA, 'pi (gpt-6.1-sol)', 'PASS'));
-  const p = ports({ openTab: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
+  const p = ports({ placePane: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
   await expect(executeReview(plan([pr(1, { second_review: 'pending', gatekeeper_review: 'pass' })], passed), context, p)).rejects.toThrow();
   expect(p.comments).toHaveLength(2);
   expect(p.comments[1]).toContain('Claim: https://example.test/c1\nStatus: released');
@@ -551,4 +553,166 @@ test.each([
   const acceptedRead = { state: 'open', head_sha: SHA, comments: page(...r2Comments) } as unknown as BoardPullRequestReadV1;
   expect(gatekeeperReview(acceptedRead)).toBe('pass');
   expect(acceptance(acceptedRead, { status: 'pending', contexts: [] }, ['high'], 'high').status).toBe('accepted');
+});
+
+test('matchingWorkerTerminals orders live worker matches by closing issue, PR label, then canonical worktree cwd', () => {
+  const mk = (address: string, seat: string, extra: Partial<BoardSeatTerminalReadV1> = {}): BoardSeatTerminalReadV1 => ({
+    address, name: null, agent: 'pi', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null,
+    turn: 0, cwd: null, where: null, agent_pid: null, labels: { seat }, ...extra,
+  });
+  const terminals: BoardSeatTerminalReadV1[] = [
+    mk('t1', 'orchestrator', { cwd: '/tmp/wt-2479' }),
+    mk('t2', 'worker-deep', { state: 'finished', cwd: '/tmp/wt-2479', labels: { seat: 'worker-deep', issue: '2479' } }),
+    mk('t3', 'worker-neon', { cwd: '/tmp/wt-2479', labels: { seat: 'worker-neon' } }),
+    mk('t4', 'worker', { labels: { seat: 'worker', pr: '2485' } }),
+    mk('t5', 'worker-opus', { labels: { seat: 'worker-opus', issue: '2479' } }),
+  ];
+  expect(matchingWorkerTerminals({ terminals, issues: ['2479'], pr: '2485', cwd: '/tmp/wt-2479' })).toEqual(['t5', 't4', 't3']);
+  expect(matchingWorkerTerminals({ terminals, issues: ['9999'], pr: '2485', cwd: '/tmp/wt-2479' })).toEqual(['t4', 't3']);
+  expect(matchingWorkerTerminals({ terminals, issues: [], pr: '9999', cwd: '/tmp/wt-2479' })).toEqual(['t3']);
+});
+
+test('executeReview splits gatekeeper and reviewer right into the worker tab up to 3 panes, and falls back to PR#<pr> / PR#<pr> 2 when absent or full', async () => {
+  const mkTab = (id: string, name: string, panes: readonly [string, string][]): HerdrAppTab => ({
+    id, name, active: false, paneCount: panes.length,
+    terminals: panes.map(([terminal, pane]) => ({ terminal, pane, name: null, status: null, app: null })),
+  });
+  const worker: BoardSeatTerminalReadV1 = {
+    address: 't10', name: null, agent: 'pi', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null,
+    turn: 0, cwd: '/tmp/wt-2479', where: 'repo / #2479', agent_pid: null, labels: { seat: 'worker-deep', issue: '2479', parent: '2457' },
+  };
+  // High PR #2485 closing #2479: worker t10 is in #2479 [p1] -> gatekeeper splits right of p1 (p2), then reviewer splits right of p2 (p3).
+  let tabsState: HerdrAppTab[] = [mkTab('tb1', '#2479', [['t10', 'p1']])];
+  const calls: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  let nextPane = 2;
+  const p = ports({
+    worktree: () => ({ path: '/tmp/wt-2479' }),
+    listSpaceTabs: () => tabsState,
+    seatTerminals: () => [worker],
+    closingIssues: new Map([[2485, [2479]]]),
+    launch: async seat => ({
+      argv: ['/bin/sh', '-c', `export PATH="\${PATH:+$PATH:}"; "$0" "$1" seats label ${seat} --repository-id 1 --pr 2485 && shift 2 && exec "$@"`, 'bun', 'cli.ts', '', seat],
+      tab: 'PR#2485', runtime: seat === 'reviewer' ? 'claude' : 'codex',
+    }),
+    placePane: (command, args) => {
+      calls.push({ command, args });
+      if (command === 'pane.split') {
+        const paneId = `p${nextPane++}`;
+        const termId = `t${10 + nextPane}`;
+        tabsState = tabsState.map(t => t.terminals.some(term => term.pane === args.pane)
+          ? { ...t, paneCount: t.paneCount + 1, terminals: [...t.terminals, { terminal: termId, pane: paneId, name: null, status: null, app: null }] }
+          : t);
+      }
+    },
+  });
+  const pending = pr(2485, { closes: [2479], second_review: 'pending' });
+  expect(await executeReview(plan([pending]), context, p)).toMatchObject({ started: [{ pr: 2485, seat: 'gatekeeper' }, { pr: 2485, seat: 'reviewer' }] });
+  expect(calls.map(c => [c.command, c.args.direction, c.args.pane])).toEqual([
+    ['pane.split', 'right', 'p1'],
+    ['pane.split', 'right', 'p2'],
+  ]);
+  for (const call of calls) {
+    expect(call.args).not.toHaveProperty('folder');
+    expect(call.args).not.toHaveProperty('task');
+    const argv = call.args.argv as string[];
+    expect(argv[2]).toContain("&& shift 2 && cd -- '/tmp/wt-2479' && exec \"$@\"");
+    expect(argv.at(-2)).toBe('--');
+    expect(parseReviewPacket(argv.at(-1)!)).toMatchObject({ pr: 2485 });
+  }
+
+  // Worker tab full (3 panes) and existing PR#2485 also full (3 panes) -> opens tab.new named 'PR#2485 2', then second seat splits right into 'PR#2485 2'.
+  let overflowState: HerdrAppTab[] = [
+    mkTab('tb1', '#2479', [['t10', 'p1'], ['t11', 'p2'], ['t12', 'p3']]),
+    mkTab('tb2', 'PR#2485', [['t13', 'p4'], ['t14', 'p5'], ['t15', 'p6']]),
+  ];
+  const overflowCalls: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  const pOverflow = ports({
+    worktree: () => ({ path: '/tmp/wt-2479' }),
+    listSpaceTabs: () => overflowState,
+    seatTerminals: () => [worker],
+    closingIssues: new Map([[2485, [2479]]]),
+    launch: async seat => ({ argv: [seat], tab: 'PR#2485', runtime: seat === 'reviewer' ? 'claude' : 'codex' }),
+    placePane: (command, args) => {
+      overflowCalls.push({ command, args });
+      if (command === 'tab.new') {
+        overflowState = [...overflowState, mkTab('tb3', String(args.name), [['t16', 'p7']])];
+      }
+    },
+  });
+  await executeReview(plan([pending]), context, pOverflow);
+  expect(overflowCalls[0]!.command).toBe('tab.new');
+  expect(overflowCalls[0]!.args).toMatchObject({ name: 'PR#2485 2', space: 's', folder: '/tmp/wt-2479' });
+  expect(overflowCalls[1]!.command).toBe('pane.split');
+  expect(overflowCalls[1]!.args).toMatchObject({ direction: 'right', pane: 'p7' });
+
+  // Fail-closed pane.split: HERDR_APP_NOT_SENT releases marker; timeout keeps marker as launch_unknown; listSpaceTabs failure writes no marker.
+  const splitNotSent = ports({
+    listSpaceTabs: () => [mkTab('tb1', '#2479', [['t10', 'p1']])],
+    seatTerminals: () => [worker],
+    closingIssues: new Map([[1, [2479]]]),
+    placePane: () => { throw new HerdrCoreError('herdr-app', 'invalid_address'); },
+  });
+  await expect(executeReview(high, context, splitNotSent)).rejects.toBeInstanceOf(HerdrCoreError);
+  expect(splitNotSent.comments).toHaveLength(2);
+  expect(splitNotSent.comments[1]).toContain('Status: released');
+
+  const splitUnknown = ports({
+    listSpaceTabs: () => [mkTab('tb1', '#2479', [['t10', 'p1']])],
+    seatTerminals: () => [worker],
+    closingIssues: new Map([[1, [2479]]]),
+    placePane: () => { throw new HerdrCoreError('herdr-app', 'timeout'); },
+  });
+  await expect(executeReview(high, context, splitUnknown)).rejects.toThrow('launch_unknown');
+  expect(splitUnknown.comments).toHaveLength(1);
+
+  const listFailed = ports({ listSpaceTabs: () => { throw new HerdrCoreError('herdr-app', 'failed', 2); } });
+  await expect(executeReview(high, context, listFailed)).rejects.toBeInstanceOf(HerdrCoreError);
+  expect(listFailed.comments).toEqual([]);
+});
+
+test.skipIf(process.platform === 'win32')('agy gatekeeper-fallback pane.split injects cd inside selfLabelingArgv and runs in the worktree directory', async () => {
+  const gatekeeper = nativeGatekeeperRoute();
+  const root = mkdtempSync(join(tmpdir(), 'rh-agy-split-'));
+  const worktree = join(root, 'wt-2479');
+  mkdirSync(worktree);
+  const hc = join(root, 'hc');
+  const agy = join(root, 'agy');
+  const env = { HOME: root, ZDOTDIR: root, PATH: `${root}:/usr/bin:/bin`, HC_TERMINAL_ID: 't9' };
+  writeFileSync(hc, `#!${process.execPath}
+const [,,, address, ...pairs] = process.argv.slice(2);
+const labels = Object.fromEntries(pairs.map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]));
+console.log(JSON.stringify({ address, state: 'live', turn: 0, labels }));
+`, { mode: 0o700 });
+  writeFileSync(agy, '#!/bin/sh\npwd\n', { mode: 0o700 });
+  const split = Promise.withResolvers<{ command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }>();
+  const worker: BoardSeatTerminalReadV1 = {
+    address: 't10', name: null, agent: 'pi', state: 'live', status: 'idle', status_kind: null, status_msg: null, status_ms: null,
+    turn: 0, cwd: worktree, where: null, agent_pid: null, labels: { seat: 'worker-deep', issue: '10' },
+  };
+  const workerTab: HerdrAppTab = { id: 'tb1', name: '#10', active: true, paneCount: 1, terminals: [{ terminal: 't10', pane: 'p1', name: null, status: null, app: null }] };
+  const p = ports({
+    agy: { hc, env },
+    worktree: () => ({ path: worktree }),
+    listSpaceTabs: () => [workerTab],
+    seatTerminals: () => [worker],
+    closingIssues: new Map([[1, [10]]]),
+    placePane: (command, args) => { split.resolve({ command, args }); },
+    launch: async (seat, labels) => ({
+      argv: labeledSeatArgv(seat, labels, [agy, '--agent', 'rh-gatekeeper-fallback'], env, 'new'),
+      tab: 'PR#1', runtime: 'agy',
+    }),
+  });
+  const run = executeReview(plan([pr(1)], page(), [], gatekeeper), { ...context, gatekeeper }, p);
+  try {
+    const placed = await Promise.race([split.promise, run.then(() => { throw new Error('finished without placing'); })]);
+    expect(placed.command).toBe('pane.split');
+    expect(placed.args).toMatchObject({ direction: 'right', pane: 'p1' });
+    const [shell, ...args] = placed.args.argv as [string, ...string[]];
+    const result = spawnSync(shell, args, { env, cwd: root, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(realpathSync(worktree));
+    expect(await run).toMatchObject({ started: [{ pr: 1, seat: 'gatekeeper' }], refused: [] });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

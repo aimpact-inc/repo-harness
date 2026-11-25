@@ -5,7 +5,10 @@ import { seatModelBlock } from '../../core/board/seat-pool';
 import { withSeatLine } from '../../core/board/seat-line';
 import { renderBundleLine } from '../../core/board/source';
 import { SEAT_IDS, isWorkerSeat, type SeatConfigV1, type SeatId } from '../../core/board/seats-settings';
-import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
+import {
+  HERDR_APP_NOT_SENT, HerdrCoreError, buildHerdrSeatPlacement, herdrAppDo, herdrAppSpaceTabs, planHerdrPlacement,
+  type HerdrAppTab, type HerdrSeatPlacementCommand,
+} from '../terminal/herdr-core';
 import { runInternalHelper } from '../runtime/helper-runner';
 import { readQuotaReport } from './quota';
 import { collectSeatPoolProbes, magpieExtensionInstalled, readSeatsConfiguration } from './seats-configuration';
@@ -40,8 +43,10 @@ export interface DispatchPorts {
   readonly startWorktree: (issue: number) => { readonly path: string; readonly branch: string };
   /** Posts an issue comment and returns its URL. */
   readonly comment: (issue: number, body: string) => string;
-  /** `herdr-app do tab.new` with these arguments. */
-  readonly openTab: (args: Readonly<Record<string, unknown>>) => void;
+  /** Read the current tabs of `space` from `herdr-app ls`. */
+  readonly listSpaceTabs: (space: string) => readonly HerdrAppTab[];
+  /** `herdr-app do tab.new` or explicit-ID `herdr-app do pane.split` with these arguments. */
+  readonly placePane: (command: HerdrSeatPlacementCommand, args: Readonly<Record<string, unknown>>) => Record<string, unknown> | void;
   readonly launch: DispatchLaunch;
 }
 
@@ -138,9 +143,13 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
     const launch = await ports.launch(lead.seat, labels, worktree.path);
     // The launch reads the seats configuration again, so the runtime that will run is checked here, not the planned one.
     if (lead.credentials && launch.runtime === 'pi') throw new DispatchError(`${issueList(unit)} touches credentials and its launch resolved to a Pi seat; nothing was started`);
+    // Read the target space layout before posting claims so a failing `herdr-app ls` leaves no orphaned claim.
+    const tabs = ports.listSpaceTabs(context.space);
+    const preview = planHerdrPlacement({ tabs, baseTabName: launch.tab });
+    const resolvedTab = preview.action === 'tab.new' ? preview.name : (preview.tabName ?? launch.tab);
     const claims: { readonly issue: number; readonly url: string }[] = [];
     try {
-      for (const decision of unit) claims.push({ issue: decision.issue, url: ports.comment(decision.issue, claimBody(decision, unit, worktree.branch, launch.tab, launch.runtime, claimModel(lead.seat, context.model(lead.seat)), plan.coordinator!)) });
+      for (const decision of unit) claims.push({ issue: decision.issue, url: ports.comment(decision.issue, claimBody(decision, unit, worktree.branch, resolvedTab, launch.runtime, claimModel(lead.seat, context.model(lead.seat)), plan.coordinator!)) });
     } catch (error) {
       // No tab opened yet, so the claims of a bundle that posted only in part hold no seat.
       releaseClaims(ports, claims);
@@ -148,12 +157,14 @@ export async function executeDispatch(plan: DispatchPlanV1, context: { readonly 
     }
     const task = packet(unit, worktree.path, claims.map(claim => claim.url));
     try {
-      ports.openTab({
-        ...(launch.tab === null ? {} : { name: launch.tab }),
+      const placement = buildHerdrSeatPlacement({
         space: context.space,
         folder: worktree.path,
+        baseTabName: launch.tab,
+        tabs,
         ...(launch.runtime === 'agy' ? { argv: [...launch.argv, '-i', task] } : { argv: launch.argv, task }),
       });
+      ports.placePane(placement.command, placement.args);
     } catch (error) {
       if (error instanceof HerdrCoreError && HERDR_APP_NOT_SENT.has(error.reason)) {
         releaseClaims(ports, claims);
@@ -187,7 +198,8 @@ export async function runDispatch(input: DispatchInput): Promise<DispatchResultV
   }, {
     startWorktree: issue => startWorktree(input, issue),
     comment: (issue, body) => runGhText(input, ['issue', 'comment', String(issue), '--body-file', '-'], withSeatLine(body, env)),
-    openTab: args => { herdrAppDo('tab.new', args); },
+    listSpaceTabs: space => herdrAppSpaceTabs(space, { env }),
+    placePane: (command, args) => herdrAppDo(command, args, { env }),
     launch: input.launch,
   });
   return { plan, started };

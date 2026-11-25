@@ -1,13 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import type { BoardSeatTerminalReadV1 } from '../../core/board/board';
 import { collectBoard, type BoardCollectInput, BoardCollectError, readRepositoryId, runGhText } from './collect';
 import { planReview, reviewPacket, reviewPacketHeader, REVIEW_START_HEADER, REVIEW_START_STATUS_HEADER, type ReviewDecisionV1, type ReviewSeatStartV1 } from '../../core/board/review';
 import type { BoardCommentPageV1 } from '../../core/board/source';
-import type { SeatConfigV1 } from '../../core/board/seats-settings';
+import { isWorkerSeat, type SeatConfigV1, type SeatId } from '../../core/board/seats-settings';
 import type { SeatRouteV1 } from '../../core/board/seat-routing';
 import { gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
-import { HERDR_APP_NOT_SENT, HerdrCoreError, herdrAppDo } from '../terminal/herdr-core';
+import {
+  HERDR_APP_NOT_SENT, HerdrCoreError, buildHerdrSeatPlacement, herdrAppDo, herdrAppSpaceTabs,
+  type HerdrAppTab, type HerdrSeatPlacementCommand,
+} from '../terminal/herdr-core';
 import { AGY_REVIEW_LAUNCH_ENV, AGY_REVIEW_LAUNCH_LINE, AGY_REVIEW_PROMPT_OPTION, prepareAgyReviewStartup, waitForAgyReviewBinding, type AgyReviewBinding } from './agy-review-session';
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError } from '../locking/exclusive-directory-lock';
 import { repoHarnessHome } from '../repo-harness-home';
@@ -44,9 +48,57 @@ export interface ReviewPorts {
   readonly worktree: (head_ref: string, head_sha: string) => { readonly path: string } | { readonly refusal: string };
   /** Posts a pull request comment and returns its URL. */
   readonly comment: (pr: number, body: string) => string;
-  readonly openTab: (args: Readonly<Record<string, unknown>>) => void;
+  /** Read the current tabs of `space` from `herdr-app ls`. */
+  readonly listSpaceTabs: (space: string) => readonly HerdrAppTab[];
+  /** Live seat terminals of this repository, used to locate a PR's existing worker tab. */
+  readonly seatTerminals: () => readonly BoardSeatTerminalReadV1[];
+  /** Closing issue numbers per PR (from the board read), used to match the worker's `repo-harness.issue` label. */
+  readonly closingIssues?: ReadonlyMap<number, readonly number[]>;
+  /** `herdr-app do tab.new` or explicit-ID `herdr-app do pane.split` with these arguments. */
+  readonly placePane: (command: HerdrSeatPlacementCommand, args: Readonly<Record<string, unknown>>) => Record<string, unknown> | void;
   readonly launch: ReviewLaunch;
   readonly agy?: { readonly hc: string | null; readonly env: NodeJS.ProcessEnv };
+}
+
+export interface WorkerTerminalLookupInput {
+  readonly terminals: readonly BoardSeatTerminalReadV1[];
+  readonly issues?: readonly string[];
+  readonly pr?: string;
+  readonly cwd?: string;
+}
+
+function canonicalDir(path: string): string {
+  try { return realpathSync.native(path); } catch { return resolve(path); }
+}
+
+/**
+ * Find live worker terminal addresses belonging to a PR, in priority order:
+ * 1. `repo-harness.issue` matching a closing issue of the PR
+ * 2. `repo-harness.pr` matching the PR number
+ * 3. worktree `cwd` matching the PR worktree (canonicalized for symlinked temp dirs such as macOS `/tmp`)
+ */
+export function matchingWorkerTerminals(input: WorkerTerminalLookupInput): string[] {
+  const workers = input.terminals.filter(terminal =>
+    terminal.state === 'live' && terminal.labels.seat !== undefined && isWorkerSeat(terminal.labels.seat as SeatId));
+  const found: string[] = [];
+  const add = (address: string) => { if (!found.includes(address)) found.push(address); };
+  for (const issue of input.issues ?? []) {
+    for (const worker of workers) {
+      if (worker.labels.issue === issue) add(worker.address);
+    }
+  }
+  if (input.pr !== undefined) {
+    for (const worker of workers) {
+      if (worker.labels.pr === input.pr) add(worker.address);
+    }
+  }
+  if (input.cwd !== undefined && input.cwd !== '') {
+    const target = canonicalDir(input.cwd);
+    for (const worker of workers) {
+      if (worker.cwd !== null && worker.cwd !== '' && canonicalDir(worker.cwd) === target) add(worker.address);
+    }
+  }
+  return found;
 }
 
 export interface ReviewResultV1 {
@@ -103,7 +155,13 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
       refuse(decision.pr, worktree.refusal);
       continue;
     }
-    const launches = [];
+    const launches: Array<{
+      readonly start: ReviewSeatStartV1;
+      readonly argv: readonly string[];
+      readonly task?: string;
+      readonly baseTabName: string | null;
+      readonly startup?: AgyReviewBinding['startup'];
+    }> = [];
     const labels = { repositoryId: context.repositoryId, pr: String(decision.pr), parent: String(context.parent) };
     for (const start of decision.seats) {
       const gatekeeper = context.gatekeeper;
@@ -113,21 +171,38 @@ export async function executeReview(decisions: readonly ReviewDecisionV1[], cont
       const launchLabels = native === undefined ? labels : { ...labels, agyReview: native };
       const { runtime, argv, tab } = await ports.launch(start.seat, launchLabels, worktree.path, gatekeeper);
       const packet = reviewPacket(decision, start, runtime);
-      const tabArgs = { ...(tab === null ? {} : { name: tab }), space: context.space, folder: worktree.path };
       if (runtime === 'agy') {
         if (native === undefined) throw new BoardCollectError('agy review launches require the effective gatekeeper-fallback seat.');
         const { launchId, startup } = native;
         const nativeArgv = ['/usr/bin/env', `${AGY_REVIEW_LAUNCH_ENV}=${launchId}`, ...argv, AGY_REVIEW_PROMPT_OPTION, packet + AGY_REVIEW_LAUNCH_LINE + launchId];
-        launches.push({ start, placement: { ...tabArgs, argv: nativeArgv }, startup });
+        launches.push({ start, argv: nativeArgv, baseTabName: tab, startup });
       } else {
-        launches.push({ start, placement: { ...tabArgs, argv, task: packet } });
+        launches.push({ start, argv, task: packet, baseTabName: tab });
       }
     }
-    for (const { start, placement, startup } of launches) {
+    const preferredTerminals = matchingWorkerTerminals({
+      terminals: ports.seatTerminals(),
+      issues: (ports.closingIssues?.get(decision.pr) ?? []).map(String),
+      pr: String(decision.pr),
+      cwd: worktree.path,
+    });
+    for (const { start, argv, task, baseTabName, startup } of launches) {
+      // Read the current space layout before posting the marker so a failing `herdr-app ls` posts no orphaned marker,
+      // and so a second seat in the same run sees the pane the first seat just created.
+      const tabs = ports.listSpaceTabs(context.space);
       const markerUrl = ports.comment(decision.pr, markerBody(decision, start));
       const release = () => ports.comment(decision.pr, `${REVIEW_START_STATUS_HEADER}\nClaim: ${markerUrl}\nStatus: released`);
       try {
-        ports.openTab(placement);
+        const placement = buildHerdrSeatPlacement({
+          space: context.space,
+          folder: worktree.path,
+          argv,
+          ...(task === undefined ? {} : { task }),
+          baseTabName,
+          tabs,
+          preferredTerminals,
+        });
+        ports.placePane(placement.command, placement.args);
       } catch (error) {
         if (!(error instanceof HerdrCoreError) || HERDR_APP_NOT_SENT.has(error.reason)) {
           release();
@@ -184,10 +259,16 @@ export async function runReview(input: ReviewInput): Promise<ReviewResultV1> {
     // The same projection that `seatLaunch` uses for `seats argv gatekeeper`, so the family check names the seat that launches.
     const gatekeeper = effectiveGatekeeper(seats, seatAccountQuotas((await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing));
     const decisions = planReview({ board, comments, gatekeeper, reviewer: seats.reviewer }).filter(decision => input.pr === undefined || decision.pr === input.pr);
+    const terminalsRead = input.host.seatTerminals(repositoryId);
+    const seatTerminals = terminalsRead.status === 'observed' ? terminalsRead.terminals : [];
+    const closingIssues = new Map(board.pull_requests.map(pr => [pr.number, pr.closes]));
     return { decisions, ...await executeReview(decisions, { repositoryId, parent: input.parent, space: input.space, dry_run: input.dry_run, gatekeeper, observe: input.observe }, {
       worktree: (ref, sha) => worktreeAt(input, ref, sha),
       comment: (pr, body) => runGhText(input, ['pr', 'comment', String(pr), '--body-file', '-'], body),
-      openTab: args => { herdrAppDo('tab.new', args); },
+      listSpaceTabs: space => herdrAppSpaceTabs(space),
+      seatTerminals: () => seatTerminals,
+      closingIssues,
+      placePane: (command, args) => herdrAppDo(command, args),
       agy: { hc: Bun.which('hc'), env: process.env },
       launch: input.launch,
     }) };

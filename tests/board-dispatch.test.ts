@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path';
 import { DispatchError, bundleRouteClass, planDispatch, type DispatchPlanV1 } from '../src/core/board/dispatch';
 import { WORKER_AUTHORITY, executeDispatch, runDispatch, type DispatchPorts } from '../src/effects/board/dispatch';
 import { withSeatLine } from '../src/core/board/seat-line';
-import { HerdrCoreError } from '../src/effects/terminal/herdr-core';
+import { HerdrCoreError, type HerdrAppTab, type HerdrSeatPlacementCommand } from '../src/effects/terminal/herdr-core';
 import type { SeatAccountQuotas } from '../src/core/board/seat-routing';
 import { emptySeatPoolProbe, seatModelBlock, type SeatPoolProbe } from '../src/core/board/seat-pool';
 import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET } from '../src/core/board/seats-settings';
@@ -211,7 +211,7 @@ test('a unit is its open members: a closed member does not stop it and gets no c
     expect([reasons(plan), plan.units]).toEqual([['101:dispatch', '102:closed'], [[101]]]);
     const bodies: string[] = [];
     const tasks: string[] = [];
-    const run = ports({ comment: (_issue, body) => { bodies.push(body); return 'claim'; }, openTab: args => { tasks.push(String(args.task)); } });
+    const run = ports({ comment: (_issue, body) => { bodies.push(body); return 'claim'; }, placePane: (_cmd, args) => { tasks.push(String(args.task)); } });
     expect((await executeDispatch(plan, context, run.base)).map(entry => entry.issue)).toEqual([101]);
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).not.toContain('Issues:');
@@ -224,7 +224,8 @@ function ports(overrides: Partial<DispatchPorts> = {}) {
   const base: DispatchPorts = {
     startWorktree: issueNumber => { calls.push(`worktree ${issueNumber}`); return { path: `/tmp/wt-${issueNumber}`, branch: `feat/${issueNumber}` }; },
     comment: (issueNumber, body) => { calls.push(`comment ${issueNumber}: ${body.split('\n')[0]} ${body.split('\n').find(line => line.startsWith('Status:'))}`); return `https://example.test/claim-${issueNumber}`; },
-    openTab: args => { calls.push(`tab ${String(args.folder)}`); },
+    listSpaceTabs: () => [],
+    placePane: (_command, args) => { calls.push(`tab ${String(args.folder)}`); },
     launch: async () => ({ argv: ['agent'], tab: 'tab-name', runtime: 'claude' }),
     ...overrides,
   };
@@ -302,7 +303,7 @@ test('coordinator ties use comment IDs and a handoff selects the successor', () 
 
 test('the packet carries the worker Authority line, and templates.md quotes the same text', async () => {
   const tasks: string[] = [];
-  const run = ports({ openTab: args => { tasks.push(String(args.task)); } });
+  const run = ports({ placePane: (_cmd, args) => { tasks.push(String(args.task)); } });
   await executeDispatch(planOf(['route:important_deep']), context, run.base);
   expect(tasks).toHaveLength(1);
   expect(tasks[0]).toContain(`Authority: ${WORKER_AUTHORITY}`);
@@ -311,7 +312,7 @@ test('the packet carries the worker Authority line, and templates.md quotes the 
 });
 
 test('a tab failure before the request releases the claim; an ambiguous one keeps it and reports launch_unknown', async () => {
-  const fail = (reason: 'missing' | 'timeout') => ports({ openTab: () => { throw new HerdrCoreError('herdr-app', reason); } });
+  const fail = (reason: 'missing' | 'timeout') => ports({ placePane: () => { throw new HerdrCoreError('herdr-app', reason); } });
   const before = fail('missing');
   await expect(executeDispatch(planOf(['route:important_deep']), context, before.base)).rejects.toBeInstanceOf(HerdrCoreError);
   expect(before.calls.at(-1)).toBe('comment 1: repo-harness issue claim status Status: released');
@@ -338,7 +339,7 @@ test('the plan starts one worktree and one tab with a bundle claim on each issue
   const bodies: string[] = [];
   const tasks: string[] = [];
   const run = ports({ comment: (issueNumber, body) => { bodies.push(body); run.calls.push(`comment ${issueNumber}`); return `https://example.test/claim-${issueNumber}`; },
-    openTab: args => { tasks.push(String(args.task)); run.calls.push(`tab ${String(args.folder)}`); } });
+    placePane: (_cmd, args) => { tasks.push(String(args.task)); run.calls.push(`tab ${String(args.folder)}`); } });
   // Default dispatch: the unit [1, 3] and the unit [5] take the two seats; the held unit [2, 4] starts nothing and throws nothing.
   const started = await executeDispatch(bundlePlan(), context, run.base);
   expect(run.calls).toEqual(['worktree 1', 'comment 1', 'comment 3', 'tab /tmp/wt-1', 'worktree 5', 'comment 5', 'tab /tmp/wt-5']);
@@ -348,7 +349,7 @@ test('the plan starts one worktree and one tab with a bundle claim on each issue
   const held = ports();
   await expect(executeDispatch(bundlePlan([2, 4]), context, held.base)).rejects.toThrow(/starts only as a whole; #2 held/);
   expect(held.calls).toEqual([]);
-  const lost = ports({ openTab: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
+  const lost = ports({ placePane: () => { throw new HerdrCoreError('herdr-app', 'missing'); } });
   await expect(executeDispatch(bundlePlan([1, 3]), context, lost.base)).rejects.toBeInstanceOf(HerdrCoreError);
   expect(lost.calls.slice(-2)).toEqual(['comment 1: repo-harness issue claim status Status: released', 'comment 3: repo-harness issue claim status Status: released']);
 });
@@ -356,14 +357,77 @@ test('the plan starts one worktree and one tab with a bundle claim on each issue
 test('executeDispatch passes -i <task> in argv and omits task when launching an agy worker seat', async () => {
   const tabs: Record<string, unknown>[] = [];
   const run = ports({
-    launch: async () => ({ argv: ['agy', '--model', 'gemini-4-neon-high'], tab: '#100', runtime: 'agy' }),
-    openTab: args => { tabs.push({ ...args }); },
+    launch: async () => ({ argv: ['agy', '--model', 'gemini-4-neon-high'], tab: '#1', runtime: 'agy' }),
+    placePane: (_cmd, args) => { tabs.push({ ...args }); },
   });
   await executeDispatch(planOf(['route:important_deep']), context, run.base);
   expect(tabs).toHaveLength(1);
   expect(tabs[0]!.task).toBeUndefined();
   expect((tabs[0]!.argv as string[]).slice(0, 4)).toEqual(['agy', '--model', 'gemini-4-neon-high', '-i']);
   expect((tabs[0]!.argv as string[])[4]).toContain('Task: issue #1 ');
+});
+
+test('executeDispatch splits right into an existing <3-pane issue tab, overflows to <base> 2 at 3 panes, and preserves fail-closed pane.split semantics', async () => {
+  const tab = (id: string, name: string, panes: readonly [string, string][]): HerdrAppTab => ({
+    id, name, active: false, paneCount: panes.length,
+    terminals: panes.map(([terminal, pane]) => ({ terminal, pane, name: null, status: null, app: null })),
+  });
+  // Existing 2-pane #1 tab -> pane.split right of rightmost pane p2 with cd injection and -- <task>.
+  const splitPlaced: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  const labeledArgv = ['/bin/sh', '-c', 'export PATH="${PATH:+$PATH:}${2:+$2:}${0%/*}"; "$0" "$1" seats label worker-opus --repository-id 9 --issue 1 --parent 100 && shift 2 && exec "$@"', 'bun', 'cli.ts', '', 'claude'];
+  const splitRun = ports({
+    listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1'], ['t2', 'p2']])],
+    launch: async () => ({ argv: labeledArgv, tab: '#1', runtime: 'claude' }),
+    placePane: (command, args) => { splitPlaced.push({ command, args }); },
+  });
+  await executeDispatch(planOf(['route:important_deep']), context, splitRun.base);
+  expect(splitPlaced).toHaveLength(1);
+  expect(splitPlaced[0]!.command).toBe('pane.split');
+  expect(splitPlaced[0]!.args).toMatchObject({ direction: 'right', pane: 'p2' });
+  expect(splitPlaced[0]!.args).not.toHaveProperty('folder');
+  expect(splitPlaced[0]!.args).not.toHaveProperty('task');
+  const splitArgv = splitPlaced[0]!.args.argv as string[];
+  expect(splitArgv[2]).toContain("&& shift 2 && cd -- '/tmp/wt-1' && exec \"$@\"");
+  expect(splitArgv.at(-2)).toBe('--');
+  expect(splitArgv.at(-1)).toContain('Task: issue #1 ');
+
+  // Full 3-pane #1 tab -> tab.new named '#1 2' and claim records '#1 2'.
+  const overflowPlaced: { command: HerdrSeatPlacementCommand; args: Readonly<Record<string, unknown>> }[] = [];
+  const claimBodies: string[] = [];
+  const overflowRun = ports({
+    listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1'], ['t2', 'p2'], ['t3', 'p3']])],
+    comment: (_issue, body) => { claimBodies.push(body); return 'https://example.test/claim-1'; },
+    launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
+    placePane: (command, args) => { overflowPlaced.push({ command, args }); },
+  });
+  await executeDispatch(planOf(['route:important_deep']), context, overflowRun.base);
+  expect(overflowPlaced[0]!.command).toBe('tab.new');
+  expect(overflowPlaced[0]!.args).toMatchObject({ name: '#1 2', space: 's1', folder: '/tmp/wt-1' });
+  expect(claimBodies[0]).toContain('Agent: worker-opus, session #1 2');
+
+  // Fail-closed pane.split: HERDR_APP_NOT_SENT releases claim; timeout keeps claim as launch_unknown; listSpaceTabs failure posts no claim.
+  const splitNotSent = ports({
+    listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1']])],
+    launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
+    placePane: () => { throw new HerdrCoreError('herdr-app', 'invalid_address'); },
+  });
+  await expect(executeDispatch(planOf(['route:important_deep']), context, splitNotSent.base)).rejects.toBeInstanceOf(HerdrCoreError);
+  expect(splitNotSent.calls.at(-1)).toBe('comment 1: repo-harness issue claim status Status: released');
+
+  const splitUnknown = ports({
+    listSpaceTabs: () => [tab('tb1', '#1', [['t1', 'p1']])],
+    launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
+    placePane: () => { throw new HerdrCoreError('herdr-app', 'timeout'); },
+  });
+  await expect(executeDispatch(planOf(['route:important_deep']), context, splitUnknown.base)).rejects.toThrow(/launch_unknown for #1/);
+  expect(splitUnknown.calls.some(call => call.includes('released'))).toBe(false);
+
+  const listFailed = ports({
+    listSpaceTabs: () => { throw new HerdrCoreError('herdr-app', 'failed', 2); },
+    launch: async () => ({ argv: ['agent'], tab: '#1', runtime: 'claude' }),
+  });
+  await expect(executeDispatch(planOf(['route:important_deep']), context, listFailed.base)).rejects.toBeInstanceOf(HerdrCoreError);
+  expect(listFailed.calls).toEqual(['worktree 1']);
 });
 
 test.skipIf(process.platform === 'win32')('runDispatch includes agy probes and dispatches a healthy native agy worker seat, while skipping read-only legacy agy workers', async () => {
