@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveTrustedGhExecutable } from '../src/effects/runtime/protected-helper-platform';
+import { resolveTrustedGhExecutable } from '../src/effects/runtime/trusted-executable';
 const ROOT = join(import.meta.dir, '..');
 const SCRIPT = join(ROOT, 'scripts/merge-gate.ts');
 const roots: string[] = [];
@@ -57,7 +57,7 @@ else if (args[0] === 'api' && args[1].includes('/contents/')) {value={status:'40
 else {console.error('unexpected fixture args');process.exit(98);}
 console.log(JSON.stringify(value)); process.exit(status);
 `, { mode: 0o755 });
-  const module = join(ROOT, 'src/effects/runtime/protected-helper-platform.ts');
+  const module = join(ROOT, 'src/effects/runtime/trusted-executable.ts');
   // Only the fixed-host discovery effect is replaced in a disposable child.
   // The real executable subprocesses, readiness protocol, leak scan and seal run.
   const code = `import {mock} from 'bun:test';

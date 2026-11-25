@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import { acceptanceReceiptPath, resolveProtectedGitRuntime } from './acceptance-receipt';
 import { KEY_BEGIN } from '../src/core/security/secret-patterns';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
-import { resolveTrustedGhExecutable } from '../src/effects/runtime/protected-helper-platform';
+import { resolveTrustedGhExecutable } from '../src/effects/runtime/trusted-executable';
 import { osAccountHome } from '../src/effects/runtime/os-account-home';
 
 type OutputFormat = 'json' | 'sha' | 'required';
