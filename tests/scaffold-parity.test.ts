@@ -129,10 +129,12 @@ describe("create-project-dirs scaffold parity", () => {
         writeFileSync(join(repo, "package.json"), `${JSON.stringify({ name: "demo", scripts: { "check:task-workflow": "repo-harness run check-task-workflow --strict" } }, null, 2)}\n`);
         expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), { record: "ledger", env: process.env }).ok).toBe(true);
       }
-      const seeds = ["deploy/README.md", "docs/architecture/index.md", "docs/researches/README.md", "docs/spec.md", ".ai/context/context-map.json", ".ai/context/capabilities.json"];
+      const seeds = ["deploy/README.md", "docs/researches/README.md", "docs/spec.md", ".ai/context/context-map.json", ".ai/context/capabilities.json"];
       const managed = (repo: string) => [".gitignore", "package.json", ...seeds, ...readdirSync(join(repo, "docs/reference-configs")).sort().map((name) => `docs/reference-configs/${name}`)]
         .map((path) => [path, readFileSync(join(repo, path), "utf-8")]);
       expect(managed(scaffolded)).toEqual(managed(fresh));
+      // Both writers leave no placeholder architecture ledger: archimap.html and modules/ are the entry.
+      for (const repo of [scaffolded, fresh]) expect(existsSync(join(repo, "docs/architecture/index.md"))).toBe(false);
 
       const gitignore = readFileSync(join(scaffolded, ".gitignore"), "utf-8");
       expect(gitignore).toContain("# BEGIN: repo-harness generated-runtime");

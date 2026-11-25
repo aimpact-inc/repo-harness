@@ -38,7 +38,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(existsSync(join(cwd, "specs"))).toBe(false);
       expect(existsSync(join(cwd, ".ops"))).toBe(false);
       // rh init is the only writer of the seed files.
-      for (const seed of ["deploy/README.md", "docs/architecture/index.md", "docs/researches/README.md", "docs/spec.md", ".ai/context/context-map.json", ".ai/context/capabilities.json"]) {
+      for (const seed of ["deploy/README.md", "docs/researches/README.md", "docs/spec.md", ".ai/context/context-map.json", ".ai/context/capabilities.json"]) {
         expect(existsSync(join(cwd, seed))).toBe(false);
       }
       expect(existsSync(join(cwd, "deploy/env/.gitkeep"))).toBe(true);
@@ -222,7 +222,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/active-worktree");
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/triage/inbox.md");
       expect(workflowContract.artifacts.runtimeFiles).not.toContain(".ai/harness/workstreams/events.jsonl");
-      expect(workflowContract.artifacts.requiredFiles).toContain("docs/architecture/index.md");
+      expect(workflowContract.artifacts.requiredFiles).not.toContain("docs/architecture/index.md");
       expect(workflowContract.artifacts.requiredFiles).not.toContain("tasks/current.md");
       expect(workflowContract.artifacts.runtimeFiles).not.toContain("tasks/current.md");
       expect(workflowContract.artifacts.requiredDirectories).not.toContain("plans/prds");

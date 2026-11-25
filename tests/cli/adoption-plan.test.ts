@@ -135,6 +135,7 @@ describe("canonical adoption plan", () => {
       expect(Object.keys(generatedPolicy.worktree_strategy)).toEqual(["base_branch", "review_base", "merge_back"]);
       expect(plan.operations.some((operation) => operation.path === ".ai/context/capabilities.json")).toBe(true);
       expect(plan.operations.some((operation) => operation.path === "deploy/README.md")).toBe(true);
+      expect(plan.operations.some((operation) => operation.path === "docs/architecture/index.md")).toBe(false);
       for (const path of COPIED_TEMPLATE_PATHS) expect(plan.operations.some((operation) => operation.path === path)).toBe(false);
       expect(plan.operations.some((operation) => operation.path?.startsWith("scripts/"))).toBe(false);
       expect(plan.operations.every((operation) => operation.rollback)).toBe(true);
@@ -233,7 +234,8 @@ describe("canonical adoption plan", () => {
       }
       expect(existsSync(join(repo, "docs", "architecture", "snapshots"))).toBe(false);
       expect(existsSync(join(repo, "docs", "architecture", "domains"))).toBe(false);
-      expect(readFileSync(join(repo, "docs", "architecture", "index.md"), "utf-8")).not.toContain("Latest snapshot");
+      expect(existsSync(join(repo, "docs", "architecture", "index.md"))).toBe(false);
+      expect(existsSync(join(repo, "docs", "architecture", "modules"))).toBe(true);
       // The evidence rule lives in the user-level runtime-state block, not the tracked block.
       expect(readFileSync(join(ROOT, "assets/templates/runtime-state.gitignore"), "utf-8")).toContain(".ai/harness/evidence/");
       expect(readFileSync(join(repo, ".gitignore"), "utf-8")).not.toContain(".ai/harness/evidence/");
@@ -242,6 +244,23 @@ describe("canonical adoption plan", () => {
     } finally {
       cleanup(repo);
     }
+  });
+
+  test("init refresh never seeds or removes docs/architecture/index.md and keeps a user copy", () => {
+    const repo = tempRepo();
+    try {
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER).ok).toBe(true);
+      expect(existsSync(join(repo, "docs/architecture/index.md"))).toBe(false);
+      // A refresh on the adopted repository adds no placeholder either.
+      expect(applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }), LEDGER).ok).toBe(true);
+      expect(existsSync(join(repo, "docs/architecture/index.md"))).toBe(false);
+      // An existing copy belongs to the repository: no plan operation touches it.
+      writeFileSync(join(repo, "docs/architecture/index.md"), "# Architecture Index\n\nTeam copy.\n");
+      const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
+      expect(plan.operations.some((operation) => operation.path === "docs/architecture/index.md")).toBe(false);
+      expect(applyAdoptionPlan(plan, LEDGER).ok).toBe(true);
+      expect(readFileSync(join(repo, "docs/architecture/index.md"), "utf8")).toBe("# Architecture Index\n\nTeam copy.\n");
+    } finally { cleanup(repo); }
   });
 
   test("init refresh keeps a retired runtime ignore rule while its files exist and lists them as leftovers", () => {

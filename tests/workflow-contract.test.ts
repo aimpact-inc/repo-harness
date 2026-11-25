@@ -119,7 +119,7 @@ describe("workflow contract manifest", () => {
     expect(contract.artifacts.requiredFiles).not.toContain("tasks/current.md");
     expect(contract.artifacts.runtimeFiles).not.toContain("tasks/current.md");
     expect(contract.artifacts.runtimeFiles).not.toContain(".ai/harness/handoff/current.md");
-    expect(contract.artifacts.requiredFiles).toContain("docs/architecture/index.md");
+    expect(contract.artifacts.requiredFiles).not.toContain("docs/architecture/index.md");
     expect(contract.artifacts.requiredFiles).not.toContain(".claude/templates/implementation-notes.template.md");
     expect(contract.artifacts.requiredFiles).not.toContain(".claude/templates/review.template.md");
     expect(contract.artifacts.requiredFiles).not.toContain("tasks/todos.md");
