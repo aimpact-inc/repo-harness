@@ -1858,8 +1858,8 @@
             "AGENTS.md": "assets/templates/root-context.md"
           },
           "fingerprints": {
-            "CLAUDE.md": "sha256:20f383d999c7f3eff2cb4a0abd94c272ee18b7604ba70a7722b91e2aaf3a87c9",
-            "AGENTS.md": "sha256:20f383d999c7f3eff2cb4a0abd94c272ee18b7604ba70a7722b91e2aaf3a87c9"
+            "CLAUDE.md": "sha256:2c74f2f318a1387778a12e7e49c83922cc0d279f3e670334268683bf3241add5",
+            "AGENTS.md": "sha256:2c74f2f318a1387778a12e7e49c83922cc0d279f3e670334268683bf3241add5"
           },
           "historicalFingerprints": {
             "CLAUDE.md": [
@@ -1870,7 +1870,8 @@
               "sha256:58b9816cad7ffe1ba2380b15b3c5c41ab0ab862696763c618037bc904f93c026",
               "sha256:d33c0754ac7ba2c6babb9069febc8e80793f119849e456a6eab24b6ecc104453",
               "sha256:5ec6c523a550df4dc3e36d1bbfa8470fa3dd48e494a1b8c5de52b9bd6276f5a1",
-              "sha256:3d6741b137951bd51e3957edd93be78b59d0a1c8063acb2d72b97045ca17955e"
+              "sha256:3d6741b137951bd51e3957edd93be78b59d0a1c8063acb2d72b97045ca17955e",
+              "sha256:20f383d999c7f3eff2cb4a0abd94c272ee18b7604ba70a7722b91e2aaf3a87c9"
             ],
             "AGENTS.md": [
               "sha256:956b22a5a55e517e0253b636d3a4c542b03ccbe2a3ce40c3beea573ef03204db",
@@ -1880,7 +1881,8 @@
               "sha256:58b9816cad7ffe1ba2380b15b3c5c41ab0ab862696763c618037bc904f93c026",
               "sha256:d33c0754ac7ba2c6babb9069febc8e80793f119849e456a6eab24b6ecc104453",
               "sha256:5ec6c523a550df4dc3e36d1bbfa8470fa3dd48e494a1b8c5de52b9bd6276f5a1",
-              "sha256:3d6741b137951bd51e3957edd93be78b59d0a1c8063acb2d72b97045ca17955e"
+              "sha256:3d6741b137951bd51e3957edd93be78b59d0a1c8063acb2d72b97045ca17955e",
+              "sha256:20f383d999c7f3eff2cb4a0abd94c272ee18b7604ba70a7722b91e2aaf3a87c9"
             ]
           },
           "summary": "Replace the unchanged pre-IPDD root context with the invariant root context; keep any user-edited file as user-owned.",
