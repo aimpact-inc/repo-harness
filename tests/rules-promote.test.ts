@@ -5,7 +5,7 @@ import { runRulesPromote, runRulesStatus } from '../src/cli/commands/rules';
 import { candidateId, ruleStatus, type RuleStatusV1 } from '../src/core/ci/rule-candidates';
 import { candidateMarker, promotionCandidate, renderPromotionPrompt, RULES_PARENT_MARKER, RulesPromoteError } from '../src/core/ci/rule-prompt';
 import { sha256Hex } from '../src/core/evidence/sha256';
-import { GithubAdapterError, type GithubCommandRunner } from '../src/effects/github/issues';
+import { GithubAdapterError, type GithubCommandRunner } from '../src/effects/github/command';
 import { promoteRules, reconcileRules } from '../src/effects/rules/promote';
 import { commitAll, initGitRepo, run, tmpWorkspace, withTempRepo } from './helpers/repo-fixture';
 

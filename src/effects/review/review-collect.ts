@@ -1,7 +1,5 @@
 import { closeSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'fs';
 import { basename, join, resolve } from 'path';
-import { withAntigravityTranscript } from '../board/antigravity-transcript';
-import { AGY_REVIEW_PROMPT_OPTION, isAgyReviewLaunchId, readAgyReviewSession } from '../board/agy-review-session';
 import { boardHostPorts, hcGet, HerdrCoreError, RH_LABEL, type HcTerminal } from '../terminal/herdr-core';
 import { hcStatusClass } from '../../core/board/desk';
 import { isReviewSeat, type SeatId } from '../../core/board/seats-settings';
@@ -18,6 +16,19 @@ import { createGhRunner, ghJson, prHead } from './review-publish-gh';
 
 const MARKER = 'RECEIPT-JSON';
 const RECEIPT_KIND = 'repo-harness-review-publish-receipt';
+
+interface AgyReviewSession {
+  readonly sessionId: string;
+  readonly transcriptPath: string;
+}
+
+/** Native session access supplied by the CLI and watcher composition roots. */
+export interface AgyReviewSource {
+  readonly promptOption: string;
+  isLaunchId(value: string): boolean;
+  readSession(launchId: string, env: NodeJS.ProcessEnv): AgyReviewSession;
+  withTranscript<T>(sessionId: string, transcriptPath: string, env: NodeJS.ProcessEnv, read: (fd: number, bytes: number) => T): T | null;
+}
 
 export interface ReviewCollectInput extends Omit<ReviewPublishInput, 'seat'> {
   /** The review seat's `hc` terminal address. */
@@ -206,12 +217,12 @@ function parseAgyReceipt(reply: string): ReviewPublishReceipt {
   return parseReceipt(value);
 }
 
-function agyLaunchBinding(terminal: HcTerminal, pr: number): ReviewPacketBinding & { launchId: string } {
+function agyLaunchBinding(terminal: HcTerminal, pr: number, source: AgyReviewSource): ReviewPacketBinding & { launchId: string } {
   const binding = terminal.labels[RH_LABEL.agyReview] ?? '';
   const separator = binding.indexOf(' ');
   const launchId = binding.slice(0, separator);
   const packet = parseReviewPacket(binding.slice(separator + 1));
-  if (separator < 0 || !isAgyReviewLaunchId(launchId) || terminal.labels[RH_LABEL.seat] !== 'gatekeeper'
+  if (separator < 0 || !source.isLaunchId(launchId) || terminal.labels[RH_LABEL.seat] !== 'gatekeeper'
     || terminal.labels[RH_LABEL.pr] !== String(pr) || packet?.seat !== 'gatekeeper' || packet.pr !== pr) {
     throw invalid('the terminal has no complete agy gatekeeper-fallback launch packet for this PR');
   }
@@ -232,21 +243,21 @@ function agyPrHead(input: Omit<ReviewPublishInput, 'seat'>, repository: string |
   return target.headSha.toLowerCase();
 }
 
-function agyReceipt(input: ReviewCollectInput, terminal: HcTerminal, home: string, watcher: boolean): ReviewPublishReceipt {
-  const launch = agyLaunchBinding(terminal, input.prNumber);
+function agyReceipt(input: ReviewCollectInput, terminal: HcTerminal, home: string, watcher: boolean, source: AgyReviewSource): ReviewPublishReceipt {
+  const launch = agyLaunchBinding(terminal, input.prNumber, source);
   const head = watcher ? launch.head_sha : agyPrHead(input, terminal.labels[RH_LABEL.repository]);
   if (launch.head_sha !== head) {
     throw new ReviewPublishError('review_subject_stale', `the agy launch packet is for ${launch.head_sha}, but the PR head is ${head}; nothing was posted`, 2);
   }
   const env = { HOME: home };
-  let session: ReturnType<typeof readAgyReviewSession>;
-  try { session = readAgyReviewSession(launch.launchId, env); } catch (error) { throw invalid(errorMessage(error)); }
+  let session: AgyReviewSession;
+  try { session = source.readSession(launch.launchId, env); } catch (error) { throw invalid(errorMessage(error)); }
   const { sessionId, transcriptPath } = session;
   const name = basename(transcriptPath);
   if (name !== 'transcript.jsonl' && name !== 'transcript_full.jsonl') throw invalid('the recorded agy path must name a native transcript');
   let reply: string | null;
   try {
-    reply = withAntigravityTranscript(sessionId, transcriptPath, env, fd => agyReply(readFileSync(fd, 'utf8')));
+    reply = source.withTranscript(sessionId, transcriptPath, env, fd => agyReply(readFileSync(fd, 'utf8')));
   } catch { throw invalid('the recorded agy transcript is unreadable'); }
   if (reply === null) throw invalid('the recorded agy transcript is outside the conversation logs or is not a regular transcript');
   const receipt = parseAgyReceipt(reply);
@@ -283,7 +294,7 @@ function launchHead(terminal: HcTerminal, pr: number, seat: string): string {
  * Bind the session to its seat, PR and head and parse its receipt without posting.
  * The watcher uses the local launch head. Publication still checks the live PR head.
  */
-export function readSeatReceipt(input: ReviewCollectInput, watcherRepositoryId?: number): SeatReceipt {
+export function readSeatReceipt(input: ReviewCollectInput, agy: AgyReviewSource, watcherRepositoryId?: number): SeatReceipt {
   const terminal = watcherRepositoryId === undefined ? hcGet(input.seat) : watcherSeatTerminal(input.seat, input.prNumber, watcherRepositoryId);
   const cwd = terminal.cwd;
   if (cwd == null) throw invalid('terminal ' + input.seat + ' reports no working directory');
@@ -295,9 +306,9 @@ export function readSeatReceipt(input: ReviewCollectInput, watcherRepositoryId?:
   const home = osAccountHome();
   const foreground = terminal.foreground;
   const nativeAgy = terminal.labels[RH_LABEL.agyReview] !== undefined
-    || foreground?.name === 'agy' || foreground?.argv.includes(AGY_REVIEW_PROMPT_OPTION);
+    || foreground?.name === 'agy' || foreground?.argv.includes(agy.promptOption);
   const receipt = nativeAgy
-    ? agyReceipt(input, terminal, home, watcherRepositoryId !== undefined)
+    ? agyReceipt(input, terminal, home, watcherRepositoryId !== undefined, agy)
     : jsonlReceipt(input.prNumber, seat, realCwd, home,
       () => watcherRepositoryId === undefined ? readPrHeadSha(input) : launchHead(terminal, input.prNumber, seat));
   const reviewSeat: ReviewRecordSeat = seat === 'reviewer' ? 'reviewer' : 'gatekeeper';
@@ -342,6 +353,6 @@ export function publishSeatReceipt(input: ReviewCollectInput, read: SeatReceipt)
   return { ...published, seat_close: closeReviewSeat(terminal, seat, input.prNumber, receipt.subject_sha) };
 }
 
-export function collectReview(input: ReviewCollectInput): ReviewCollectResult {
-  return publishSeatReceipt(input, readSeatReceipt(input));
+export function collectReview(input: ReviewCollectInput, agy: AgyReviewSource): ReviewCollectResult {
+  return publishSeatReceipt(input, readSeatReceipt(input, agy));
 }

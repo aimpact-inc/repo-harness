@@ -28,6 +28,10 @@
       "src/cli/commands/quota.ts",
       "src/cli/commands/seats.ts"
     ],
+    "exclude": [
+      "src/effects/board/agy-review-session.ts",
+      "src/effects/board/antigravity-transcript.ts"
+    ],
     "entrypoints": [
       {
         "id": "entrypoint.board.command",

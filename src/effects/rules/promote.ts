@@ -6,7 +6,7 @@ import {
 } from '../../core/ci/rule-prompt';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex } from '../../core/evidence/sha256';
-import { GithubAdapterError, runGithubCommand, type GithubCommandRunner } from '../github/issues';
+import { GithubAdapterError, runGithubCommand, type GithubCommandRunner } from '../github/command';
 
 export interface RulesPromoteResult {
   readonly kind: typeof RULES_PROMOTE_KIND;

@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.20c862067d24cd20",
+  "fingerprint": "sha256:6757442b58256e72be3be6ee3e3669d3a5b1d3291bb3918e918fffca7e2586e3",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "residual-cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "cycle:scc.8624e98e5abc09db",
+    "subjectSelectorId": "subject.repository.12badeac63e0aee3"
+  },
+  "affectedNodeIds": [
+    "component.acceptance-review.primary",
+    "component.board.effects",
+    "component.execution-primitives.runtime-closeout",
+    "component.hook-adapters.primary-effects",
+    "component.publication.primary-effects",
+    "component.workflow-state.coordination-plane",
+    "component.workflow-state.primary-effects"
+  ],
+  "affectedNodeCount": 7,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "cycleEdgeCount": 11,
+    "memberCount": 7
+  },
+  "reason": "Resolved in #3507",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T09:14:09.000Z",
+  "provenance": {
+    "headSha": "7daa50ae5d3dc9bd922f12efcc2f81a33063c313",
+    "assessmentDigest": "sha256:18f9dfcfe7f0cbd16bb34ae9052b449b2f7d826917a1062db254834b1664d336",
+    "baselineSnapshotDigest": "sha256:624f62ce1d47444f3a8efbeb28e2432c1ec91aa40e5cf868d194c2f89fee6960"
+  },
+  "snapshotDigest": "sha256:624f62ce1d47444f3a8efbeb28e2432c1ec91aa40e5cf868d194c2f89fee6960",
+  "evidenceDigest": "sha256:18f9dfcfe7f0cbd16bb34ae9052b449b2f7d826917a1062db254834b1664d336",
+  "resolutionDigest": "sha256:a59646fb1a5350659c1af8db7510a27986686b2be94ab35e1c9b824506707c69",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.residualCycleMemberCount",
+      "subjectSelectorId": "subject.repository.12badeac63e0aee3",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.acceptance-review.primary",
+        "component.board.effects",
+        "component.execution-primitives.runtime-closeout",
+        "component.hook-adapters.primary-effects",
+        "component.publication.primary-effects",
+        "component.workflow-state.coordination-plane",
+        "component.workflow-state.primary-effects"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.b02a385815a0c802"
+    }
+  ]
+}

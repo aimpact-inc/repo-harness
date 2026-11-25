@@ -35,7 +35,7 @@ import { describeRuleProposals, type RuleProposalReport } from '../../core/ci/ru
 import { collectRulesProposals, RulesProposalsError } from '../../effects/rules/proposals';
 import { collectRulesTasks } from '../../effects/rules/tasks';
 import type { BoardHostPortsV1 } from '../../core/board/board';
-import type { GithubCommandRunner } from '../../effects/github/issues';
+import type { GithubCommandRunner } from '../../effects/github/command';
 import { POLICY_PATH, decodeWorkflowPolicy } from '../../core/workflow/policy-schema';
 import { githubRemoteRepository } from '../../core/board/source';
 import { sha256Hex } from '../../core/evidence/sha256';

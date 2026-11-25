@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import { fetchGithubIssues, GithubAdapterError, type GithubCommandRunner } from '../../src/effects/github/issues';
+import { GithubAdapterError, type GithubCommandRunner } from '../../src/effects/github/command';
+import { fetchGithubIssues } from '../../src/effects/github/issues';
 import { parseExternalSourcesPolicy, requireManualGithubPolicy } from '../../src/effects/github/policy';
 
 const policy = requireManualGithubPolicy(parseExternalSourcesPolicy({

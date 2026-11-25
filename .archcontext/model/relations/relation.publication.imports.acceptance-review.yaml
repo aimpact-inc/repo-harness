@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "archcontext.relation/v1",
-  "id": "relation.publication.imports.acceptance-review",
-  "kind": "depends-on",
-  "source": "capability.organization.publication",
-  "target": "capability.verification.acceptance-review",
-  "intent": "Run the bounded gh command transport that the Draft PR operation uses."
-}

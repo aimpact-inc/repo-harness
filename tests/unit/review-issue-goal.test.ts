@@ -7,7 +7,7 @@ import { observeActiveReviewAdmission } from '../../src/effects/admission/issue-
 import { expect, test } from 'bun:test';
 import { observeReviewIssueGoal } from '../../src/effects/admission/issue-goal';
 import { parseExternalSourcesPolicy, requireManualGithubPolicy } from '../../src/effects/github/policy';
-import type { GithubCommandRunner } from '../../src/effects/github/issues';
+import type { GithubCommandRunner } from '../../src/effects/github/command';
 
 const policy = parseExternalSourcesPolicy({ version: 1, mode: 'manual', github: {
   enabled: true, repository: 'acme/widgets', selection: { kind: 'issue_numbers', issue_numbers: [7] },

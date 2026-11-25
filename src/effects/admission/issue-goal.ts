@@ -1,7 +1,8 @@
 import { readActiveReviewAdmission, readReviewAdmissionForObservation, assertReviewAdmissionGoal } from './admission-store';
 import { sha256Prefixed } from '../../core/evidence/sha256';
 import { canonicalize } from '../../core/evidence/canonical-json';
-import { fetchGithubIssues, type GithubCommandRunner } from '../github/issues';
+import type { GithubCommandRunner } from '../github/command';
+import { fetchGithubIssues } from '../github/issues';
 import { parseExternalSourcesPolicy, requireManualGithubPolicy, type ExternalSourcesPolicyV1 } from '../github/policy';
 
 /** Read one explicitly selected issue through the existing bounded provider
