@@ -602,14 +602,23 @@ export function seatPaneName(input: SeatPaneNameInput): string {
   return name;
 }
 
+export interface SeatTabNameInput {
+  readonly issue?: string;
+  readonly pr?: string;
+}
+
 /**
- * The Herdr.app tab of a new seat pane, before the fullness suffix: the orchestrator tab, the worker tab of its parent
- * issue (`other` without one), the council tab, or the review tab. A full tab gets the next number, for example `#1000 2`.
+ * The Herdr.app base tab name of a seat pane, before any fullness suffix (` 2`, ` 3`):
+ * - worker seats: `#<issue>` when `--issue` is provided, else `other`
+ * - review seats (`gatekeeper`, `reviewer`): fallback `PR#<pr>` when `--pr` is provided, else `review`
+ * - council seats: `council`
+ * - orchestrator / advisor: `orch`
  */
-export function seatTabName(seat: LaunchSeatId, parent?: string): string {
-  if (parent !== undefined && !POSITIVE.test(parent)) throw new SeatPaneNameError('Tab name: the parent must be a positive decimal integer.');
+export function seatTabName(seat: LaunchSeatId, item: SeatTabNameInput = {}): string {
+  if (item.issue !== undefined && !POSITIVE.test(item.issue)) throw new SeatPaneNameError('Tab name: the issue must be a positive decimal integer.');
+  if (item.pr !== undefined && !POSITIVE.test(item.pr)) throw new SeatPaneNameError('Tab name: the PR must be a positive decimal integer.');
   if (isCouncilSeat(seat)) return 'council';
-  if (isReviewSeat(seat)) return 'review';
-  if (isWorkerSeat(seat)) return parent === undefined ? 'other' : `#${parent}`;
+  if (isReviewSeat(seat)) return item.pr === undefined ? 'review' : `PR#${item.pr}`;
+  if (isWorkerSeat(seat)) return item.issue === undefined ? 'other' : `#${item.issue}`;
   return 'orch';
 }

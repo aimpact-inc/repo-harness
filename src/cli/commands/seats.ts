@@ -487,7 +487,7 @@ async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, env: No
     prefix: panePrefix(cwd, env), seat: id, issue: isWorkerSeat(id) || isCouncilSeat(id) ? labels.issue : undefined,
     pr: isReviewSeat(id) ? labels.pr : undefined, release: labels.release, qualifier: labels.qualifier,
   });
-  const tab = labels.repositoryId === undefined ? null : seatTabName(id, labels.parent);
+  const tab = labels.repositoryId === undefined ? null : seatTabName(id, { issue: labels.issue, pr: labels.pr });
   const agentTypes = effective.runtime === 'claude' && effective.fleet.length > 0
     ? [...MANAGED_AGENTS, ...RETIRED_SEAT_FLEET_ROLES, ...CLAUDE_BUILTIN_AGENT_TYPES, ...claudeHostAgentTypes(env)]
     : [];

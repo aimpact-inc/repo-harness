@@ -4,12 +4,12 @@ import { createHash } from "crypto";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, delimiter, dirname, join } from "path";
-import { AGY_READONLY_COMMAND_PREFIXES, AGY_SEAT_AGENT_DIR_PATTERN, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName } from "../../src/core/board/seat-launch";
+import { AGY_READONLY_COMMAND_PREFIXES, AGY_SEAT_AGENT_DIR_PATTERN, AGY_WORKER_COMMAND_PREFIXES, agySeatCommandRules, agySeatLimits, buildSeatLaunch, seatPaneName, seatTabName } from "../../src/core/board/seat-launch";
 import { agySeatAgentSpec } from "../../src/effects/board/seats-configuration";
 import { HANDOFF_SECTIONS, seatHandoffPath, seatResetReason, seatResetRelaunchPath, seatResetRequestPath, seatResetSteps } from "../../src/core/board/seat-reset";
 import { EDIT_GUARD_SCOPE_SECTION } from "../../src/cli/hook/session-context";
 import { SeatResetError, readSeatSession, recordSeatSession, runSeatReset, type SeatRelaunch, type SeatResetNotify, type SeatResetOptions } from "../../src/effects/board/seat-reset";
-import { seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
+import { labeledSeatArgv, seatHandoff, seatResetLaunch, seatResetTarget } from "../../src/cli/commands/seats";
 import { AGY_ADVISOR_ALLOWED_SEAT_TOOLS, AGY_ADVISOR_SEAT_TOOLS, DEFAULT_SEATS_CONFIG, LAUNCH_SEAT_IDS, NATIVE_SEATS_PRESET, WORKER_SEAT_IDS, isCouncilSeat, isReviewSeat, isWorkerSeat } from "../../src/core/board/seats-settings";
 import { repoHarnessRepoIdFor } from "../../src/effects/repo-registry";
 import { classifyQuotaReading, decodeCodexRateLimitsResult } from "../../src/core/board/quota";
@@ -197,6 +197,10 @@ process.exit(93);
     ]);
     const tab = join(home, "tab.json");
     writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
+if (process.argv[2] === 'ls') {
+  console.log(JSON.stringify({ spaces: [] }));
+  process.exit(0);
+}
 const args = JSON.parse(process.argv[4]);
 require('node:fs').appendFileSync(${JSON.stringify(tab)}, JSON.stringify(args) + '\\n');
 if (process.env.AGY_HERDR_FAIL) { console.error(JSON.stringify(args)); process.exit(1); }
@@ -1325,7 +1329,7 @@ describe("rh seats argv", () => {
         }
         expect(value.brief).toContain("You are a worker seat.");
         expect(value.labels).toContain(`repo-harness.seat=${seat}`);
-        expect([value.name, value.tab]).toEqual(["rh-w-1925", "#1924"]);
+        expect([value.name, value.tab]).toEqual(["rh-w-1925", "#1925"]);
       }
     }));
   });
@@ -1341,7 +1345,7 @@ describe("rh seats argv", () => {
         const result = run(registryEnv(home), [seat, "--repository-id", "1", "--pr", "1925", "--json"], repo);
         expect(result.status, result.stderr).toBe(0);
         const value = JSON.parse(result.stdout);
-        expect([value.name, value.tab]).toEqual([`rh-${role}-1925`, "review"]);
+        expect([value.name, value.tab]).toEqual([`rh-${role}-1925`, "PR#1925"]);
         expect(value.brief).toContain("Do not edit files, commit, push, or write to GitHub. Report the verdict first");
         expect(value.brief).not.toContain("rh review publish");
         expect(value.brief).not.toContain("You are a worker seat");
@@ -2094,10 +2098,23 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
           "REPO_HARNESS_SEAT_MODEL=opus", "REPO_HARNESS_SEAT_EFFORT=high", "claude", "-n", "rh-adv"]);
         // A linked worktree resolves to its primary checkout; the Codex worker has no session name flag.
         const worker = named(worktree, "worker", "--parent", "1000", "--issue", "1508", "--pr", "1521", "--qualifier", "device");
-        expect([worker.name, worker.tab]).toEqual(["rh-w-1508-device", "#1000"]);
+        expect([worker.name, worker.tab]).toEqual(["rh-w-1508-device", "#1508"]);
         expect(worker.argv).not.toContain("rh-w-1508-device");
         const release = named(repo, "worker", "--release", "0252");
         expect([release.name, release.tab]).toEqual(["rh-w-rel0252", "other"]);
+        expect([
+          seatTabName("worker", { issue: "2479" }),
+          seatTabName("worker-deep"),
+          seatTabName("gatekeeper", { pr: "2478" }),
+          seatTabName("reviewer"),
+          seatTabName("council", { issue: "42" }),
+          seatTabName("orchestrator"),
+          seatTabName("advisor"),
+        ]).toEqual(["#2479", "other", "PR#2478", "review", "council", "orch", "orch"]);
+        expect(() => seatTabName("worker", { issue: "0" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
+        expect(() => seatTabName("gatekeeper", { pr: "abc" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
+        const splitLabeled = labeledSeatArgv("worker", { repositoryId: "1", issue: "1508" }, ["claude"], process.env, "new", worktree);
+        expect(splitLabeled.some(arg => arg.includes(`&& shift 2 && cd -- '${worktree.replaceAll("'", "'\\''")}' && exec "$@"`))).toBe(true);
         expect(seatPaneName({ prefix: "rh", seat: "reviewer", pr: "1536", qualifier: "codex" })).toBe("rh-rv-1536-codex");
         expect(() => seatPaneName({ prefix: "a", seat: "reviewer", pr: "1536" })).toThrow(expect.objectContaining({ code: "pane_name_invalid" }));
         // Without --repository-id the argv has no name, as before.
@@ -2169,7 +2186,39 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf '{"address":"t5","state":"live","turn":0,"labels":{"herdr.space":"sp-auto"}}'\n`, { mode: 0o755 });
       writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
         + `test "$*" = 'api --hostname github.com repos/{owner}/{repo}' && test -z "$GH_REPO" && printf '{"id":19}'\n`, { mode: 0o755 });
-      writeFileSync(join(bin, "herdr-app"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${tabLog}"\nprintf '{"tab":"tb1","terminal":"t9"}'\n`, { mode: 0o755 });
+      const stateFile = join(home, "herdr-state.json");
+      writeFileSync(stateFile, JSON.stringify({ spaces: [{ id: "sp-auto", name: "council-test", folder: worktree, machine: null, active: true, tabs: [] }], seq: 1 }));
+      writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
+const fs = require('node:fs');
+const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+if (process.argv[2] === 'ls') {
+  console.log(JSON.stringify({ spaces: state.spaces }));
+  process.exit(0);
+}
+const cmd = process.argv[3];
+const args = JSON.parse(process.argv[4]);
+fs.appendFileSync(${JSON.stringify(tabLog)}, JSON.stringify([cmd, args]) + '\\n');
+const id = state.seq++;
+const pane = 'p' + id;
+const terminal = 't' + (10 + id);
+if (cmd === 'tab.new') {
+  const space = state.spaces.find(s => s.id === args.space);
+  const tabId = 'tb' + id;
+  if (space) space.tabs.push({ id: tabId, name: args.name ?? null, active: true, terminals: [{ terminal, pane, status: null, app: null, name: null }] });
+  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+  console.log(JSON.stringify({ tab: tabId, pane, terminal }));
+} else if (cmd === 'pane.split') {
+  for (const space of state.spaces) {
+    for (const tab of space.tabs) {
+      if (tab.terminals.some(t => t.pane === args.pane)) {
+        tab.terminals.push({ terminal, pane, status: null, app: null, name: null });
+      }
+    }
+  }
+  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+  console.log(JSON.stringify({ pane, terminal }));
+}
+`, { mode: 0o755 });
       const { CLAUDE_CONFIG_DIR: _claude, PI_CODING_AGENT_DIR: _pi, HC_TERMINAL_ID: _terminal, HERDR_ENV: _herdr, ...base } = process.env;
       const env = { ...base, ...registryEnv(home), TMPDIR: scratch, GH_REPO: "another/repo", REPO_HARNESS_GH_BIN: gh, HC_TERMINAL_ID: "t5",
         PATH: [bin, dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter) };
@@ -2195,16 +2244,20 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
       expect(applied.status, applied.stderr).toBe(0);
       expect(applied.stdout).toContain(`rh-cn-42-fableapi → ${join(outDir, "issue-42-fable-api.md")}`);
       expect(applied.stdout).toContain(`rh-cn-42-carbonapi → ${join(outDir, "issue-42-carbon-api.md")}`);
-      const lines = readFileSync(tabLog, "utf8").trimEnd().split("\n");
-      expect(lines).toHaveLength(6);
-      const tab0 = JSON.parse(lines[2]!);
-      const tab1 = JSON.parse(lines[5]!);
-      expect([lines[0], lines[1], tab0]).toEqual(["do", "tab.new", expect.objectContaining({ name: "council", space: "sp-auto", folder: worktree })]);
-      expect(tab1).toMatchObject({ name: "council", space: "sp-auto", folder: worktree });
-      expect(tab0.argv.some((arg: string) => arg.includes("seats label council --repository-id 20 --issue 42 --parent 7"))).toBe(true);
-      expect(values(tab1.argv, "--exclude-tools")).toEqual(["edit,write"]);
+      const ops = readFileSync(tabLog, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as [string, Record<string, unknown>]);
+      expect(ops).toHaveLength(2);
+      const [cmd0, tab0] = ops[0]!;
+      const [cmd1, split1] = ops[1]!;
+      expect([cmd0, tab0]).toEqual(["tab.new", expect.objectContaining({ name: "council", space: "sp-auto", folder: worktree })]);
+      expect([cmd1, split1]).toEqual(["pane.split", expect.objectContaining({ direction: "right", pane: "p1" })]);
+      expect(split1).not.toHaveProperty("folder");
+      expect(split1).not.toHaveProperty("task");
+      expect((tab0.argv as string[]).some((arg: string) => arg.includes("seats label council --repository-id 20 --issue 42 --parent 7"))).toBe(true);
+      expect(values(split1.argv as string[], "--exclude-tools")).toEqual(["edit,write"]);
+      expect((split1.argv as string[]).some((arg: string) => arg.includes(`&& cd -- '${worktree.replaceAll("'", "'\\''")}' && exec "$@"`))).toBe(true);
       expect(tab0.task).toContain(join(outDir, "issue-42-fable-api.md"));
-      expect(tab1.task).toContain(join(outDir, "issue-42-carbon-api.md"));
+      expect((split1.argv as string[]).at(-2)).toBe("--");
+      expect((split1.argv as string[]).at(-1)).toContain(join(outDir, "issue-42-carbon-api.md"));
       expect(readFileSync(ghLog, "utf8").trim().split("\n")).toEqual(["api --hostname github.com repos/{owner}/{repo}"]);
       for (const checkout of [repo, worktree]) {
         const status = spawnSync("git", ["status", "--porcelain"], { cwd: checkout, env, encoding: "utf8" });
@@ -2254,6 +2307,9 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         writeFileSync(join(bin, "hc"), `#!/bin/sh\nprintf 'hc %s\\n' "$*" >> "${log}"\n`
           + `printf '{"address":"t5","state":"live","turn":0,"labels":{%s}}' "\${FAKE_SPACE+\\"herdr.space\\":\\"$FAKE_SPACE\\"}"\n`);
         writeFileSync(join(bin, "herdr-app"), `#!/bin/sh\nprintf 'herdr-app %s\\n' "$*" >> "${log}"\n`
+          + `if [ "$1" = "ls" ]; then\n`
+          + `  if [ -n "$FAKE_HERDR_LS_FAIL" ]; then printf '%s' '{"error":"no window"}'; exit 1; fi\n`
+          + `  printf '%s' '{"spaces":[]}'\n  exit 0\nfi\n`
           + `if [ -n "$FAKE_HERDR_FAIL" ]; then printf '%s' '{"error":"no window"}'; exit 1; fi\nprintf '%s' '{"tab":"tb1","terminal":"t9"}'\n`);
         chmodSync(join(piBin, "pi"), 0o755);
         for (const name of ["hc", "herdr-app"]) chmodSync(join(bin, name), 0o755);
@@ -2269,12 +2325,12 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
         const launchArgs = [...labels, "--cwd", worktree, "--task", "Task: issue #1473"];
 
         // The space comes from the herdr.space label of the calling terminal, which may carry no repo-harness label (an
-        // ordinary Herdr.app shell); the tab gets the seats argv argv and its tab name.
+        // ordinary Herdr.app shell); the tab gets the seats argv argv and its issue tab name (#1473).
         const opened = seats({ HC_TERMINAL_ID: "t5", FAKE_SPACE: "sp1" }, ["launch", ...launchArgs]);
         expect([opened.status, JSON.parse(opened.stdout).placement, opened.calls[0]]).toEqual([0, { tab: "tb1", terminal: "t9" }, "hc get --json -- t5"]);
-        expect(opened.calls.slice(1).map(line => line.split(" ").slice(0, 3).join(" "))).toEqual(["herdr-app do tab.new"]);
-        expect(JSON.parse(opened.calls[1]!.slice("herdr-app do tab.new ".length))).toEqual({
-          name: "#1000", space: "sp1", folder: worktree, argv: argvLaunch.argv, task: "Task: issue #1473", focus: false });
+        expect(opened.calls.slice(1).map(line => line.split(" ").slice(0, 3).join(" "))).toEqual(["herdr-app ls", "herdr-app do tab.new"]);
+        expect(JSON.parse(opened.calls[2]!.slice("herdr-app do tab.new ".length))).toEqual({
+          name: "#1473", space: "sp1", folder: worktree, argv: argvLaunch.argv, task: "Task: issue #1473", focus: false });
 
         // No --space and a caller without a herdr.space label, a blank caller label, or a blank --space: no tab and no headless terminal.
         for (const [env, space] of [[{}, []], [{ HC_TERMINAL_ID: "t5" }, []], [{ HC_TERMINAL_ID: "t5", FAKE_SPACE: " " }, []], [{}, ["--space", " "]]] as [Record<string, string>, string[]][]) {
@@ -2282,12 +2338,138 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
           expect([missing.status, missing.error, missing.calls.filter(line => !line.startsWith("hc get "))]).toEqual([1, "seat_space_missing", []]);
         }
 
-        // Herdr.app refuses the tab: the launch fails closed and never falls back to hc run.
+        // Herdr.app refuses the tab after ls succeeds: the launch fails closed as seat_tab_unknown and never falls back to hc run.
         const refused = seats({ FAKE_HERDR_FAIL: "1" }, ["launch", ...launchArgs, "--space", "mini-cf/sp2"]);
-        expect([refused.status, refused.error, refused.calls.map(line => line.split(" ").slice(0, 3).join(" "))]).toEqual([1, "seat_tab_unknown", ["herdr-app do tab.new"]]);
+        expect([refused.status, refused.error, refused.calls.map(line => line.split(" ").slice(0, 3).join(" "))]).toEqual([1, "seat_tab_unknown", ["herdr-app ls", "herdr-app do tab.new"]]);
+        // Herdr.app ls fails before any mutation: fails closed as seat_tab_failed without sending tab.new.
+        const lsFailed = seats({ FAKE_HERDR_LS_FAIL: "1" }, ["launch", ...launchArgs, "--space", "sp1"]);
+        expect([lsFailed.status, lsFailed.error, lsFailed.calls]).toEqual([1, "seat_tab_failed", ["herdr-app ls"]]);
         // No herdr-app on PATH: no request was sent, so the tab surely does not exist.
         const absent = seats({ PATH: `${piBin}${delimiter}${join(home, ".quota-bin")}${delimiter}${dirname(process.execPath)}${delimiter}/bin${delimiter}/usr/bin` }, ["launch", ...launchArgs, "--space", "sp1"]);
         expect([absent.status, absent.error, absent.calls]).toEqual([1, "seat_tab_failed", []]);
+      });
+    });
+  });
+
+  test("seats launch and council enforce Option A tab naming (#<issue>, PR#<pr>, council) and 3-pane explicit pane.split packing (#3494)", () => {
+    const seatsConfig = {
+      ...DEFAULT_SEATS_CONFIG,
+      reviewer: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "pi" as const, model: "magpie/group/deepseek-v4.1-flash", effort: null },
+    };
+    withHome(seatsConfig, (home) => {
+      withRepository(home, "rh", (repo, worktree) => {
+        const bin = join(home, "bin");
+        const stateFile = join(home, "herdr-state.json");
+        const opsLog = join(home, "ops.log");
+        const scratch = realpathSync(mkdirSync(join(home, "scratch"), { recursive: true })!);
+        mkdirSync(bin);
+        mkdirSync(join(home, ".pi", "agent", "extensions"), { recursive: true });
+        writeFileSync(join(home, ".pi", "agent", "extensions", "magpie.ts"), "");
+        writeFileSync(join(bin, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        writeFileSync(join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        writeFileSync(join(bin, "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+        writeFileSync(stateFile, JSON.stringify({
+          spaces: [{ id: "sp1", name: "repo-harness", folder: repo, machine: null, active: true, tabs: [] }],
+          terminals: {},
+          seq: 1,
+        }));
+        writeFileSync(join(bin, "hc"), `#!${process.execPath}
+const fs = require('node:fs');
+const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+const sub = process.argv[2];
+if (sub === 'ls') {
+  const terminals = Object.values(state.terminals).map(t => ({ address: t.address, name: t.name, state: t.state, agent: t.agent }));
+  console.log(JSON.stringify({ terminals }));
+} else if (sub === 'get') {
+  const addr = process.argv[process.argv.length - 1];
+  const found = state.terminals[addr] ?? { address: addr, name: null, state: 'live', turn: 0, labels: { 'herdr.space': 'sp1' }, status: null, pid: null, foreground: null, reason: null, cwd: null };
+  console.log(JSON.stringify(found));
+}
+`, { mode: 0o755 });
+        writeFileSync(join(bin, "herdr-app"), `#!${process.execPath}
+const fs = require('node:fs');
+const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+if (process.argv[2] === 'ls') {
+  console.log(JSON.stringify({ spaces: state.spaces }));
+  process.exit(0);
+}
+const cmd = process.argv[3];
+const args = JSON.parse(process.argv[4]);
+fs.appendFileSync(${JSON.stringify(opsLog)}, JSON.stringify([cmd, args]) + '\\n');
+const id = state.seq++;
+const pane = 'p' + id;
+const terminal = 't' + (10 + id);
+const space = state.spaces.find(s => s.id === 'sp1');
+if (cmd === 'tab.new') {
+  const tabId = 'tb' + id;
+  space.tabs.push({ id: tabId, name: args.name ?? null, active: true, terminals: [{ terminal, pane, status: null, app: null, name: null }] });
+  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+  console.log(JSON.stringify({ tab: tabId, pane, terminal }));
+} else if (cmd === 'pane.split') {
+  for (const tab of space.tabs) {
+    if (tab.terminals.some(t => t.pane === args.pane)) {
+      tab.terminals.push({ terminal, pane, status: null, app: null, name: null });
+    }
+  }
+  fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify(state));
+  console.log(JSON.stringify({ pane, terminal }));
+}
+`, { mode: 0o755 });
+        const { CLAUDE_CONFIG_DIR: _c, PI_CODING_AGENT_DIR: _p, HC_TERMINAL_ID: _t, HERDR_ENV: _h, ...base } = process.env;
+        const env = {
+          ...base, ...registryEnv(home), BUN_INSTALL: join(home, ".bun"), TMPDIR: scratch,
+          PATH: [bin, join(home, ".quota-bin"), dirname(process.execPath), "/bin", "/usr/bin"].join(delimiter),
+        };
+        const runSeats = (args: string[]) => {
+          const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd: repo, env, encoding: "utf8" });
+          expect(result.status, result.stderr).toBe(0);
+          return result;
+        };
+        const readOps = () => readFileSync(opsLog, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as [string, Record<string, unknown>]);
+
+        // 1. Two workers for #2479 and #2461 under --parent 2457 open distinct tabs #2479 and #2461 (no duplicate #2457).
+        const w1 = JSON.parse(runSeats(["launch", "worker", "--repository-id", "1", "--parent", "2457", "--issue", "2479", "--space", "sp1", "--cwd", worktree, "--task", "Task #2479"]).stdout);
+        const w2 = JSON.parse(runSeats(["launch", "worker", "--repository-id", "1", "--parent", "2457", "--issue", "2461", "--space", "sp1", "--cwd", repo, "--task", "Task #2461"]).stdout);
+        expect([w1.tab, w2.tab]).toEqual(["#2479", "#2461"]);
+        // Record w1 as a live hc worker terminal in worktree so review seats discover it via hc + herdr-app ls.
+        const stateAfterWorkers = JSON.parse(readFileSync(stateFile, "utf8"));
+        stateAfterWorkers.terminals[w1.placement.terminal] = {
+          address: w1.placement.terminal, name: null, state: "live", agent: "pi", turn: 0, status: null, pid: null, foreground: null, reason: null,
+          cwd: worktree, labels: { "repo-harness.repository": "1", "repo-harness.seat": "worker", "repo-harness.issue": "2479", "repo-harness.parent": "2457" },
+        };
+        writeFileSync(stateFile, JSON.stringify(stateAfterWorkers));
+
+        // 2. Launching gatekeeper and reviewer for PR #2485 splits right into #2479 (worker + gatekeeper + reviewer = 3 panes).
+        const gk = JSON.parse(runSeats(["launch", "gatekeeper", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Review PR#2485 gk"]).stdout);
+        const rv = JSON.parse(runSeats(["launch", "reviewer", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Review PR#2485 rv"]).stdout);
+        expect([gk.tab, rv.tab]).toEqual(["#2479", "#2479"]);
+
+        // 3. Now #2479 has 3 panes (full): further review launches for PR #2485 open PR#2485, pack up to 3 panes, then open PR#2485 2.
+        const fb1 = JSON.parse(runSeats(["launch", "gatekeeper", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Fallback 1"]).stdout);
+        const fb2 = JSON.parse(runSeats(["launch", "gatekeeper", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Fallback 2"]).stdout);
+        const fb3 = JSON.parse(runSeats(["launch", "gatekeeper", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Fallback 3"]).stdout);
+        const fb4 = JSON.parse(runSeats(["launch", "gatekeeper", "--repository-id", "1", "--pr", "2485", "--space", "sp1", "--cwd", worktree, "--task", "Fallback 4"]).stdout);
+        expect([fb1.tab, fb2.tab, fb3.tab, fb4.tab]).toEqual(["PR#2485", "PR#2485", "PR#2485", "PR#2485 2"]);
+
+        // 4. Council packs 3 panes into 'council', then a subsequent council launch opens 'council 2'.
+        runSeats(["council", "--issue", "42", "--members", "fable,carbon,astra", "--repository-id", "1", "--space", "sp1", "--out-dir", join(scratch, "c1")]);
+        runSeats(["council", "--issue", "43", "--members", "fable", "--repository-id", "1", "--space", "sp1", "--out-dir", join(scratch, "c2")]);
+
+        const ops = readOps();
+        expect(ops.map(([cmd, args]) => cmd === "tab.new" ? [cmd, args.name] : [cmd, args.direction, args.pane])).toEqual([
+          ["tab.new", "#2479"],
+          ["tab.new", "#2461"],
+          ["pane.split", "right", "p1"],
+          ["pane.split", "right", "p3"],
+          ["tab.new", "PR#2485"],
+          ["pane.split", "right", "p5"],
+          ["pane.split", "right", "p6"],
+          ["tab.new", "PR#2485 2"],
+          ["tab.new", "council"],
+          ["pane.split", "right", "p9"],
+          ["pane.split", "right", "p10"],
+          ["tab.new", "council 2"],
+        ]);
       });
     });
   });
