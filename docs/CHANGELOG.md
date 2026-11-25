@@ -2,6 +2,38 @@
 
 All notable changes to this skill are documented here.
 
+## [0.37.3] - 2026-11-25
+
+### Changed
+
+- I2: `rh seats launch` starts `agy` seats with `--dangerously-skip-permissions` instead of `--mode accept-edits` and keeps `--settings` (`trustedWorkspaces`, `permissions.allow` and `permissions.deny`). The Antigravity guard readiness probe now also sends a protected-file overwrite and requires `deny` for it and for the `.env` read. A hook that returns `force_ask` fails `antigravity-direct-command`, and `rh seats launch` refuses the seat with `antigravity_guard_unready`. (#3487, #3493)
+- `orchestrator` and `advisor` seats load the `herdr` skill at session start on Claude, Pi and Antigravity. Claude seats of these roles keep the `Skill` tool when `shell` is on, and the `agy` orchestrator may run `herdr-app ls`. The `herdr` skill trigger covers terminal and pane work without an explicit request, and the seat briefs forbid `pane.focus` with an untargeted `pane.split`. (#3488, #3490)
+- Herdr tabs carry the work item name: `#<issue>` for workers, `PR#<pr>` for review seats without a worker, `council` and `orch`, with ` 2` and ` 3` suffixes for full tabs. `rh seats launch`, `rh board dispatch`, `rh board review` and `rh seats council` put at most 3 panes in one tab, join an open tab through `hc run` tab adoption, and refuse an untargeted `pane.split` with `invalid_address`. (#3494, #3497)
+- New explicit-only skills `repo-harness-sharpen` and `repo-harness-reframe` prepare a prompt (practitioner depth, primary inputs, verification oracle; candidate problems, domain terms, analogies). `rh update` installs them on all four hosts, and host switches stop automatic model invocation. README.md, docs/usage.md and the install profile doc list them. (#3496, #3498, #3501, #3515)
+- The PRD reference, the issue-flow orchestrator reference and the `advisor` and `council` seat briefs apply the sharpen and reframe rigor: probe experiment-settleable choices first, name 2–3 candidate problems with observable signs, state where a borrowed pattern breaks, and require one external check beyond the writer and reviewer. (#3495, #3531)
+- In `all` credit mode, a tight or exhausted ChatGPT quota window stays normal when credits are unlimited, or when a positive balance meets the configured floor and Codex reports no limit. The quota line prints the reason. When the app server gives no reading, the board reads `magpie quota codex --json`; with no usable reading it reports unknown. (#3499, #3518)
+- ArchContext v3 boundary refactors move code between components without a behaviour change: write-all-sync, trusted GitHub CLI resolution, checkout filesystem and host root primitives, MCP tool result and version leaf, providers wiring, operator read cycles, `repo-harness-home`, the host-installer and `docs.ts` entrypoints, and shared version and upgrade command helpers. (#3504, #3506, #3508, #3509, #3510, #3511, #3512, #3513, #3514, #3527, #3520, #3521, #3522, #3523, #3524, #3525, #3526, #3528, #3532, #3534)
+
+### Fixed
+
+- I2: the Antigravity (`agy`) `UserFileGuard` fails closed in every mode. An overwrite of an existing user file outside the allowed roots gets `deny` with the fixed `ANTIGRAVITY_GUARD_DENIAL` text instead of `force_ask`, because `agy 1.5.16` auto-approves `force_ask` without a prompt and sends no permission mode on `PreToolUse` stdin. The hook writes a redacted `UserFileGuard` failure record. I1 `CredentialGuard` and the Claude, Codex and Pi hooks do not change. (#3489, #3492)
+- `rh worktrees list` judges all registered worktrees before directory sizing. Sizing no longer uses the shared deadline, so a clean, unowned, pushed squash-merged worktree shows green with `merge: absorbed`. Directory sizes can show unknown in large repositories. (#3500, #3517)
+
+### Tests
+
+- The refactor e2e suite runs in separate tests and reports a killed subprocess by signal instead of `exit null`. (#3516, #3519)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.37.3. It installs the fail-closed Antigravity hook and the `repo-harness-sharpen` and `repo-harness-reframe` skills. (#3492, #3498)
+- Run `rh update` before you launch `agy` seats. A host that keeps the 0.37.2 hook returns `force_ask` on the readiness probe, and `rh seats launch` refuses the seat with `antigravity_guard_unready`. (#3493)
+- Antigravity sessions no longer prompt for an overwrite of an existing user file outside the allowed roots; the hook denies it. Do such operations in your own shell. (#3492)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.37.2 launches `agy` seats with `--mode accept-edits` and its Antigravity hook returns `force_ask`, which `agy 1.5.16` approves without a prompt. Keep 0.37.3 on upgraded hosts; if you must return to 0.37.2, reinstall 0.37.2 and run `rh update`, and do not launch `agy` seats on it.
+
 ## [0.37.2] - 2026-11-25
 
 ### Changed
