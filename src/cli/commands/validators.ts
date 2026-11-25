@@ -5,8 +5,7 @@
  * that accepts these flags validates consistently in one place.
  */
 
-import type { AdapterTargetSpec, InstallTargetSpec } from './install';
-import type { Location } from '../installer/types';
+import type { AdapterTargetSpec, InstallCommandOptions, InstallTargetSpec } from './install';
 import type { AdoptionMode } from '../../core/adoption/modes';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +32,8 @@ export function assertAdapterTarget(raw: string, commandName: string): AdapterTa
 // ---------------------------------------------------------------------------
 // Location
 // ---------------------------------------------------------------------------
+
+type Location = InstallCommandOptions['location'];
 
 const VALID_LOCATIONS: readonly Location[] = ['global'];
 

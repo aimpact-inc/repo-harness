@@ -52,3 +52,163 @@ source:
             - id: sink.hook-adapters.skill-root
               path: "src/effects/host-skill-roots.ts"
               symbol: "hostSkillRoot"
+    - id: entrypoint.hook-adapters.install-command
+      path: "src/cli/commands/install.ts"
+      symbols:
+        - name: "runInstall"
+          sinks:
+            - id: sink.hook-adapters.install-command
+              path: "src/cli/commands/install.ts"
+              symbol: "resolveTargets"
+    - id: entrypoint.hook-adapters.config-command
+      path: "src/cli/commands/config.ts"
+      symbols:
+        - name: "buildConfigCommand"
+          sinks:
+            - id: sink.hook-adapters.config-command
+              path: "src/cli/commands/config.ts"
+              symbol: "runConfigStatus"
+    - id: entrypoint.hook-adapters.status-command
+      path: "src/cli/commands/status.ts"
+      symbols:
+        - name: "runStatus"
+          sinks:
+            - id: sink.hook-adapters.status-command
+              path: "src/cli/commands/status.ts"
+              symbol: "inspectManagedProjection"
+    - id: entrypoint.hook-adapters.security-command
+      path: "src/cli/commands/security.ts"
+      symbols:
+        - name: "runSecurityScan"
+          sinks:
+            - id: sink.hook-adapters.security-command
+              path: "src/cli/commands/security.ts"
+              symbol: "scanHookConfig"
+    - id: entrypoint.hook-adapters.architecture-selection
+      path: "src/cli/installer/architecture-selection.ts"
+      symbols:
+        - name: "readRecordedSelection"
+          sinks:
+            - id: sink.hook-adapters.architecture-selection
+              path: "src/cli/installer/install-state.ts"
+              symbol: "readRecordedInstallState"
+    - id: entrypoint.hook-adapters.codex-config-migration
+      path: "src/cli/installer/codex-config-migration.ts"
+      symbols:
+        - name: "migrateCodexConfigRecords"
+          sinks:
+            - id: sink.hook-adapters.codex-config-migration
+              path: "src/cli/installer/codex-config-migration.ts"
+              symbol: "planCodexConfigMigration"
+    - id: entrypoint.hook-adapters.configuration-ownership
+      path: "src/cli/installer/configuration-ownership.ts"
+      symbols:
+        - name: "hostConfigurationRoot"
+          sinks:
+            - id: sink.hook-adapters.configuration-ownership
+              path: "src/effects/repo-harness-home.ts"
+              symbol: "requireHome"
+    - id: entrypoint.hook-adapters.global-context
+      path: "src/cli/installer/global-context.ts"
+      symbols:
+        - name: "preflightGlobalContextRefresh"
+          sinks:
+            - id: sink.hook-adapters.global-context
+              path: "src/cli/installer/global-context.ts"
+              symbol: "planGlobalContextFile"
+    - id: entrypoint.hook-adapters.install-profile
+      path: "src/cli/installer/install-profile.ts"
+      symbols:
+        - name: "withHostConfigTransaction"
+          sinks:
+            - id: sink.hook-adapters.install-profile
+              path: "src/cli/installer/install-profile.ts"
+              symbol: "beginInstallHostTransaction"
+    - id: entrypoint.hook-adapters.install-state-migration
+      path: "src/cli/installer/install-state-migration.ts"
+      symbols:
+        - name: "migrateInstallState"
+          sinks:
+            - id: sink.hook-adapters.install-state-migration
+              path: "src/effects/host-config/store.ts"
+              symbol: "migrateLedgerSchema"
+    - id: entrypoint.hook-adapters.install-state
+      path: "src/cli/installer/install-state.ts"
+      symbols:
+        - name: "installProfileStatePath"
+          sinks:
+            - id: sink.hook-adapters.install-state
+              path: "src/effects/repo-harness-home.ts"
+              symbol: "requireHome"
+    - id: entrypoint.hook-adapters.json-config-migration
+      path: "src/cli/installer/json-config-migration.ts"
+      symbols:
+        - name: "migrateJsonConfigRecords"
+          sinks:
+            - id: sink.hook-adapters.json-config-migration
+              path: "src/cli/installer/json-config-migration.ts"
+              symbol: "planJsonConfigMigration"
+    - id: entrypoint.hook-adapters.pi-package
+      path: "src/cli/installer/pi-package.ts"
+      symbols:
+        - name: "installPiPackage"
+          sinks:
+            - id: sink.hook-adapters.pi-package
+              path: "src/cli/installer/pi-package.ts"
+              symbol: "planPiPackage"
+    - id: entrypoint.hook-adapters.repository-excludes
+      path: "src/cli/installer/repository-excludes.ts"
+      symbols:
+        - name: "writeRepositoryExcludes"
+          sinks:
+            - id: sink.hook-adapters.repository-excludes
+              path: "src/cli/installer/repository-excludes.ts"
+              symbol: "runtimeStateBlock"
+    - id: entrypoint.hook-adapters.installer-shared
+      path: "src/cli/installer/shared.ts"
+      symbols:
+        - name: "atomicWriteFileSync"
+          sinks:
+            - id: sink.hook-adapters.installer-shared
+              path: "src/effects/atomic-append.ts"
+              symbol: "retryWindowsSharingRace"
+    - id: entrypoint.hook-adapters.skill-sync
+      path: "src/cli/installer/skill-sync.ts"
+      symbols:
+        - name: "syncInstalledSkillCopies"
+          sinks:
+            - id: sink.hook-adapters.skill-sync
+              path: "src/cli/installer/install-profile.ts"
+              symbol: "planSkillSync"
+    - id: entrypoint.hook-adapters.antigravity-target
+      path: "src/cli/installer/targets/antigravity.ts"
+      symbols:
+        - name: "hasRecordedAntigravityState"
+          sinks:
+            - id: sink.hook-adapters.antigravity-target
+              path: "src/cli/installer/targets/antigravity.ts"
+              symbol: "antigravityRecords"
+    - id: entrypoint.hook-adapters.target-registry
+      path: "src/cli/installer/targets/registry.ts"
+      symbols:
+        - name: "ALL_TARGETS"
+          sinks:
+            - id: sink.hook-adapters.target-registry
+              path: "src/cli/installer/targets/codex.ts"
+              symbol: "codexTarget"
+    - id: entrypoint.hook-adapters.uninstall
+      path: "src/cli/installer/uninstall.ts"
+      symbols:
+        - name: "runUserUninstall"
+          sinks:
+            - id: sink.hook-adapters.uninstall
+              path: "src/cli/installer/uninstall.ts"
+              symbol: "runUserUninstallLocked"
+    - id: entrypoint.hook-adapters.waza-rules
+      path: "src/cli/installer/waza-rules.ts"
+      symbols:
+        - name: "syncWazaSharedRules"
+          sinks:
+            - id: sink.hook-adapters.waza-rules
+              path: "src/cli/installer/waza-rules.ts"
+              symbol: "fetchRules"
