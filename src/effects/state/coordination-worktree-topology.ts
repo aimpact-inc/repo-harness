@@ -11,11 +11,11 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, readdir
 import { tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { publishFileByRename, syncDirectoryDurably } from '../atomic-append';
-import { readPrunedWorktreeIntents, writePrunedWorktreeIntents, prunedIntentKey, type PrunedWorktreeIntent } from './pruned-worktree-intents';
+import { readPrunedWorktreeIntents, writePrunedWorktreeIntents, prunedIntentKey, readPrunedWorktreeSweepState, advanceWorktreeSweepCursor, type PrunedWorktreeIntent } from './pruned-worktree-intents';
 import { readWorkflowPolicyDocument } from './resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { configuredGitBinary, resolveGitCommonDirectory, resolveGitCommonDirectoryAsync } from '../git/common-directory';
-import { acquireExclusiveDirectoryLock, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
+import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
 import { taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
 import { parseWorktreeTopology } from '../git/worktree-topology';
 import { observeProviderBranchMergeCommit } from './coordination-provider-merge';
@@ -1162,6 +1162,14 @@ export function planManagedWorktreeSweep(root: string, callerCwd: string, env: N
   return { target_oid: target.target, items };
 }
 
+function sweepBatch<T>(items: readonly T[], keyOf: (item: T) => string, after: string, size: number) {
+  const ordered = items.map(item => ({ key: keyOf(item), item }));
+  ordered.sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const start = ordered.findIndex(({ key }) => key > after);
+  // A removed cursor entry still marks a position in the ring.
+  return (start > 0 ? [...ordered.slice(start), ...ordered.slice(0, start)] : ordered).slice(0, size);
+}
+
 /**
  * Local refs and this clone's Git inventory are the only live worktree inputs.
  * `contract-worktree start` runs this before it creates a checkout. Every
@@ -1199,12 +1207,8 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
       if (approval && !pruneScopeApproved(context, approval)) notes.push(`prune: kept; ${NOT_IN_PREVIEW}`);
       else withWorktreeTopologyLock(main, () => { pruned += pruneManagedWorktrees(context); }, limits);
     }
-    const pending = readPrunedWorktreeIntents(common);
-    const liveAvailable = entries(main, limits).slice(1).filter(entry => managed(checkoutPath(entry.path))).length;
-    const pendingBatch = pending.slice(0, 8 - Math.min(4, liveAvailable));
-    for (const intent of pendingBatch) {
-      if (approval && !(targetApproved && intentApproved(approval, intent))) { notes.push(`${intent.worktree}: kept; ${NOT_IN_PREVIEW}`); continue; }
-      let complete = false;
+    const sweepIntent = (intent: PrunedWorktreeIntent) => {
+      if (approval && !(targetApproved && intentApproved(approval, intent))) { notes.push(`${intent.worktree}: kept; ${NOT_IN_PREVIEW}`); return; }
       try {
         timeout(limits);
         if (ignoredTrash) throw new Error('missing entry retained while trash ownership is unknown');
@@ -1217,7 +1221,7 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
           const { proof } = branchRemovalProof(main, intent.branch, intent.head, { targetRef, target }, limits, true);
           if (!proof) {
             notes.push(`${intent.worktree}: pruned; unmerged branch kept (${intent.branch})`);
-            continue;
+            return;
           }
           const expected = { worktree: '', branch: intent.branch, head_sha: intent.head, target_ref: targetRef, target_oid: target,
             merge_commit_sha: proof.merge_commit_sha };
@@ -1234,20 +1238,16 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
           retireWorktreeIdentity(common, intent.worktree, limits);
           writePrunedWorktreeIntents(common, readPrunedWorktreeIntents(common).filter(item => prunedIntentKey(item) !== prunedIntentKey(intent)));
         }, limits);
-        complete = true; removed++; notes.push(`${intent.worktree}: removed`);
-      } catch (error) { notes.push(`${intent.worktree}: kept; ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`); }
-      finally {
-        if (!complete) withWorktreeTopologyLock(main, () => {
-          const current = readPrunedWorktreeIntents(common);
-          writePrunedWorktreeIntents(common, [...current.filter(item => prunedIntentKey(item) !== prunedIntentKey(intent)), intent]);
-        }, limits);
+        removed++; notes.push(`${intent.worktree}: removed`);
+      } catch (error) { notes.push(`${intent.worktree}: kept; ${reasonOf(error)}`); }
+    };
+    let processes: WorktreeProcess[] | null | undefined;
+    let registered: Map<string, string> | null = null;
+    const sweepLive = (entry: ReturnType<typeof entries>[number]) => {
+      if (processes === undefined) {
+        processes = worktreeProcesses(limits.deadline);
+        registered = approval ? registrations(common) : null;
       }
-    }
-    const liveCandidates = entries(main, limits).slice(1).filter(entry => managed(checkoutPath(entry.path)));
-    const processes = worktreeProcesses(limits.deadline!);
-    const liveBudget = 8 - pendingBatch.length;
-    const registered = approval ? registrations(common) : null;
-    for (const entry of liveCandidates.slice(0, liveBudget)) {
       const path = checkoutPath(entry.path);
       try {
         if (approval && protectsCwd(path, cwd)) throw new WorktreeNotGreenError(['session_cwd']);
@@ -1260,7 +1260,7 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
           const branch = selectMissingWorktree(context, entry, ignoredTrash);
           withWorktreeTopologyLock(main, () => { pruned += pruneManagedWorktrees(context); }, limits);
           notes.push(`${path}: pruned; branch cleanup deferred (${branch})`);
-          continue;
+          return;
         }
         if (!entry.head) throw new Error('cleanup head is unavailable');
         const verify = approval && (() => {
@@ -1272,7 +1272,7 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
           removeDetachedWorktree(context, path, entry.head, { targetRef, target }, verify);
           removed++;
           notes.push(`${path}: removed`);
-          continue;
+          return;
         }
         if (!entry.branch?.startsWith('refs/heads/')) throw new Error('no local branch');
         const receipt = removeGreenWorktree(context, { path, branch: entry.branch.slice('refs/heads/'.length), head: entry.head, targetRef, target, processes, verify });
@@ -1282,11 +1282,52 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
         try { resumeSweepTrash(context, receipt.directory); }
         catch (error) { notes.push(`${receipt.directory}: pending; ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`); }
       } catch (error) {
-        notes.push(`${path}: kept; ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`);
+        notes.push(`${path}: kept; ${reasonOf(error)}`);
+      }
+    };
+
+    const { intents: pending, cursor: savedCursor } = readPrunedWorktreeSweepState(common);
+    const live = entries(main, limits).slice(1).filter(entry => managed(checkoutPath(entry.path)));
+    const total = pending.length + live.length;
+    // The intent store requires POSIX ownership proof.
+    const persistProgress = total > 1 && worktreeUid() !== undefined;
+    let cursor = savedCursor;
+    const first = cursor.first;
+    const second = first === 'pending' ? 'live' : 'pending';
+    const pendingBatch = sweepBatch(pending, prunedIntentKey, cursor.pending, 8 - Math.min(4, live.length));
+    const liveBatch = sweepBatch(live, entry => entry.path, cursor.live, 8 - pendingBatch.length);
+    const batches = {
+      pending: pendingBatch.map(({ key, item }) => ({ key, visit: () => sweepIntent(item) })),
+      live: liveBatch.map(({ key, item }) => ({ key, visit: () => sweepLive(item) })),
+    };
+    let inspected = 0;
+    queues: for (const queue of [first, second] as const) {
+      for (const { key, visit } of batches[queue]) {
+        if (Date.now() >= limits.deadline) break queues;
+        // Record each visit before its proof can use the remaining time. Alternate
+        // the first queue so a slow proof cannot monopolize successive runs.
+        if (persistProgress) {
+          const next: typeof cursor = { ...cursor, [queue]: key, first: second };
+          try {
+            const advanced = withExclusiveDirectoryLock(common, WORKTREE_TOPOLOGY_LOCK, () => advanceWorktreeSweepCursor(common, cursor, next),
+              { waitTimeoutMs: topologyLockWait(limits) });
+            if (!advanced) {
+              notes.push('sweep cursor advanced by another run');
+              break queues;
+            }
+          } catch (error) {
+            if (!(error instanceof ExclusiveLockContentionError)) throw error;
+            notes.push(reasonOf(error));
+            break queues;
+          }
+          cursor = next;
+        }
+        inspected++;
+        visit();
       }
     }
-    deferred += Math.max(0, pending.length - pendingBatch.length) + Math.max(0, liveCandidates.length - liveBudget);
-    return `[WorktreeSweep] removed=${removed} pruned=${pruned} kept=${pendingBatch.length + Math.min(liveCandidates.length, liveBudget) - removed} resumed=${resumed} deferred=${deferred}\n${notes.join('\n')}`;
+    deferred += total - inspected;
+    return `[WorktreeSweep] removed=${removed} pruned=${pruned} kept=${inspected - removed} resumed=${resumed} deferred=${deferred}\n${notes.join('\n')}`;
   } catch (error) {
     return `${notes.length ? notes.join('\n') + '\n' : ''}worktree sweep skipped: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`;
   }
