@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.1035ff5d63d12da3",
+  "fingerprint": "sha256:9fefd6decbd5d2e67f0cd03f5f44e6d44131b79a2d6b20e8410cddddd4d1678d",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "residual-cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "cycle:scc.37e8c3a4b84f00c7",
+    "subjectSelectorId": "subject.repository.d86aee8542db089c"
+  },
+  "affectedNodeIds": [
+    "component.architecture.archctx-closure",
+    "component.architecture.architecture-read",
+    "component.architecture.owners"
+  ],
+  "affectedNodeCount": 3,
+  "regressesFrom": null,
+  "status": "accepted",
+  "observationMetrics": {
+    "cycleEdgeCount": 3,
+    "memberCount": 3
+  },
+  "reason": "Issue #3511 moves the providers.ts wiring out of archctx-closure into its own component, so archctx-closure, owners and architecture-read form no cycle; no code changes.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:0123966c1e4177437868745e5d39528c01f0aec7e3a843028565675fde96d515",
+    "baselineSnapshotDigest": "sha256:0343dafdec74fd8a5e0a3961097f7afa5eb3030fb067b3eeb114f1387e746f3a"
+  },
+  "snapshotDigest": "sha256:0343dafdec74fd8a5e0a3961097f7afa5eb3030fb067b3eeb114f1387e746f3a",
+  "evidenceDigest": "sha256:0123966c1e4177437868745e5d39528c01f0aec7e3a843028565675fde96d515",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.residualCycleMemberCount",
+      "subjectSelectorId": "subject.repository.d86aee8542db089c",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.architecture.archctx-closure",
+        "component.architecture.architecture-read",
+        "component.architecture.owners"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.fd3e71b579f3d991"
+    }
+  ]
+}
