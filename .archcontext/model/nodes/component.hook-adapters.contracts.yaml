@@ -1,0 +1,21 @@
+schemaVersion: archcontext.node/v2
+id: component.hook-adapters.contracts
+kind: component
+name: Hook Contracts
+status: active
+parent: capability.runtime-harness.hook-adapters
+layer: cli
+summary: "Shared contracts for hook dispatch, host adapters and handlers."
+responsibilities:
+  - Define the ordered hook routes and host support for each route.
+  - Parse payloads and define hook identity, handlers and host output.
+  - Define the context budget, denial shape and protected directory list.
+source:
+  include:
+    - src/cli/hook/guard-denial.ts
+    - src/cli/hook/handler-contract.ts
+    - src/cli/hook/hook-input.ts
+    - src/cli/hook/hook-protocol.ts
+    - src/cli/hook/mutation-protected-dirs.ts
+    - src/cli/hook/route-registry.ts
+    - src/cli/hook/session-context-budget.ts

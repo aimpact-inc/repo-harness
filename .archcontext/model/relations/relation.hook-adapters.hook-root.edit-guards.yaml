@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.hook-adapters.hook-root.edit-guards
+kind: calls
+source: component.hook-adapters.hook-root
+target: component.hook-adapters.edit-guards
+intent: "Register the install ledger reader used by the edit and Bash guards"

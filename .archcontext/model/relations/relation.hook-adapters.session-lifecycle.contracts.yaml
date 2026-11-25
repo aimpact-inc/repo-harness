@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.hook-adapters.session-lifecycle.contracts
+kind: depends-on
+source: component.hook-adapters.session-lifecycle
+target: component.hook-adapters.contracts
+intent: "Use shared hook input, context sections and result types"

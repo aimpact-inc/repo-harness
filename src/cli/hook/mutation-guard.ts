@@ -16,6 +16,7 @@ import {
   FAILURE_LOG_FILE,
   type CapabilityPathOwner,
 } from '../../effects/state/resolve-effective-state';
+import type { Denial } from './guard-denial';
 import type { HookPermission } from './handler-contract';
 import { ANTIGRAVITY_GUARD_DENIAL, HOST_ADAPTERS } from './host-adapter';
 import { payloadString, type HookIdentity, type HookPayload } from './hook-input';
@@ -35,14 +36,6 @@ export interface MutationGuardResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly permission?: HookPermission;
-}
-
-export interface Denial {
-  readonly guard: string;
-  readonly reason: string;
-  readonly fix: string;
-  /** The user can authorize the call locally (I2) on a host that supports an approval prompt. */
-  readonly askable?: true;
 }
 
 /**

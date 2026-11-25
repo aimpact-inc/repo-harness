@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.hook-adapters.route-runtime.contracts
+kind: depends-on
+source: component.hook-adapters.primary
+target: component.hook-adapters.contracts
+intent: "Select a route and use the shared input, result and context contracts"
