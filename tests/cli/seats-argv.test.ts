@@ -2560,6 +2560,47 @@ if (cmd === 'tab.new') {
     });
   });
 
+  test("advisor and council briefs emit raw-evidence, analogy-break, and external-check rigor without changing tool limits or flags", () => {
+    const advisorRigor = "Start from raw source files and live command output rather than summaries, probe experiment-settleable choices before proposing, distinguish candidate problems by observable signs when a request is ambiguous, and cut unverified citations or links.";
+    const councilRigor = "For any borrowed pattern from another system or field, state what carries over and where the analogy breaks, and name at least one external check beyond the writer and reviewer that proves the result.";
+
+    const seats = {
+      ...DEFAULT_SEATS_CONFIG,
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, runtime: "pi" as const, model: "magpie/agy-cli/gemini-4-neon", effort: "high" as const, tools: ["mcp", "net", "read", "shell"] as const, fleet: [] },
+      council: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "codex" as const, model: "gpt-6.2-astra", fleet: [] },
+    };
+    withHome(seats, (home) => withRepository(home, "rh", (_repo, worktree) => {
+      writeFileSync(join(home, ".quota-bin", "agy"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+      const advisorRes = argv(home, "advisor", "--json");
+      expect(advisorRes.status, advisorRes.stderr).toBe(0);
+      const advisor = JSON.parse(advisorRes.stdout);
+      expect(advisor.brief).toContain(advisorRigor);
+      expect(advisor.brief).not.toContain(councilRigor);
+      expect(advisor.argv).toContain(advisor.brief);
+      expect(bare(advisor.argv)).not.toContain("--exclude-tools");
+      expect(bare(advisor.argv)).not.toContain("--no-skills");
+      expect(advisor.limits).toEqual([
+        { subject: "edit", level: "instructions_only" },
+        { subject: "tasks", level: "instructions_only" },
+        { subject: "gh", level: "instructions_only" },
+        { subject: "fleet", level: "instructions_only" },
+      ]);
+
+      const councilRes = run(registryEnv(home), ["council", "--repository-id", "1", "--issue", "42", "--json"], worktree);
+      expect(councilRes.status, councilRes.stderr).toBe(0);
+      const council = JSON.parse(councilRes.stdout);
+      expect(council.brief).toContain(councilRigor);
+      expect(council.brief).not.toContain(advisorRigor);
+      expect(bare(agent(council))).toContain("read-only");
+      expect(bare(agent(council))).toContain(`developer_instructions=${JSON.stringify(council.brief)}`);
+      expect(council.limits).toContainEqual({ subject: "edit", level: "common_commands" });
+
+      const worker = launch(home, "worker");
+      expect(worker.brief).not.toContain(advisorRigor);
+      expect(worker.brief).not.toContain(councilRigor);
+    }));
+  });
+
   test("an invalid seats section fails closed", () => {
     withHome({ advisor: {} }, (home) => {
       const result = argv(home, "advisor", "--json");
