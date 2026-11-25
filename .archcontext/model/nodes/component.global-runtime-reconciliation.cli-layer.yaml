@@ -16,7 +16,6 @@ source:
     - src/cli/index.ts
     - src/cli/commands/global-runtime.ts
     - src/cli/commands/candidate-reconciliation.ts
-    - src/cli/runtime/**
     - src/cli/tty-prompt.ts
     - src/cli/commands/validators.ts
     - src/cli/commands/doctor.ts
@@ -35,5 +34,4 @@ source:
     - src/cli/commands/upgrade.ts
     - src/cli/commands/validators.ts
     - src/cli/index.ts
-    - src/cli/runtime/write-all-sync.ts
     - src/cli/tty-prompt.ts
