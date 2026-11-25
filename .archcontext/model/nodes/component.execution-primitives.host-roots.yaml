@@ -1,0 +1,15 @@
+schemaVersion: archcontext.node/v2
+id: component.execution-primitives.host-roots
+kind: component
+name: Host Root Resolution
+status: active
+parent: capability.workflow-engine.execution-primitives
+layer: effects
+summary: Resolves host skill, staging, and provider lock paths from the selected host and environment.
+responsibilities:
+  - Provide one root rule for each host skill surface and the Pi agent directory.
+  - Resolve the staging and provider lock roots used by host skill writers and ownership checks.
+source:
+  include:
+    - src/effects/host-skill-roots.ts
+    - src/effects/pi-agent-dir.ts

@@ -12,7 +12,6 @@ source:
   include:
     - src/effects/managed-tree.ts
     - src/effects/pi-executable.ts
-    - src/effects/pi-agent-dir.ts
     - src/effects/path-identity.ts
     - src/effects/pi-host-probe.ts
     - src/effects/pi-capability-child.ts

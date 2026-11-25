@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { HostConfigError } from '../../core/host-config/types';
 import { configuredGitBinary, resolveGitCommonDirectory } from '../git/common-directory';
 import { hostConfigRepositoryKey } from '../git/repository-identity';
-import { ensureCheckoutBackupDirectory, FS_BACKUP_ROOT } from '../fs-transaction';
+import { ensureCheckoutBackupDirectory, FS_BACKUP_ROOT } from '../checkout-filesystem';
 import { isPathInside } from '../path-containment';
 import { selfIgnoringRefusal } from '../self-ignoring-directory';
 import { openRepositoryHostConfigGate, planPathRevertEntry, rollbackHostConfigTransaction, type HostConfigRepositoryGate, type HostConfigRevertEntry, type HostConfigRollbackResult } from './gate';

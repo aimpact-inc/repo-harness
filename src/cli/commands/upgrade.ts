@@ -33,7 +33,8 @@ import {
   type LegacyWorktreeCandidate,
   type LegacyWorktreeOutcome,
 } from '../../effects/upgrade/legacy-worktree-cleanup';
-import { ensureCheckoutBackupDirectory, FS_TRANSACTION_BACKUP_ROOT, withTargetLock } from '../../effects/fs-transaction';
+import { ensureCheckoutBackupDirectory, FS_TRANSACTION_BACKUP_ROOT } from '../../effects/checkout-filesystem';
+import { withTargetLock } from '../../effects/fs-transaction';
 import {
   beginLegacyCleanupBackup,
   beginInstallHostTransaction,
