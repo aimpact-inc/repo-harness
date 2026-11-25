@@ -1,9 +1,9 @@
 # runtime-harness/global-runtime-reconciliation 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:f5dfeb974a86dafcfdf4b46f87a17a47fe405719b711aa3cbf1cf57fce813887" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ca8f39f3a3a6570d1072c4011981c20c740efb892d21ea8e99398d654fa44002" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.global-runtime-reconciliation`(kind `capability`)
-> **Matched Prefixes**:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/host-skill-roots.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
+> **Matched Prefixes**:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
 > **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
@@ -70,8 +70,8 @@ flowchart LR
 ### 1.3 規模信號
 
 - 規模量級:`20–50` 個文件 / `5000–10000` 行
-- 匹配前綴:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/host-skill-roots.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
-- 排除前綴:`src/effects/configuration/agents-configuration.ts`
+- 匹配前綴:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
+- 排除前綴:`src/effects/upgrade/legacy-worktree-cleanup.ts`、`src/effects/configuration/agents-configuration.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界
@@ -92,7 +92,7 @@ flowchart LR
 - `depends-on` ← `capability.verification.codegraph-readiness` — Type the CodeGraph doctor checks and global runtime MCP step with the core doctor and global runtime port types
 - `depends-on` ← `capability.workflow-engine.contract-assets` — Resolve protected helper runtimes and host skill roots for contract assets.
 - `depends-on` ← `capability.verification.evals-checks` — Test Global Runtime Reconciliation behavior through its source modules.
-- `calls` ← `component.hook-adapters.host-installer` — Read the shared host skill roots for install projections and report architecture projection readiness in status
+- `calls` ← `component.hook-adapters.host-installer` — Report architecture projection readiness in status
 - `reads` ← `component.mcp-sidecar.host-setup` — Resolve host skill roots to name leftover ChatGPT skill links for mcp doctor
 - `calls` ← `component.operator.agents-configuration` — Plugin → core: change the agents section through the shared global configuration transaction
 - `calls` ← `component.operator.primary` — Plugin → core: read the architecture history, the hand edits and the history timeout through the architecture read module
@@ -173,12 +173,12 @@ flowchart LR
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
 | `component.global-runtime-reconciliation.cli-diagnostics` | CLI Diagnostics and Shared Options | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.cli-layer` | Global Runtime Reconciliation (cli) | `2–5` 個文件 / `500–1000` 行 | 未宣告 |
+| `component.global-runtime-reconciliation.cli-layer` | Global Runtime Reconciliation (cli) | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.cli-root` | CLI Composition Root | `10–20` 個文件 / `1000–2000` 行 | `entrypoint.global-runtime-reconciliation.cli-root` |
 | `component.global-runtime-reconciliation.global-configuration` | Global Configuration Store | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.managed-runtime-root` | Managed Runtime Check Process Root | `1–2` 個文件 / `20–50` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.primary` | Global Runtime Reconciler | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.primary-cli` | Global Runtime Reconciler (cli) | `2–5` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.global-runtime-reconciliation.primary` | Global Runtime Reconciler | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.global-runtime-reconciliation.primary-cli` | Global Runtime Reconciler (cli) | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.primary-scripts` | Global Runtime Reconciler (scripts) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.release-packaging` | Release Packaging | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.release-packaging-assets` | Release Packaging (assets) | `1–2` 個文件 / `100–200` 行 | 未宣告 |

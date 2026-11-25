@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:6ae3b4b9fc9f74eab113f57804e8332568603b12be82b047a95a6e491f970478" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:75f48baccb34f6be50232adc5b10afcb67a49cb766bb68891dc811c9b4e58dbe" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -15,9 +15,9 @@ Installs and runs typed Claude, Codex and Pi host hook routes.
 ```mermaid
 flowchart LR
   p1_capability_runtime_harness_evidence_ledger_2fe63ef5["Evidence Ledger"]:::component
-  p1_capability_runtime_harness_global_runtime_reconciliation_401730e8["Global Runtime Reconciliation"]:::component
   p1_capability_runtime_harness_hook_adapters_75a11743["Hook Adapters"]:::component
   p1_component_action_commands_skill_surface_catalog_a72c29bc["Skill Surface Catalog"]:::component
+  p1_component_execution_primitives_host_roots_5aec22e3["Host Root Resolution"]:::component
   p1_component_hook_adapters_edit_guards_019fd22c["Edit Guard Handlers"]:::component
   p1_component_hook_adapters_hook_root_4ed4a0fc["Hook Composition Root"]:::component
   p1_component_hook_adapters_host_config_adc84962["Host Config Write Gate"]:::component
@@ -28,12 +28,12 @@ flowchart LR
   p1_component_hook_adapters_primary_effects_3b034691["Hook Route Runtime (effects)"]:::component
   p1_component_hook_adapters_session_lifecycle_e389d412["Session Lifecycle Handlers"]:::component
   p1_component_hook_adapters_session_lifecycle_effects_b7b67dd9["Session Lifecycle Handlers (effects)"]:::component
+  p1_component_action_commands_skill_surface_catalog_a72c29bc -->|"Resolve the destination roots for the shell skill sync projection"| p1_component_execution_primitives_host_roots_5aec22e3
   p1_capability_runtime_harness_evidence_ledger_2fe63ef5 -->|"Collect loop state inputs for recovery evidence."| p1_capability_runtime_harness_hook_adapters_75a11743
-  p1_capability_runtime_harness_global_runtime_reconciliation_401730e8 -->|"Hash runtime candidates and reconciliation evidence."| p1_capability_runtime_harness_evidence_ledger_2fe63ef5
   p1_component_hook_adapters_edit_guards_019fd22c -->|"Implement the typed handler contract and read hook input through the shared parsers"| p1_component_hook_adapters_primary_1659ffb9
   p1_component_hook_adapters_hook_root_4ed4a0fc -->|"Run the hook route runtime for one host event"| p1_component_hook_adapters_primary_1659ffb9
-  p1_component_hook_adapters_host_installer_cd378e80 -->|"Read the shared host skill roots for install projections and report architecture projection readiness in status"| p1_capability_runtime_harness_global_runtime_reconciliation_401730e8
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Request a host file change through the write gate"| p1_component_hook_adapters_host_config_adc84962
+  p1_component_hook_adapters_host_installer_cd378e80 -->|"Resolve the destination root for each host skill projection"| p1_component_execution_primitives_host_roots_5aec22e3
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Project Claude and Codex adapter entries and map Pi events through the bounded Bun protocol to the shared route runtime"| p1_component_hook_adapters_primary_1659ffb9
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Read skill names and plugin owners from the skill surface catalog"| p1_component_action_commands_skill_surface_catalog_a72c29bc
   p1_capability_runtime_harness_hook_adapters_75a11743 -->|"Dispatch a host hook route to its typed handler"| p1_component_hook_adapters_primary_1659ffb9
@@ -47,7 +47,7 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:8d81127e40b89aecf02da670de20b578014de7e3d0c0dd972503353537d2311c`).
+- Proof: `proven` (`sha256:c015cc3901988fd2dc566d0cb798c8d0b29fdd88626fcd35e60631050fd686a7`).
 - Semantic nodes: `14`; declared relations: `13`.
 
 ### 1.2 模組職責表
@@ -63,6 +63,26 @@ flowchart LR
 | `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.managed-entries` | `src/cli/installer/managed-entries.ts#buildManagedHooks` | `sink.hook-adapters.routes-for-host` → `src/cli/hook/route-registry.ts#routesForHost` |
 | `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.pi-extension` | `src/pi/extension.ts#repoHarnessPi` | `sink.hook-adapters.pi-registration` → `src/pi/extension.ts#registerPiHooks` |
 | `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.skill-projection` | `src/cli/installer/skill-projection.ts#expectedSkillProjections` | `sink.hook-adapters.skill-placements` → `src/core/skill-surface/catalog.ts#hostSkillPlacements`、`sink.hook-adapters.skill-root` → `src/effects/host-skill-roots.ts#hostSkillRoot` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.install-command` | `src/cli/commands/install.ts#runInstall` | `sink.hook-adapters.install-command` → `src/cli/commands/install.ts#resolveTargets` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.config-command` | `src/cli/commands/config.ts#buildConfigCommand` | `sink.hook-adapters.config-command` → `src/cli/commands/config.ts#runConfigStatus` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.status-command` | `src/cli/commands/status.ts#runStatus` | `sink.hook-adapters.status-command` → `src/cli/commands/status.ts#inspectManagedProjection` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.security-command` | `src/cli/commands/security.ts#runSecurityScan` | `sink.hook-adapters.security-command` → `src/cli/commands/security.ts#scanHookConfig` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.architecture-selection` | `src/cli/installer/architecture-selection.ts#readRecordedSelection` | `sink.hook-adapters.architecture-selection` → `src/cli/installer/install-state.ts#readRecordedInstallState` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.codex-config-migration` | `src/cli/installer/codex-config-migration.ts#migrateCodexConfigRecords` | `sink.hook-adapters.codex-config-migration` → `src/cli/installer/codex-config-migration.ts#planCodexConfigMigration` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.configuration-ownership` | `src/cli/installer/configuration-ownership.ts#hostConfigurationRoot` | `sink.hook-adapters.configuration-ownership` → `src/effects/repo-harness-home.ts#requireHome` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.global-context` | `src/cli/installer/global-context.ts#preflightGlobalContextRefresh` | `sink.hook-adapters.global-context` → `src/cli/installer/global-context.ts#planGlobalContextFile` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.install-profile` | `src/cli/installer/install-profile.ts#withHostConfigTransaction` | `sink.hook-adapters.install-profile` → `src/cli/installer/install-profile.ts#beginInstallHostTransaction` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.install-state-migration` | `src/cli/installer/install-state-migration.ts#migrateInstallState` | `sink.hook-adapters.install-state-migration` → `src/effects/host-config/store.ts#migrateLedgerSchema` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.install-state` | `src/cli/installer/install-state.ts#installProfileStatePath` | `sink.hook-adapters.install-state` → `src/effects/repo-harness-home.ts#requireHome` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.json-config-migration` | `src/cli/installer/json-config-migration.ts#migrateJsonConfigRecords` | `sink.hook-adapters.json-config-migration` → `src/cli/installer/json-config-migration.ts#planJsonConfigMigration` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.pi-package` | `src/cli/installer/pi-package.ts#installPiPackage` | `sink.hook-adapters.pi-package` → `src/cli/installer/pi-package.ts#planPiPackage` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.repository-excludes` | `src/cli/installer/repository-excludes.ts#writeRepositoryExcludes` | `sink.hook-adapters.repository-excludes` → `src/cli/installer/repository-excludes.ts#runtimeStateBlock` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.installer-shared` | `src/cli/installer/shared.ts#atomicWriteFileSync` | `sink.hook-adapters.installer-shared` → `src/effects/atomic-append.ts#retryWindowsSharingRace` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.skill-sync` | `src/cli/installer/skill-sync.ts#syncInstalledSkillCopies` | `sink.hook-adapters.skill-sync` → `src/cli/installer/install-profile.ts#planSkillSync` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.antigravity-target` | `src/cli/installer/targets/antigravity.ts#hasRecordedAntigravityState` | `sink.hook-adapters.antigravity-target` → `src/cli/installer/targets/antigravity.ts#antigravityRecords` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.target-registry` | `src/cli/installer/targets/registry.ts#getTarget` | `sink.hook-adapters.target-registry` → `src/cli/installer/targets/registry.ts#findDefaultTarget` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.uninstall` | `src/cli/installer/uninstall.ts#runUserUninstall` | `sink.hook-adapters.uninstall` → `src/cli/installer/uninstall.ts#runUserUninstallLocked` |
+| `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.waza-rules` | `src/cli/installer/waza-rules.ts#syncWazaSharedRules` | `sink.hook-adapters.waza-rules` → `src/cli/installer/waza-rules.ts#fetchRules` |
 | `component.hook-adapters.primary` | `entrypoint.hook-adapters.handler-bindings` | `src/cli/hook/handler-registry.ts#handlers` | `sink.hook-adapters.mutation-guard` → `src/cli/hook/mutation-guard.ts#runMutationGuard`、`sink.hook-adapters.stop-handler` → `src/cli/hook/stop-handler.ts#runStopHandler` |
 | `component.hook-adapters.session-lifecycle` | `entrypoint.hook-adapters.stop` | `src/cli/hook/stop-handler.ts#runStopHandler` | `sink.hook-adapters.evidence-checkpoint` → `src/effects/evidence/checkpoint-store.ts#publishCheckpointFromLedger` |
 
@@ -122,8 +142,9 @@ flowchart LR
   - `calls` → `capability.public-surface.adoption` — Share the managed hook command fingerprints with the adoption migration
   - `reads` → `capability.workflow-engine.contract-assets` — Resolve the managed fleet role list during host installation
   - `calls` → `capability.workflow-engine.execution-primitives` — Hold the runtime host transaction lock and resolve the Pi opt-in repository through the bounded shared Git runner
-  - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Read the shared host skill roots for install projections and report architecture projection readiness in status
+  - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Report architecture projection readiness in status
   - `calls` → `component.hook-adapters.host-config` — Request a host file change through the write gate
+  - `calls` → `component.execution-primitives.host-roots` — Resolve the destination root for each host skill projection
   - `calls` → `external.pi` — Use Pi list, install and remove for the exact package source, without writing Pi settings or bypassing trust.
   - `calls` → `component.hook-adapters.primary` — Project Claude and Codex adapter entries and map Pi events through the bounded Bun protocol to the shared route runtime
   - `calls` → `component.action-commands.skill-surface-catalog` — Read skill names and plugin owners from the skill surface catalog
@@ -154,7 +175,7 @@ flowchart LR
 | `component.hook-adapters.hook-root` | Hook Composition Root | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.hook-adapters.host-config` | Host Config Write Gate | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.hook-adapters.host-config-effects` | Host Config Write Gate (effects) | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
-| `component.hook-adapters.host-installer` | Host Adapter Installer | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.hook-adapters.managed-entries`、`entrypoint.hook-adapters.pi-extension`、`entrypoint.hook-adapters.skill-projection` |
+| `component.hook-adapters.host-installer` | Host Adapter Installer | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.hook-adapters.managed-entries`、`entrypoint.hook-adapters.pi-extension`、`entrypoint.hook-adapters.skill-projection`、`entrypoint.hook-adapters.install-command`、`entrypoint.hook-adapters.config-command`、`entrypoint.hook-adapters.status-command`、`entrypoint.hook-adapters.security-command`、`entrypoint.hook-adapters.architecture-selection`、`entrypoint.hook-adapters.codex-config-migration`、`entrypoint.hook-adapters.configuration-ownership`、`entrypoint.hook-adapters.global-context`、`entrypoint.hook-adapters.install-profile`、`entrypoint.hook-adapters.install-state-migration`、`entrypoint.hook-adapters.install-state`、`entrypoint.hook-adapters.json-config-migration`、`entrypoint.hook-adapters.pi-package`、`entrypoint.hook-adapters.repository-excludes`、`entrypoint.hook-adapters.installer-shared`、`entrypoint.hook-adapters.skill-sync`、`entrypoint.hook-adapters.antigravity-target`、`entrypoint.hook-adapters.target-registry`、`entrypoint.hook-adapters.uninstall`、`entrypoint.hook-adapters.waza-rules` |
 | `component.hook-adapters.host-installer-effects` | Host Adapter Installer (effects) | `5–10` 個文件 / `200–500` 行 | 未宣告 |
 | `component.hook-adapters.primary` | Hook Route Runtime | `5–10` 個文件 / `1000–2000` 行 | `entrypoint.hook-adapters.handler-bindings` |
 | `component.hook-adapters.primary-effects` | Hook Route Runtime (effects) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
@@ -163,7 +184,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:8d81127e40b89aecf02da670de20b578014de7e3d0c0dd972503353537d2311c`); selectors `7/7`.
+> **Proof**: `proven` (`sha256:c015cc3901988fd2dc566d0cb798c8d0b29fdd88626fcd35e60631050fd686a7`); selectors `7/7`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
@@ -204,7 +225,7 @@ sequenceDiagram
   autonumber
   participant p2_host_installer_e130a8f7 as Host Adapter Installer
   participant p2_skill_catalog_b1d75afa as Skill Surface Catalog
-  participant p2_host_roots_8332e696 as Global Runtime Reconciliation
+  participant p2_host_roots_8332e696 as Host Root Resolution
   p2_host_installer_e130a8f7->>p2_skill_catalog_b1d75afa: Read the host placements that the plugin selection projects from the catalog
   alt Each selected skill has one source and destination per host
   p2_host_installer_e130a8f7->>p2_host_roots_8332e696: Resolve the host root#44; including the Pi agent directory override
