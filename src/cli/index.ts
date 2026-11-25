@@ -22,7 +22,7 @@ import { CLI_VERSION, formatStatus, runStatus } from './commands/status';
 import { formatDoctor, runDoctor, type DoctorPorts } from './commands/doctor';
 import { buildSetupCommand } from './commands/setup-check';
 import { buildReviewCommand } from './commands/review';
-import { buildUpgradeCommand } from './commands/upgrade';
+import { buildUpgradeCommand } from './commands/upgrade-command';
 import { assertPluginCommandSelected, declareArchitectureSelection, pluginSelected, readRecordedSelection, recordedPlugins } from './installer/architecture-selection';
 import { buildHerdrCommand } from './commands/herdr';
 import { buildEventsCommand } from './commands/events';
