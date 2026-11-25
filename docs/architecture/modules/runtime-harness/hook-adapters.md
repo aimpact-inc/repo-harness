@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:3e2dd44943e0071dbcf4e74f17df1f9b0748bbfe683067cd48707816d043fef6" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:6ae3b4b9fc9f74eab113f57804e8332568603b12be82b047a95a6e491f970478" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -38,7 +38,6 @@ flowchart LR
   p1_component_hook_adapters_host_installer_cd378e80 -->|"Read skill names and plugin owners from the skill surface catalog"| p1_component_action_commands_skill_surface_catalog_a72c29bc
   p1_capability_runtime_harness_hook_adapters_75a11743 -->|"Dispatch a host hook route to its typed handler"| p1_component_hook_adapters_primary_1659ffb9
   p1_component_hook_adapters_primary_1659ffb9 -->|"Bind PreToolUse.edit and the Claude or Pi PreToolUse.bash route to the typed path guards"| p1_component_hook_adapters_edit_guards_019fd22c
-  p1_component_hook_adapters_primary_1659ffb9 -->|"Write host output through the shared blocking writer"| p1_capability_runtime_harness_global_runtime_reconciliation_401730e8
   p1_component_hook_adapters_primary_1659ffb9 -->|"Bind SessionStart and Stop and subagent and inbox routes to their typed handlers"| p1_component_hook_adapters_session_lifecycle_e389d412
   p1_component_hook_adapters_session_lifecycle_e389d412 -->|"Publish the evidence checkpoint and render handoff and resume from it"| p1_capability_runtime_harness_evidence_ledger_2fe63ef5
   p1_component_hook_adapters_session_lifecycle_e389d412 -->|"Implement the typed handler contract and read state through the event-scoped collector"| p1_component_hook_adapters_primary_1659ffb9
@@ -48,8 +47,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:a3986ea604c6b12bf88e8d218595c8d916df1ddd8e882ff79fc699f636578bca`).
-- Semantic nodes: `14`; declared relations: `14`.
+- Proof: `proven` (`sha256:8d81127e40b89aecf02da670de20b578014de7e3d0c0dd972503353537d2311c`).
+- Semantic nodes: `14`; declared relations: `13`.
 
 ### 1.2 模組職責表
 
@@ -111,9 +110,9 @@ flowchart LR
   - `depends-on` → `component.hook-adapters.primary` — Implement the typed handler contract and read hook input through the shared parsers
   - `calls` → `capability.workflow-engine.workflow-state` — Canonicalize edit paths and resolve the owners of edited paths
 - `component.hook-adapters.hook-root`:
-  - `calls` → `component.architecture.archctx-closure` — Register the archctx ownership, display and runtime providers
   - `calls` → `component.contract-assets.architecture-contracts` — Register the architecture providers after the contract version check
   - `calls` → `component.hook-adapters.primary` — Run the hook route runtime for one host event
+  - `calls` → `component.architecture.providers` — Register the archctx ownership, display and runtime providers
 - `component.hook-adapters.host-config`:
   - 無。
 - `component.hook-adapters.host-config-effects`:
@@ -131,10 +130,9 @@ flowchart LR
 - `component.hook-adapters.host-installer-effects`:
   - 無。
 - `component.hook-adapters.primary`:
-  - `calls` → `capability.workflow-engine.execution-primitives` — Run the process supervisor and group launcher entries
+  - `calls` → `capability.workflow-engine.execution-primitives` — Run the process supervisor and group launcher entries, and write host output through the shared blocking writer
   - `calls` → `capability.workflow-engine.workflow-state` — Resolve effective state read-only at most once per hook event
   - `calls` → `component.hook-adapters.edit-guards` — Bind PreToolUse.edit and the Claude or Pi PreToolUse.bash route to the typed path guards
-  - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Write host output through the shared blocking writer
   - `calls` → `component.hook-adapters.session-lifecycle` — Bind SessionStart and Stop and subagent and inbox routes to their typed handlers
 - `component.hook-adapters.primary-effects`:
   - 無。
@@ -165,7 +163,7 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:a3986ea604c6b12bf88e8d218595c8d916df1ddd8e882ff79fc699f636578bca`); selectors `7/7`.
+> **Proof**: `proven` (`sha256:8d81127e40b89aecf02da670de20b578014de7e3d0c0dd972503353537d2311c`); selectors `7/7`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

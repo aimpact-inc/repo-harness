@@ -1,5 +1,5 @@
 # workflow-engine/contract-assets 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:efc1786140e6273d7afeebfe8f4291fbe779a23b3a63031e01a99171a1ec385e" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:50c6b263b26f2ee47b198e0ebfd2f98455e3320691a7f10234d91f34526c27ef" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.contract-assets`(kind `capability`)
 > **Matched Prefixes**:`agents/fleet/**`、`.codex/agents/**`、`scripts/install-agent-fleet.sh`、`assets/workflow-contract.v1.json`、`assets/released-managed-values.v1.json`、`scripts/check-released-managed-values.ts`、`.ai/context/**`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-worktree.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`、`assets/AGENTS.md`、`assets/CLAUDE.md`、`.archcontext/**`、`docs/adr/**`、`src/core/capabilities/**`、`assets/project-structures/**`、`assets/plan-map.json`、`assets/versions.json`、`.claude/templates/**`、`scripts/workflow-contract.ts`、`scripts/check-context-map.ts`、`scripts/check-context-files.sh`、`scripts/select-agent-context-blocks.sh`、`scripts/sync-reference-configs.ts`、`scripts/contract-worktree-runtime.ts`、`scripts/worktree-merge-lib.sh`、`scripts/cutover-closure.ts`、`scripts/new-spec.sh`、`scripts/summarize-failures.sh`、`scripts/maintenance-triage.sh`、`scripts/heartbeat-triage.sh`、`scripts/check-deploy-sql-order.sh`、`scripts/factor-lab-new.sh`、`scripts/factor-lab-promote.sh`、`scripts/factor-lab-reject.sh`、`scripts/factor-lab-check.sh`
@@ -168,7 +168,7 @@ flowchart LR
 | `component.contract-assets.agent-fleet-assets` | Agent Fleet Assets | `5–10` 個文件 / `100–200` 行 | 未宣告 |
 | `component.contract-assets.agent-fleet-installer` | Agent Fleet Installer | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.contract-assets.architecture-contracts` | Architecture Contracts (core) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
-| `component.contract-assets.capability-registry` | Capability Registry | `500–1000` 個文件 / `5000–10000` 行 | 未宣告 |
+| `component.contract-assets.capability-registry` | Capability Registry | `500–1000` 個文件 / `10k–20k` 行 | 未宣告 |
 | `component.contract-assets.capability-registry-cli` | Capability Registry (cli) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.contract-assets.capability-registry-core` | Capability Registry (core) | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.contract-assets.capability-registry-effects` | Capability Registry (effects) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
