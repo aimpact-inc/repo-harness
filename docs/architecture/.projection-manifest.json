@@ -812,7 +812,7 @@
     "projection_target.entity.capability-workflow-engine-inspection-migration":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.inspection-migration","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/inspection-migration.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:4743dc77da1a60484b6e0398bbc54a4d76eceff65dde7a261c45b2f3f3468e3d"},
     "projection_target.entity.capability-workflow-engine-workflow-state":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.workflow-state","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/workflow-state.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:98edc98951948c0c27cba96ec83011b2fc6fcfa4e58285331fb9fa9cbdc64c3e"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.workflow-state","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/workflow-state.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:a4829273ca60f75a9cc7f703727ad600f7efffd53f053e5796d770f7d269ca04"},
     "projection_target.runtime-topology.summary":
       {"type":"runtime-topology-summary","scope":{"kind":"diagram","id":"runtime-topology"},"path":"docs/architecture/runtime-topology.md","ownership":"generated","format":"markdown","outputDigest":"sha256:ce4b900925639495448bb53815bfae3686a52a5164c60db5b3b71d17d39cdc13"}
   }

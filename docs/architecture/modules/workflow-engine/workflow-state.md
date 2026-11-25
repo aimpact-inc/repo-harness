@@ -1,6 +1,6 @@
 # workflow-engine/workflow-state 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-workflow-state" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:98edc98951948c0c27cba96ec83011b2fc6fcfa4e58285331fb9fa9cbdc64c3e" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-workflow-state" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:a4829273ca60f75a9cc7f703727ad600f7efffd53f053e5796d770f7d269ca04" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.workflow-state`(kind `capability`)
 > **Matched Prefixes**:`src/core/state/**`、`src/effects/state/**`、`src/core/workflow/**`、`interfaces/**`、`src/core/worktree-location.mjs`、`src/core/worktree-location.d.mts`、`src/cli/commands/state.ts`
@@ -58,7 +58,7 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 規模量級:`20–50` 個文件 / `2000–5000` 行
+- 規模量級:`20–50` 個文件 / `5000–10000` 行
 - 匹配前綴:`src/core/state/**`、`src/effects/state/**`、`src/core/workflow/**`、`interfaces/**`、`src/core/worktree-location.mjs`、`src/core/worktree-location.d.mts`、`src/cli/commands/state.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -123,7 +123,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.workflow-state.continuation-ledger` | Continuation Ledger | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.workflow-state.continuation-ledger-effects` | Continuation Ledger (effects) | `2–5` 個文件 / `100–200` 行 | 未宣告 |
-| `component.workflow-state.coordination-plane` | Task Session Admission and Historical Worktree Safety | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
+| `component.workflow-state.coordination-plane` | Task Session Admission and Historical Worktree Safety | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.workflow-state.coordination-plane-core` | Task Session Admission and Historical Worktree Safety (core) | `2–5` 個文件 / `20–50` 行 | 未宣告 |
 | `component.workflow-state.primary` | Effective State Resolver | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.workflow-state.primary-cli` | Effective State Resolver (cli) | `1–2` 個文件 / `200–500` 行 | 未宣告 |
