@@ -6,7 +6,7 @@ status: active
 layer: core
 summary: Plans and applies repository adoption through the canonical filesystem transaction boundary.
 responsibilities:
-  - Own adoption planning, path safety, transaction apply, and rollback behavior.
+  - Own adoption planning, transaction apply, and rollback behavior.
 source:
   include:
     - src/core/adoption/**

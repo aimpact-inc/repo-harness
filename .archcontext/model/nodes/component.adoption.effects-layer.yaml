@@ -11,7 +11,4 @@ responsibilities:
 source:
   include:
     - src/effects/adoption/**
-    - src/effects/source-checkout.ts
     - src/effects/fs-transaction.ts
-    - src/effects/self-ignoring-directory.ts
-    - src/effects/path-safety.ts

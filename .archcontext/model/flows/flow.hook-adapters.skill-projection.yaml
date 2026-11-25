@@ -9,7 +9,7 @@ participants:
   - id: skill-catalog
     nodeId: component.action-commands.skill-surface-catalog
   - id: host-roots
-    nodeId: capability.runtime-harness.global-runtime-reconciliation
+    nodeId: component.execution-primitives.host-roots
 steps:
   - id: select-placements
     from: host-installer

@@ -1,0 +1,18 @@
+schemaVersion: archcontext.node/v2
+id: component.execution-primitives.checkout-filesystem
+kind: component
+name: Checkout Filesystem Primitives
+status: active
+parent: capability.workflow-engine.execution-primitives
+layer: effects
+summary: Checks checkout paths, identifies the harness source checkout, and prepares directories that ignore their backup contents.
+responsibilities:
+  - Reject paths outside the checkout and refuse symlinks before a guarded write.
+  - Install the exclusive Git ignore guard before a backup directory holds user bytes.
+  - Identify a repo-harness source checkout by its canonical package files.
+source:
+  include:
+    - src/effects/checkout-filesystem.ts
+    - src/effects/path-safety.ts
+    - src/effects/self-ignoring-directory.ts
+    - src/effects/source-checkout.ts

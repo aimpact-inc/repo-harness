@@ -12,7 +12,7 @@ responsibilities:
   - "Refresh mutable Waza and Mermaid skills only when explicitly requested, plus the exact global CodeGraph CLI and MCP registration for a selected architecture plugin."
   - Fail closed before later host mutations when the runtime cannot be reconciled.
   - "Own the CLI composition root, the doctor and setup check diagnostics and the retired-surface upgrade."
-  - "Own the shared Claude, Codex and Pi skill root rules and the doctor checks for Pi version, resolver capability, package registration and skill projection."
+  - "Own the doctor checks for Pi version, resolver capability, package registration and skill projection."
   - "Own the release gates, the package manifest and the runtime evidence receipt."
 source:
   include:
@@ -27,7 +27,6 @@ source:
     - src/effects/runtime/node-candidates.ts
     - src/effects/runtime/protected-helper-platform.ts
     - src/effects/skill-tree-integrity.ts
-    - src/effects/host-skill-roots.ts
     - src/effects/configuration/**
     - src/core/release/**
     - src/effects/release/**

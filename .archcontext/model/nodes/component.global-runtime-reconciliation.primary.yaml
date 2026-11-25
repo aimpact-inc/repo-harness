@@ -7,7 +7,6 @@ parent: capability.runtime-harness.global-runtime-reconciliation
 layer: effects
 summary: Executes bounded install, exact dependency readback, runtime handshake, and the refresh of selected plugin tooling.
 responsibilities:
-  - Keep one skill-root authority for Claude, Codex and Pi, including PI_CODING_AGENT_DIR.
   - Register the Pi package from the installed candidate after mandatory setup succeeds, and retain the created-source ownership result.
   - Run the ordered setup steps and stop at the first failed mandatory step.
   - Install and verify the matching Operator console package when the operator plugin is selected.
@@ -18,7 +17,6 @@ source:
   include:
     - src/effects/runtime/protected-helper-platform.ts
     - src/effects/skill-tree-integrity.ts
-    - src/effects/host-skill-roots.ts
     - src/effects/upgrade/**
     - install.sh
     - install.ps1

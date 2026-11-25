@@ -30,7 +30,7 @@
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, type Stats } from 'fs';
 import { dirname, join } from 'path';
-import { FS_TRANSACTION_BACKUP_ROOT } from './fs-transaction';
+import { FS_TRANSACTION_BACKUP_ROOT } from './checkout-filesystem';
 import { isSelfIgnoreGuard, SELF_IGNORE_NAME } from './self-ignoring-directory';
 import { ensureRepoRelativePath, resolveInsideRepo } from './path-safety';
 import { gitExecFileSync, gitSpawnSync } from './git/runner';

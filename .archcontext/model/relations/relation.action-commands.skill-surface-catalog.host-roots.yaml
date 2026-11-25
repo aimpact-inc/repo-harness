@@ -1,0 +1,6 @@
+schemaVersion: archcontext.relation/v1
+id: relation.action-commands.skill-surface-catalog.host-roots
+kind: calls
+source: component.action-commands.skill-surface-catalog
+target: component.execution-primitives.host-roots
+intent: Resolve the destination roots for the shell skill sync projection
