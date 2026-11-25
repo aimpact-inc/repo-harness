@@ -1,6 +1,6 @@
 schemaVersion: archcontext.relation/v1
-id: relation.execution-primitives.bot-registry.repository-registry
+id: relation.execution-primitives.bot-registry.primary
 kind: reads
 source: component.execution-primitives.bot-registry
-target: component.execution-primitives.repository-registry
+target: component.execution-primitives.primary
 intent: "Resolve the account home of the Bot records"

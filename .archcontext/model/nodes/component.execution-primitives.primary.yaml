@@ -7,6 +7,7 @@ parent: capability.workflow-engine.execution-primitives
 layer: effects
 summary: Spawns supervised children, holds canonical directory locks under the Git common dir, and runs the shared observation loop of the resident collectors.
 responsibilities:
+  - Resolve the account-level repo-harness home from an explicit HOME or USERPROFILE, and refuse a process that sets neither.
   - Spawn the supervisor and the process-group launcher, kill TERM then KILL, and reconcile the receipt with the exit status.
   - Keep the expensive-run lock while a process group is not confirmed dead.
   - Create lock directories one ancestor at a time and reject symlinks and identity changes.
@@ -22,6 +23,7 @@ source:
     - src/effects/observation-loop.ts
     - src/effects/atomic-append.ts
     - src/effects/write-all-sync.ts
+    - src/effects/repo-harness-home.ts
     - src/effects/runtime/os-account-home.ts
     - src/effects/runtime/trusted-executable.ts
     - src/effects/locking/**

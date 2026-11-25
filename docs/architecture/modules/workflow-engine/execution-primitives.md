@@ -206,16 +206,16 @@ sequenceDiagram
 
 ### 3.3 组件
 
-`component.execution-primitives.primary`：8 个文件、1,755 行（`archctx refactor scan`，2026-10-11）。源码里有三类职责：进程生命周期（runner、supervisor、launcher、expensive-run 锁）、目录锁、Git 读取。它们目前都很小，所以没有拆分。
+`component.execution-primitives.primary`：8 个文件、1,755 行（`archctx refactor scan`，2026-10-11）。源码里有进程生命周期（runner、supervisor、launcher、expensive-run 锁）、目录锁、Git 读取与 account home 解析（`src/effects/repo-harness-home.ts`，2026-11-25 移入）等职责。它们目前都很小，所以没有拆分。
 
 #1343 增加两个组件：
 
 | 组件 | 层 | footprint | 职责 |
 | --- | --- | --- | --- |
-| `component.execution-primitives.repository-registry`（Repository Registry and Account Home） | effects | `src/effects/repo-registry.ts`（859 行）、`src/effects/repo-harness-home.ts`（8 行） | 注册仓库记录、read_write 授权与授权 revision；account 级 repo-harness home 根目录 |
+| `component.execution-primitives.repository-registry`（Repository Registry and Account Home） | effects | `src/effects/repo-registry.ts`（859 行） | 注册仓库记录、read_write 授权与授权 revision |
 | `component.execution-primitives.secret-patterns`（Secret Patterns） | core | `src/core/security/**`（1 个文件，32 行） | 脱敏与只读投影共用的密钥 token 模式 |
 
-`repo-registry.ts` 只导入 Node 内置模块、`./locking/exclusive-directory-lock`、`./git/runner` 与 `./repo-harness-home`。`repo-harness-home.ts` 只导入 `node:os` 与 `node:path`。`secret-patterns.ts` 没有 import。所以 #1343 没有新增出向边。
+`repo-registry.ts` 只导入 Node 内置模块、`./locking/exclusive-directory-lock`、`./git/runner` 与 `./repo-harness-home`。`repo-harness-home.ts` 只导入 `node:path`。`secret-patterns.ts` 没有 import。所以 #1343 没有新增出向边。
 
 #1352 slice A 再增加两个组件：
 
@@ -261,6 +261,13 @@ sequenceDiagram
 
 - `NativeTaskSessionBinding`（原在 `src/effects/terminal/native-task-session.ts`）、`assertProcessProof` 与 `processProofAlive`（原在 `src/effects/terminal/task-session.ts`）原样移到 `src/effects/terminal/task-session-record.ts`。operator 的会话目录扫描移到同一文件，名为 `taskSessionDirectories`。它与 `taskSessionDirectory` 共用一个 `.ai/harness/runs/task-agents` 路径常量，上限仍是 200 个目录。[src/core/sessions/task-sessions.ts](https://github.com/Ancienttwo/repo-harness/blob/65e8c8c6cee08416c6ebd16c4c0ff8bf766b50dc/src/core/sessions/task-sessions.ts) 已删除。
 - 原因：#1353 S4 决定（[decision](https://github.com/Ancienttwo/repo-harness/issues/1353#issuecomment-6602539432)）。operator 的 task execution state 只经过本 capability 读取会话记录，不再导入 task-agent-host 的内部文件（ADR-0002 规则 5）。写入方 `bindNativeTaskSession` 留在 task-agent-host。
+
+### 2026-11-25 Account home resolver moved to primary (#3513)
+
+- `src/effects/repo-harness-home.ts` 从 `component.execution-primitives.repository-registry` 移到 `component.execution-primitives.primary`。只改模型，源码与 import 不变。
+- 两条 account home 依赖关系同时改到新 owner：`relation.execution-primitives.bot-registry.repository-registry` 与 `relation.execution-primitives.notify-read.repository-registry` 改成 `relation.execution-primitives.{bot-registry,notify-read}.primary`，文件名也随之改名。两者描述的都是 account home 解析，不是注册仓库记录。
+- 原因：目录锁与 process-group registry 导入这个零依赖文件，`repo-registry.ts` 又导入锁、`atomic-append` 与 `git/runner`，两个组件之间因此有 3 对 3 的文件级环。该文件只导入 `node:path`，属于原语层。
+- `rh arch refactor recommendations` 的 `recommendation.4a074a288f81d9ad` 不再出现。
 
 ## Optimization Backlog
 
