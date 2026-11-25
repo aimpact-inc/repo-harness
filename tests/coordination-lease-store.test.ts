@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1037,6 +1038,26 @@ describe('exact cleanup and contract-worktree start sweep', () => {
         expect(heldMissing.map(path => readFileSync(join(path, 'user-data'), 'utf8'))).toEqual(Array(9).fill('keep'));
       } finally { f.cleanup(); }
     }
+  });
+
+  test('a moved clone can preview and sweep after Git repairs its worktree links', () => {
+    const f = fixture(); try {
+      const held = join(f.managed, 'repo-wt-held');
+      f.git('worktree', 'add', '-q', '--detach', '--lock', held);
+      f.git('worktree', 'lock', f.path);
+      expect(sweepManagedWorktrees(f.root, f.root, f.env, { ghBin: f.failingGh })).toContain('kept=2');
+      expect(existsSync(join(f.root, '.git/repo-harness/coordination/pruned-worktrees.json'))).toBe(true);
+
+      const movedParent = join(f.parent, 'moved'); mkdirSync(movedParent);
+      const moved = join(movedParent, 'repo'); renameSync(f.root, moved);
+      run(moved, ['worktree', 'repair']);
+      run(moved, ['worktree', 'unlock', f.path]);
+      const plan = planManagedWorktreeSweep(moved, moved, f.env, { deadlineMs: 60_000 })!;
+      expect(plan.items.find(item => item.path === f.path)?.action).toBe('remove');
+      expect(sweepManagedWorktrees(moved, moved, f.env, { ghBin: f.failingGh, approved: plan })).toContain('removed=1');
+      expect(existsSync(f.path)).toBe(false);
+      expect(existsSync(held)).toBe(true);
+    } finally { f.cleanup(); }
   });
 
   test('W3 kept counts exclude deferred entries', () => {

@@ -11,11 +11,11 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, readdir
 import { tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { publishFileByRename, syncDirectoryDurably } from '../atomic-append';
-import { readPrunedWorktreeIntents, writePrunedWorktreeIntents, prunedIntentKey, readPrunedWorktreeSweepState, writeWorktreeSweepCursor, type PrunedWorktreeIntent } from './pruned-worktree-intents';
+import { readPrunedWorktreeIntents, writePrunedWorktreeIntents, prunedIntentKey, readPrunedWorktreeSweepState, advanceWorktreeSweepCursor, type PrunedWorktreeIntent } from './pruned-worktree-intents';
 import { readWorkflowPolicyDocument } from './resolve-effective-state';
 import { POLICY_ABSENT, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
 import { configuredGitBinary, resolveGitCommonDirectory, resolveGitCommonDirectoryAsync } from '../git/common-directory';
-import { acquireExclusiveDirectoryLock, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
+import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError, withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
 import { taskWorktreeRuntimeClosed } from '../terminal/task-session-record';
 import { parseWorktreeTopology } from '../git/worktree-topology';
 import { observeProviderBranchMergeCommit } from './coordination-provider-merge';
@@ -1301,15 +1301,26 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
       live: liveBatch.map(({ key, item }) => ({ key, visit: () => sweepLive(item) })),
     };
     let inspected = 0;
-    for (const queue of [first, second] as const) {
+    queues: for (const queue of [first, second] as const) {
       for (const { key, visit } of batches[queue]) {
-        if (Date.now() >= limits.deadline) break;
+        if (Date.now() >= limits.deadline) break queues;
         // Record each visit before its proof can use the remaining time. Alternate
         // the first queue so a slow proof cannot monopolize successive runs.
         if (persistProgress) {
-          cursor = { ...cursor, [queue]: key, first: second };
-          withExclusiveDirectoryLock(common, WORKTREE_TOPOLOGY_LOCK, () => writeWorktreeSweepCursor(common, cursor),
-            { waitTimeoutMs: topologyLockWait(limits) });
+          const next: typeof cursor = { ...cursor, [queue]: key, first: second };
+          try {
+            const advanced = withExclusiveDirectoryLock(common, WORKTREE_TOPOLOGY_LOCK, () => advanceWorktreeSweepCursor(common, cursor, next),
+              { waitTimeoutMs: topologyLockWait(limits) });
+            if (!advanced) {
+              notes.push('sweep cursor advanced by another run');
+              break queues;
+            }
+          } catch (error) {
+            if (!(error instanceof ExclusiveLockContentionError)) throw error;
+            notes.push(reasonOf(error));
+            break queues;
+          }
+          cursor = next;
         }
         inspected++;
         visit();
