@@ -456,7 +456,10 @@ function refreshInWorktree(path: string, worktree: string, base: RefreshBase, ow
     return { path, status: 'applied', init, upgrade, refresh: { outcome: 'up_to_date', ...(open.url === null ? {} : { stalePr: open.url }) } };
   }
   const title = `${REFRESH_SUBJECT}${PACKAGE_VERSION}`;
-  step(['commit', '--quiet', '-m', title]);
+  // The disposable worktree has no installed dependencies, so repo hooks that
+  // call local tooling fail for environmental reasons (#3543). The downstream
+  // PR CI, not the local hooks, validates the pushed commit.
+  step(['commit', '--quiet', '--no-verify', '-m', title]);
   const commit = revParse(worktree, 'HEAD', env);
   owned.oid = commit;
 

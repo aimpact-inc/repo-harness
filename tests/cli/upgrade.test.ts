@@ -2296,6 +2296,17 @@ describe('upgrade --registered', () => {
       // Another run created the branch at the same base commit: this run must neither take it over nor delete it.
       { name: 'concurrent-create', setup: (repo) => git(f, repo, 'branch', 'repo-harness/refresh', 'main'),
         expected: { status: 'skipped', reason: 'refresh_branch_exists' } },
+      // The refresh worktree has no installed dependencies, so a repo hook that calls local tooling fails there: the
+      // refresh commit must not run it (#3543).
+      { name: 'failing-hooks', setup: (repo) => {
+        const dir = `${repo}.hooks`;
+        mkdirSync(dir);
+        for (const hook of ['commit-msg', 'pre-commit']) {
+          writeFileSync(join(dir, hook), '#!/bin/sh\nexit 1\n');
+          chmodSync(join(dir, hook), 0o755);
+        }
+        git(f, repo, 'config', 'core.hooksPath', dir);
+      }, expected: { status: 'applied', refresh: expect.objectContaining({ outcome: 'pushed', prAction: 'created' }) } },
     ];
     const repos = cases.map(({ name, setup }) => {
       const repo = staleRepo(f, name);
@@ -2318,6 +2329,7 @@ describe('upgrade --registered', () => {
     expect(readFileSync(`${env.GH_LOG}.edit`, 'utf8').trim().split('\n'))
       .toEqual([expect.stringMatching(/^pr edit https:\/\/github\.com\/fixture\/fork-pr\/pull\/1 --title chore\(harness\): refresh repo-harness files for \S+ --repo github\.com\/fixture\/fork-pr$/)]);
     expect(git(f, row('concurrent-branch').repo, 'log', '-1', '--format=%s', 'repo-harness/refresh')).toBe('concurrent');
+    expect(git(f, row('failing-hooks').remote, 'log', '-1', '--format=%s', 'repo-harness/refresh')).toMatch(/^chore\(harness\): refresh repo-harness files for \S+$/);
     expect(git(f, row('concurrent-branch').repo, 'worktree', 'list', '--porcelain')).not.toContain('harness-refresh.');
     expect(JSON.stringify(result) + formatRegisteredUpgradeResult(result)).not.toContain('ghs_SECRET');
     expect(git(f, row('concurrent-create').repo, 'rev-parse', 'repo-harness/refresh')).toBe(git(f, row('concurrent-create').repo, 'rev-parse', 'main'));
