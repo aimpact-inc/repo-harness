@@ -41,6 +41,14 @@ source:
             - id: sink.root-router.primary
               path: "src/cli/commands/adoption-plan.ts"
               symbol: "createPlan"
+    - id: entrypoint.root-router.docs
+      path: "src/cli/commands/docs.ts"
+      symbols:
+        - name: "buildDocsCommand"
+          sinks:
+            - id: sink.root-router.docs
+              path: "src/cli/commands/docs.ts"
+              symbol: "listRuntimeDocs"
 extensions:
   harnessTier: "core"
   contractFiles:
