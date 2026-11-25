@@ -643,7 +643,6 @@ describe('seat settings contract without transport', () => {
       opus, neon,
       ...['low', 'medium', 'high', 'xhigh'].map(effort => ({ runtime: 'agy' as const, model: `gemini-4-neon-${effort}` })),
       { runtime: 'pi', model: 'magpie/codex/gpt-6.2-sol' }, { runtime: 'codex', model: 'gpt-6.2-sol' },
-      { runtime: 'pi', model: 'magpie/codex/gpt-6.1-terra' }, { runtime: 'codex', model: 'gpt-6.1-terra' },
       { runtime: 'pi', model: 'zai/glm-5.3-flash' }, { runtime: 'pi', model: 'magpie/group/deepseek-v4.1-flash' },
       { runtime: 'pi', model: 'magpie/agy-cli/gemini-4-hydrogen' },
       ...['low', 'medium', 'high', 'xhigh'].map(effort => ({ runtime: 'agy' as const, model: `gemini-4-hydrogen-${effort}` })),
@@ -657,12 +656,12 @@ describe('seat settings contract without transport', () => {
       expect(result.status).toBe(200);
       expect((await readSeatsSettings(env)).config.worker.model).toBe(addedModel);
     }
-    const gpt = { ...worker, model: 'magpie/codex/gpt-6.1-terra', effort: 'high' };
+    const gpt = { ...worker, model: 'magpie/codex/gpt-6.2-sol', effort: 'high' };
     expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, worker: { ...gpt, fleet: ['explorer'] } } }, []).execute()).status).toBe(200);
     expect((await readSeatsSettings(env)).config.worker).toMatchObject({ runtime: 'pi', model: gpt.model, effort: 'high', fleet: ['explorer'] });
     expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, reviewer: { ...section.reviewer!, runtime: 'pi', model: 'zai/glm-5.3' } } }, []).execute()).status).toBe(200);
     expect((await readSeatsSettings(env)).config.reviewer).toMatchObject({ runtime: 'pi', model: 'zai/glm-5.3' });
-    // The recommended list does not limit the id (#3250); the decoder refuses only a shape that the Pi launcher cannot split.
+    // A well-shaped custom ID outside the recommendations still saves (#3250).
     expect((await route.decode({ expected_revision: (await readSeatsSettings(env)).config.revision, seats: { ...section, worker: { ...worker, model: 'magpie/other' } } }, []).execute()).status).toBe(200);
     expect((await readSeatsSettings(env)).config.worker.model).toBe('magpie/other');
     const current = (await readSeatsSettings(env)).config.revision;
@@ -940,6 +939,35 @@ describe('seat settings contract without transport', () => {
 });
 
 describe('seat settings routes', () => {
+  test.each([
+    ['codex', 'gpt-6.1-terra'], ['pi', 'magpie/codex/gpt-6.1-terra'],
+  ] as const)('upgrades a saved %s Terra worker and gatekeeper-deep, then refuses to save Terra', async (runtime, model) => {
+    const worker = { ...DEFAULT_SEATS_CONFIG.worker, runtime, model };
+    const savedSeats = { ...DEFAULT_SEATS_CONFIG, worker };
+    expect(decodeSeatsConfig(savedSeats).worker).toEqual(worker);
+    const harness = await startHarness({ agents: PANE_AGENTS, seats: {
+      ...savedSeats,
+      'gatekeeper-deep': { ...NATIVE_SEATS_PRESET.gatekeeper, model: 'gpt-6.1-terra' },
+    } });
+    const env = { HOME: harness.home };
+    expect(migrateSeatsConfiguration(env)).toBe(true);
+    expect(JSON.parse(readFileSync(harness.configPath, 'utf8')).seats).toEqual(savedSeats);
+    expect(migrateSeatsConfiguration(env)).toBe(false);
+
+    const { revision, ...section } = (await seats(harness)).config;
+    expect(section.worker).toEqual(worker);
+    const refused = await post(harness, { expected_revision: revision, seats: section }, 'seats');
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toMatchObject({
+      code: 'seat_model_retired', message: 'The model at seats.worker.model is retired. Choose another model.',
+    });
+    expect(sha256(harness.configPath)).toBe(revision);
+    const replacement = (runtime === 'codex' ? NATIVE_SEATS_PRESET : DEFAULT_SEATS_CONFIG).worker;
+    const saved = await post(harness, { expected_revision: revision, seats: { ...section, worker: replacement } }, 'seats');
+    expect(saved.status).toBe(200);
+    expect((await seats(harness)).config.worker).toEqual(replacement);
+  });
+
   test('saves agy on orchestrator, advisor, council, all workers (with gh on/off), and gatekeeper-fallback, and refuses to disable its host while in use', async () => {
     const harness = await startHarness({ agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] } });
     installAgy(harness.home, [{ id: 'gemini-4-neon', efforts: ['high'] }, { id: 'gemini-4-hydrogen', efforts: ['high'] }]);

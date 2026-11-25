@@ -2,7 +2,7 @@ import { isRecord } from '../evidence/is-record';
 import { modelFamily } from '../review/model-family';
 import { SEAT_RECOMMENDED_MODELS } from './recommended-models';
 import { seatAccount } from './seat-routing';
-import { SEAT_IDS, SEAT_RUNTIMES, unavailablePiSeat, type SeatId, type SeatConfigV1, type SeatModelEntryV1, type SeatRuntime, type SeatsConfigV1 } from './seats-settings';
+import { RETIRED_SEAT_MODELS, SEAT_IDS, SEAT_RUNTIMES, unavailablePiSeat, type SeatId, type SeatConfigV1, type SeatModelEntryV1, type SeatRuntime, type SeatsConfigV1 } from './seats-settings';
 
 export const SEAT_POOL_STALE_MS = 15 * 60_000;
 export const SEAT_POOL_KIND = 'seat_pool' as const;
@@ -50,7 +50,7 @@ export interface SeatPoolRuntimeV1 {
   readonly models: typeof CATALOG_STATES[number];
 }
 
-/** Child projection. Catalog detail is limited to recommended ids and the disabled bit. */
+/** Child projection. Catalog detail is limited to checked IDs and the disabled bit. */
 export interface SeatPoolProbe extends SeatPoolRuntimeV1 {
   readonly listed: readonly { readonly id: string; readonly disabled: boolean }[];
 }
@@ -96,8 +96,9 @@ export function emptySeatPoolProbe(id: SeatRuntime, installation: SeatPoolRuntim
   return { id, installation, sign_in: 'not_checked', models: 'not_checked', listed: [] };
 }
 
-export function recommendedModelIds(runtime: SeatRuntime): ReadonlySet<string> {
-  return new Set(Object.values(SEAT_RECOMMENDED_MODELS).flatMap(entries => entries.filter(entry => entry.runtime === runtime).map(entry => entry.model)));
+export function catalogProbeModelIds(runtime: SeatRuntime): ReadonlySet<string> {
+  return new Set([...Object.values(SEAT_RECOMMENDED_MODELS).flat(), ...RETIRED_SEAT_MODELS]
+    .filter(entry => entry.runtime === runtime).map(entry => entry.model));
 }
 
 export const MAGPIE_EXTENSION_PATH = 'extensions/magpie.ts';
@@ -139,7 +140,8 @@ export function seatRuntimeBlock(id: SeatId, runtime: SeatRuntime, probes: reado
 export function seatModelBlock(id: SeatId, seat: SeatConfigV1, seats: SeatsConfigV1, probes: readonly SeatPoolProbe[], magpieInstalled: () => boolean): string | null {
   const probe = runtimeProbe(probes, seat.runtime);
   const recommended = SEAT_RECOMMENDED_MODELS[id].some(entry => entry.model === seat.model && entry.runtime === seat.runtime);
-  const status = modelStatus(seat, probe, seats.routing, recommended);
+  const retired = RETIRED_SEAT_MODELS.some(entry => entry.runtime === seat.runtime && entry.model === seat.model);
+  const status = modelStatus(seat, probe, seats.routing, recommended || retired);
   if (status === 'pi_on_path' && seat.model?.startsWith('magpie/') && !magpieInstalled()) return `${MAGPIE_MISSING} See seats.${id}.model.`;
   return availabilityBlock(id, seat.runtime, status);
 }
@@ -194,7 +196,7 @@ function decodeRuntime(id: SeatRuntime, value: unknown): SeatPoolRuntimeV1 {
 export function decodeSeatPoolProbe(id: SeatRuntime, value: unknown): SeatPoolProbe {
   const runtime = decodeRuntime(id, value);
   if (!isRecord(value) || !Array.isArray(value.listed)) throw new Error('seat_pool_invalid');
-  const ids = recommendedModelIds(id);
+  const ids = catalogProbeModelIds(id);
   const listed = value.listed.map((item: unknown) => {
     if (!isRecord(item) || typeof item.id !== 'string' || !ids.has(item.id) || typeof item.disabled !== 'boolean') throw new Error('seat_pool_invalid');
     return { id: item.id, disabled: item.disabled };

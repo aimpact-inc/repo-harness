@@ -1305,7 +1305,7 @@ describe("rh seats argv", () => {
             launch: [result.status, result.stdout, result.stderr ? JSON.parse(result.stderr).error : null],
           }).toEqual({
             routes: configured.runtime === 'pi'
-              ? ['route important_deep: worker-light (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)', 'route important_fast: worker-light (pi magpie/codex/gpt-6.1-terra high; chatgpt unknown)']
+              ? ['route important_deep: worker-light (pi magpie/codex/gpt-6.2-sol high; chatgpt unknown)', 'route important_fast: worker-light (pi magpie/codex/gpt-6.2-sol high; chatgpt unknown)']
               : [`route important_deep: none (claude ${used === 95 ? 'exhausted' : 'normal'}, reserved for advisor and orchestrator)`, `route important_fast: none (claude ${used === 95 ? 'exhausted' : 'normal'}, reserved for advisor and orchestrator)`],
             launch: configured.runtime === 'pi' ? [0, expect.any(String), null]
               : [1, '', used === 95 ? 'seat_quota_exhausted' : 'seat_quota_reserved'],
