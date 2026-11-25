@@ -197,6 +197,76 @@ test.skipIf(process.platform === 'win32')('doctor measures the installed Antigra
   }
 }, DOCTOR_CHECK_TIMEOUT_MS);
 
+test.skipIf(process.platform === 'win32')('doctor Antigravity guard probe passes when the hook denies protected-file overwrites under default and /tmp TMPDIR', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-probe-overwrite-ok');
+  try {
+    seedAntigravitySkillInputs(home, fakeBin);
+    const bunInstall = path.join(root, 'bun');
+    const baseEnv = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
+    seedGlobalPackageFixture(baseEnv, { mutable: true });
+    const cli = path.join(import.meta.dir, '../../src/cli/index.ts');
+    const run = (env: NodeJS.ProcessEnv, ...args: string[]) => spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', cli, ...args], { cwd: root, env, encoding: 'utf8' });
+    const install = run(baseEnv, 'install', '--target', 'antigravity');
+    expect(install.status, install.stderr).toBe(0);
+
+    // Check both isolated TMPDIR and /tmp (Linux CI default where os.tmpdir() and managedWorktreeRoot share /tmp).
+    for (const probeEnv of [baseEnv, { ...baseEnv, TMPDIR: '/tmp' }]) {
+      const report = run(probeEnv, 'doctor', '--json');
+      const { checks } = JSON.parse(report.stdout) as ReturnType<typeof runDoctor>;
+      expect(checks.find((check) => check.id === 'antigravity-native-activation')?.status).toBe('ok');
+      expect(checks.find((check) => check.id === 'antigravity-direct-command')).toMatchObject({
+        status: 'ok',
+        detail: 'The direct command denied a synthetic .env read and a protected-file overwrite.',
+      });
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, DOCTOR_CHECK_TIMEOUT_MS);
+
+test.skipIf(process.platform === 'win32')('doctor Antigravity guard probe fails when a stale hook returns force_ask for protected-file overwrites', () => {
+  const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-probe-force-ask');
+  try {
+    seedAntigravitySkillInputs(home, fakeBin);
+    const bunInstall = path.join(root, 'bun');
+    const env = { HOME: home, PATH: fakeBin, BUN_INSTALL: bunInstall, TMPDIR: root };
+    const bundle = path.join(seedGlobalPackageFixture(env, { mutable: true }), 'dist/hook-entry.js');
+    const cli = path.join(import.meta.dir, '../../src/cli/index.ts');
+    const run = (...args: string[]) => spawnSync(process.execPath, ['--no-env-file', '--config=/dev/null', cli, ...args], { cwd: root, env, encoding: 'utf8' });
+    const install = run('install', '--target', 'antigravity');
+    expect(install.status, install.stderr).toBe(0);
+
+    // Simulate a v0.37.2 hook: denies .env reads, returns force_ask for protected-file overwrites.
+    // Also fails the assertion if the probe ever puts HOME back inside TMPDIR.
+    fs.writeFileSync(bundle, [
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const input = JSON.parse(fs.readFileSync(0, 'utf8'));",
+      "const cmd = input.toolCall?.args?.CommandLine ?? '';",
+      "if (cmd.includes('.env')) {",
+      "  console.log(JSON.stringify({ decision: 'deny', reason: 'rh hook: the tool call is refused' }));",
+      "} else {",
+      "  const home = fs.realpathSync(process.env.HOME);",
+      "  const tmp = fs.realpathSync(process.env.TMPDIR);",
+      "  const homeInTmp = home === tmp || home.startsWith(tmp + path.sep);",
+      "  console.log(JSON.stringify(homeInTmp",
+      "    ? { decision: 'deny', reason: 'rh hook: the tool call is refused' }",
+      "    : { decision: 'force_ask', reason: '[UserFileGuard] I2: This tool call may overwrite or remove an existing file outside the allowed roots.' }));",
+      "}",
+    ].join('\n'));
+
+    const report = run('doctor', '--json');
+    const { checks } = JSON.parse(report.stdout) as ReturnType<typeof runDoctor>;
+    expect(checks.find((check) => check.id === 'antigravity-native-activation')?.status).toBe('ok');
+    expect(checks.find((check) => check.id === 'antigravity-direct-command')).toMatchObject({
+      status: 'fail',
+      detail: 'The direct command did not return the expected guard denial.',
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, DOCTOR_CHECK_TIMEOUT_MS);
+
 test.skipIf(process.platform === 'win32')('doctor checks Antigravity global rules and projected skills across absent, ok, stale, unbalanced, and linked states', () => {
   const { root, home, fakeBin } = setupFakeEnvironment('rh-antigravity-doctor-rules-skills');
   try {

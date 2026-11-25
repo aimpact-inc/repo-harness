@@ -149,7 +149,7 @@ const AGY_WORKER_NO_GH = { ...NATIVE_SEATS_PRESET["worker-light"]!, effort: "hig
 const AGY_FALLBACK = { runtime: "agy", model: "gemini-4-hydrogen-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
 
 type AgyFixture = {
-  home: string; cwd: string; agy: string; hooks: string; tab: string; env: NodeJS.ProcessEnv;
+  home: string; cwd: string; agy: string; hooks: string; bundle: string; tab: string; env: NodeJS.ProcessEnv;
   run: (args: string[], extra?: Record<string, string>) => ReturnType<typeof run>;
   configure: (advisor?: unknown, enabled?: boolean, overrides?: Record<string, unknown>) => void;
   catalog: (models: AgyCatalogFixture, version?: string, quota?: { gemini: number; other: number }) => void;
@@ -163,7 +163,7 @@ function withAgySeat(callback: (fixture: AgyFixture) => void) {
     mkdirSync(join(cwd, ".ai", "harness"), { recursive: true });
     writeFileSync(join(cwd, ".ai", "harness", "workflow-contract.json"), "{}\n");
     const hooks = join(home, ".gemini", "config", "hooks.json");
-    seedGlobalPackageFixture(setup, { mutable: true });
+    const bundle = join(seedGlobalPackageFixture(setup, { mutable: true }), "dist", "hook-entry.js");
     mkdirSync(dirname(hooks), { recursive: true });
     writeFileSync(hooks, JSON.stringify({ "repo-harness": buildAntigravityHooks(setup) }));
     const configure = (advisor: unknown = AGY_ADVISOR, enabled = true, overrides: Record<string, unknown> = {}) => {
@@ -206,7 +206,7 @@ console.log(JSON.stringify({ tab: 'tb1', terminal: 't9', args }));
       const result = spawnSync(process.execPath, [CLI, "seats", ...args], { cwd, env: { ...setup, ...extra }, encoding: "utf8", timeout: 40_000 });
       return { status: result.status, stdout: result.stdout, stderr: result.stderr };
     };
-    callback({ home, cwd, agy, hooks, tab, env: setup, run, configure, catalog });
+    callback({ home, cwd, agy, hooks, bundle, tab, env: setup, run, configure, catalog });
   }));
 }
 
@@ -414,7 +414,7 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
     }
   })());
 
-  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "effort mismatch", "outside opt-in", "guard absent", "host disabled", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
+  test.each(["missing", "unsupported", "signed out", "unknown", "model absent", "effort mismatch", "outside opt-in", "guard absent", "guard force_ask", "host disabled", "gatekeeper", "reviewer"])("agy refuses %s before any agent projection or tab", (branch) => withAgySeat(f => {
     let cwd = f.cwd;
     let seat = "advisor";
     let error: string;
@@ -432,6 +432,17 @@ describe.skipIf(process.platform === "win32")("agy multi-seat launch", () => {
       case "effort mismatch": f.configure({ ...AGY_ADVISOR, effort: "medium" }); error = "seat_effort_invalid"; break;
       case "outside opt-in": cwd = f.home; error = "seat_checkout_not_opted_in"; break;
       case "guard absent": rmSync(f.hooks); error = "antigravity_guard_unready"; break;
+      case "guard force_ask":
+        writeFileSync(f.bundle, [
+          "const fs = require('node:fs');",
+          "const input = JSON.parse(fs.readFileSync(0, 'utf8'));",
+          "const cmd = input.toolCall?.args?.CommandLine ?? '';",
+          "console.log(JSON.stringify(cmd.includes('.env')",
+          "  ? { decision: 'deny', reason: 'rh hook: the tool call is refused' }",
+          "  : { decision: 'force_ask', reason: '[UserFileGuard] I2: This tool call may overwrite or remove an existing file outside the allowed roots.' }));",
+        ].join("\n"));
+        error = "antigravity_guard_unready";
+        break;
       case "host disabled": f.configure(AGY_ADVISOR, false); error = "seat_runtime_not_enabled"; break;
       case "gatekeeper": seat = "gatekeeper"; extraArgs.push("--pr", "3377"); f.configure(AGY_ADVISOR, true, { gatekeeper: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;
       default: seat = "reviewer"; extraArgs.push("--pr", "3377"); f.configure(AGY_ADVISOR, true, { reviewer: AGY_ADVISOR }); error = "seat_runtime_not_allowed"; break;

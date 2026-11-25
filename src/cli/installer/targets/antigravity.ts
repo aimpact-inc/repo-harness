@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,6 +186,26 @@ interface AntigravityCheck {
   readonly detail: string;
 }
 
+const PROTECTED_PROBE_TARGETS = ['/etc/hosts', '/bin/sh'] as const;
+
+/**
+ * Existing POSIX file outside `root` (repo, TMPDIR, HOME) and `/tmp` (POSIX managed worktree root).
+ * The hook only judges the target path and never executes `CommandLine`.
+ */
+function protectedProbeTarget(root: string): string | null {
+  const roots = [root];
+  try { roots.push(realpathSync('/tmp')); } catch { /* ignore if /tmp is absent */ }
+  for (const candidate of PROTECTED_PROBE_TARGETS) {
+    try {
+      const resolved = realpathSync(candidate);
+      if (!statSync(resolved).isFile()) continue;
+      if (roots.some(allowed => resolved === allowed || resolved.startsWith(`${allowed}/`))) continue;
+      return candidate;
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
 function probeAntigravityGuard(command: string): boolean {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'rh-antigravity-doctor-')));
   try {
@@ -193,22 +213,29 @@ function probeAntigravityGuard(command: string): boolean {
     const agentDir = join(home, '.repo-harness', 'seats', 'agy', 'probe');
     const bun = join(root, 'bun');
     const bin = join(root, 'bin');
+    const probeTmp = join(root, 'tmp');
     const repo = join(root, 'repo');
-    for (const dir of [home, agentDir, bun, bin, join(repo, '.git'), join(repo, '.ai', 'harness')]) mkdirSync(dir, { recursive: true });
+    for (const dir of [home, agentDir, bun, bin, probeTmp, join(repo, '.git'), join(repo, '.ai', 'harness')]) mkdirSync(dir, { recursive: true });
     writeFileSync(join(repo, '.ai', 'harness', 'workflow-contract.json'), '{}\n');
     const fakeEnv = join(repo, '.env');
     writeFileSync(fakeEnv, 'FAKE=antigravity-doctor\n');
-    const input = JSON.stringify({
-      cwd: agentDir,
-      workspacePaths: [agentDir, repo],
-      toolCall: { name: 'run_command', args: { CommandLine: `cat ${shellQuote(fakeEnv)}` } },
-    });
-    const probe = spawnSync('/bin/sh', ['-c', command], {
-      cwd: home, env: { HOME: home, PATH: bin, BUN_INSTALL: bun, TMPDIR: root }, input, encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024,
-    });
-    if (probe.status !== 0 || probe.stderr !== '') return false;
-    const output = parseJsonText(probe.stdout, null);
-    return isRecord(output) && output.decision === 'deny' && output.reason === ANTIGRAVITY_GUARD_DENIAL;
+    const protectedTarget = protectedProbeTarget(root);
+    if (!protectedTarget) return false;
+    const env = { HOME: home, PATH: bin, BUN_INSTALL: bun, TMPDIR: probeTmp };
+    const denies = (CommandLine: string): boolean => {
+      const input = JSON.stringify({
+        cwd: agentDir,
+        workspacePaths: [agentDir, repo],
+        toolCall: { name: 'run_command', args: { CommandLine } },
+      });
+      const probe = spawnSync('/bin/sh', ['-c', command], {
+        cwd: home, env, input, encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024,
+      });
+      if (probe.status !== 0 || probe.stderr !== '') return false;
+      const output = parseJsonText(probe.stdout, null);
+      return isRecord(output) && output.decision === 'deny' && output.reason === ANTIGRAVITY_GUARD_DENIAL;
+    };
+    return denies(`cat ${shellQuote(fakeEnv)}`) && denies(`printf probe > ${shellQuote(protectedTarget)}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -249,7 +276,13 @@ export function checkAntigravityHooks(env: NodeJS.ProcessEnv = process.env): rea
       ...direct, status: 'fail', detail: 'The configured Bash hook differs from the current rendering. Run rh update --target antigravity.',
     }];
     const denied = probeAntigravityGuard(command);
-    return [onDisk, { ...direct, status: denied ? 'ok' : 'fail', detail: denied ? 'The direct command denied a synthetic .env read.' : 'The direct command did not return the expected guard denial.' }];
+    return [onDisk, {
+      ...direct,
+      status: denied ? 'ok' : 'fail',
+      detail: denied
+        ? 'The direct command denied a synthetic .env read and a protected-file overwrite.'
+        : 'The direct command did not return the expected guard denial.',
+    }];
   } catch {
     return [activation, { ...direct, status: 'fail', detail: 'Cannot render or run the Antigravity Bash hook. Check the Bun runtime and hook bundle.' }];
   }
