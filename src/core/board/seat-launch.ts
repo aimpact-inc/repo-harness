@@ -132,6 +132,7 @@ function advisorParagraphs(config: SeatConfigV1, fleet: readonly string[], name:
     `You are the advisor seat. You serve only the orchestrator. You do research and write proposals. ${ghRule} Edit files only for your proposals.`,
     'Load the `herdr` skill at session start before any `hc` or `herdr-app` read, send, or pane operation. You may read the processes of worker seats (hc ls, hc get and hc read on seat-labeled terminals) for evidence. You do not send messages or keys to a worker. You report only to the orchestrator.',
     evidence,
+    'Start from raw source files and live command output rather than summaries, probe experiment-settleable choices before proposing, distinguish candidate problems by observable signs when a request is ambiguous, and cut unverified citations or links.',
   ];
 }
 
@@ -157,7 +158,7 @@ function roleParagraphs(seat: LaunchSeatId, config: SeatConfigV1, fleet: readonl
   if (seat === 'advisor') return advisorParagraphs(config, fleet, name);
   if (isCouncilSeat(seat)) {
     return [
-      'You are a council seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your independent judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result.',
+      'You are a council seat. Read the issue and the relevant code. Research the architecture, weigh trade-offs, and give your independent judgment. Produce an implementation skeleton with the affected files and interfaces, a delete list, a forbidden-additions list, and checks that prove the result. For any borrowed pattern from another system or field, state what carries over and where the analogy breaks, and name at least one external check beyond the writer and reviewer that proves the result.',
       'Open the proposal with `RECOMMENDATION: <one sentence> — confidence: HIGH|MEDIUM|LOW`. Write the proposal only to the caller-provided scratch file outside every Git repository and worktree, such as `/tmp/rh-council/...`. Do not choose an output path yourself. Do not edit source, commit, push, write to GitHub, or message a worker.',
       fleet.length === 0 ? 'Gather evidence yourself. Do not call sub-agents.'
         : `Use the configured read-only sub-agents ${roleList(fleet, name)} in parallel to gather codebase context in distinct scopes. Keep judgment and synthesis for yourself. Call no other agent type.`,

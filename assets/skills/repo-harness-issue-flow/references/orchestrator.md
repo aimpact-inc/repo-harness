@@ -92,7 +92,10 @@ Write each child issue so that a literal and cautious worker produces the
 same code as a careful senior engineer. Before writing `要做的 / Do`,
 check whether relaxing one non-I1/I2 requirement or reusing an existing
 authoritative value removes code; record each dropped case and its reason
-in `不做 / Out of scope`. Make every decision in the issue:
+in `不做 / Out of scope`. Keep changes deeper, not bigger: probe
+uncertain technical choices before encoding them in `要做的 / Do`, and
+leave only non-experimental preference choices to the owner. Make every
+decision in the issue:
 
 | Decision | Write it as |
 |---|---|
@@ -102,7 +105,7 @@ in `不做 / Out of scope`. Make every decision in the issue:
 | Compatibility | `边界`: "No compatibility path. <old thing> is removed, not aliased." When compatibility is really needed, name the exact migration, who runs it and when it is deleted |
 | Error behavior | `要做的 / Do`: each failure case with its exact error code, status or message. On an I1/I2 path: "Fail closed with X", never "handle errors gracefully". Elsewhere: the error and its handling |
 | Out of scope | `不做 / Out of scope`: items that a worker would plausibly add. Name the issue that owns each, when one exists |
-| Proof | `验收 / Acceptance`: observable checks with test file names and scenario IDs, and at least one negative check for what must NOT happen |
+| Proof | `验收 / Acceptance`: observable checks that start from raw inputs (live files, real protocols, real CLI/CI outputs) with test file names and scenario IDs, at least one negative check for what must NOT happen, and at least one external check beyond the writer and reviewer instead of self-confirming mocks only |
 | Verification commands | `验收`: the exact commands, for example typecheck plus `test:files <files>` |
 
 Words that leave a decision open: "robust", "graceful", "backward
@@ -241,6 +244,8 @@ plan:
 | `SHELVE` | An owner roadmap item, or an item that a vendor or upstream blocks | Label `status:deferred` and keep it open, off the dispatch board. It closes only on the owner's word |
 | `CLOSE` | An agent-spawned P2 or P3 issue | Close it as not planned |
 
+When a symptom or request is ambiguous, list 2–3 candidate root problems with each candidate's observable distinguishing sign before filing or bundling so intake solves the right problem.
+
 `advisor` leads pre-dispatch intake triage and bundling (`advisor.md` §1.2): it runs `rh board cluster --parent <n> --include-loose --json` (and handles attention rule `R8`), groups non-overlapping issues by `target_files` and `pattern:<theme>`, and sends `/tmp/rh-triage/<repo>-<parent>.json`. Audit the manifest against the three split red lines (`tier:high` isolated and `<= 2` per bundle; `route:frontend` isolated; distinct parallel units sharing zero `target_files`), resolve missing/invalid labels or truncated reads, then preview and apply labels, sub-issue links, duplicate closures, and the `plan` comment in one step:
 
 ```bash
@@ -295,7 +300,7 @@ different model family. Ask it to find holes only:
 - a file that no issue owns, or that two parallel issues own;
 - a dependency that is missing or circular;
 - a decision that is still open (see the word list in step 3);
-- an acceptance check that cannot be observed or run;
+- an acceptance check that cannot be observed or run, or that relies only on self-confirming mocks instead of the owning runtime boundary or an external check;
 - a requirement ID from the source that no issue covers.
 
 You decide what to fold in. The reviewer does not rewrite the split. Use
@@ -877,3 +882,5 @@ thread.
    first-parent commits behind `origin/main`. Add an entry only for a
    mistake that repeated or that a rule would have prevented. Dispatch a
    worker for the ledger PR and wait for the owner GO for that head.
+
+Rigor rules in §3, §4.2, and §5 are adapted from pstack (`cursor/plugins`, MIT): `pstack/skills/sharpen/SKILL.md` (`bf0c7cd80abd`) and `pstack/skills/reframe/SKILL.md` (`9e278fe4d4ec`).
