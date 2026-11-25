@@ -191,11 +191,11 @@ source:
     - id: entrypoint.hook-adapters.target-registry
       path: "src/cli/installer/targets/registry.ts"
       symbols:
-        - name: "ALL_TARGETS"
+        - name: "getTarget"
           sinks:
             - id: sink.hook-adapters.target-registry
-              path: "src/cli/installer/targets/codex.ts"
-              symbol: "codexTarget"
+              path: "src/cli/installer/targets/registry.ts"
+              symbol: "findDefaultTarget"
     - id: entrypoint.hook-adapters.uninstall
       path: "src/cli/installer/uninstall.ts"
       symbols:
