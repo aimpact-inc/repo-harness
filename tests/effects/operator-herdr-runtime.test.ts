@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { HC_MIN_VERSION, HcVersionMismatchError, hcVersionCheck } from '../../src/core/terminal/herdr-pin';
-import { createHerdrCoreRuntimeTransport } from '../../src/effects/operator/herdr-runtime-transport';
+import { createHerdrCoreRuntimeTransport } from '../../src/effects/operator/herdr-runtime-source';
 import { configureRuntimeSource } from '../../src/effects/operator/runtime-source';
 import { createRuntimeStatusObserver } from '../../src/effects/operator/runtime-status';
 import { decodeRuntimeConfig, startRuntimeService } from '../../src/effects/operator/runtime-service';

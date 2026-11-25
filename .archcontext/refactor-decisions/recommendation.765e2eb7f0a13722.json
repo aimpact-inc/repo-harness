@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.765e2eb7f0a13722",
+  "fingerprint": "sha256:05691a3c8d93204838f59627a709a327a8e66e7490b98587dd57cf0fe7a2eac0",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.operator.board-observer|component.operator.primary",
+    "subjectSelectorId": "subject.repository.bbcee40339578628"
+  },
+  "affectedNodeIds": [
+    "component.operator.board-observer",
+    "component.operator.primary"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "accepted",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 2
+  },
+  "reason": "Issue #3510 moves shared Herdr reads outside the HTTP reader so board observation has no return dependency.",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T07:09:11.000Z",
+  "provenance": {
+    "headSha": "fbf9f278f7d2357030cf51824a82a216a9cabc7b",
+    "assessmentDigest": "sha256:a36dcf7dd0162bdad70d74e4ca72e0fe878058e100325827e214009ebef18c27",
+    "baselineSnapshotDigest": "sha256:5862a04c072466c57b400829c58fce6b1f19398aaddab66095351b509d90f28d"
+  },
+  "snapshotDigest": "sha256:5862a04c072466c57b400829c58fce6b1f19398aaddab66095351b509d90f28d",
+  "evidenceDigest": "sha256:a36dcf7dd0162bdad70d74e4ca72e0fe878058e100325827e214009ebef18c27",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.bbcee40339578628",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.operator.board-observer",
+        "component.operator.primary"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.177f0999e44203f0"
+    }
+  ]
+}

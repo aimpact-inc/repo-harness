@@ -7,7 +7,8 @@ import { ArchctxClientError } from '../../core/architecture/projection';
 import type { ArchctxProviderOptions } from '../../core/architecture/contracts';
 import { readRepoHarnessRegistryStrictSnapshot } from '../repo-registry';
 import { ModuleReadError } from '../../core/architecture/module-view';
-import { SECRET_TOKEN_PATTERNS, containsSecret } from '../../core/security/secret-patterns';
+import { containsSecret } from '../../core/security/secret-patterns';
+import { publicValue } from '../../core/operator/architecture-public-value';
 import {
   ARCHITECTURE_REFACTOR_STATUS_ORDER,
   architectureRefactorVerifyCommand,
@@ -23,20 +24,7 @@ import {
   type ArchitectureRequest,
 } from '../../core/operator/architecture';
 
-const PRIVATE_PATH = /(?<![A-Za-z0-9])(?:\/(?:Users|home|private|tmp|Volumes|var)\/|[A-Za-z]:[\\/])[^\s"'<>]+/g;
 const TRANSIENT_DECISION_FILE = /\.(?:archctx-backup|archctx-tmp-[^/]+|tmp-\d+-\d+)$/u;
-
-// Redact public text before the whitelist decoder. Never change a prompt digest.
-export function publicValue(value: unknown, root: string): unknown {
-  if (typeof value === 'string') {
-    let text = value.replaceAll(root, '[redacted]').replace(new RegExp(PRIVATE_PATH.source, PRIVATE_PATH.flags), '[redacted]');
-    for (const { pattern } of SECRET_TOKEN_PATTERNS) text = text.replace(new RegExp(pattern.source, pattern.flags), '[redacted]');
-    return containsSecret(text) ? '[redacted]' : text;
-  }
-  if (Array.isArray(value)) return value.map(item => publicValue(item, root));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, publicValue(item, root)]));
-  return value;
-}
 
 function lstatOrNull(target: string): Stats | null {
   try { return lstatSync(target); }

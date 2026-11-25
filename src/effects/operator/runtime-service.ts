@@ -3,7 +3,7 @@ import { readFileSync, lstatSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { runtimeId, unavailableRuntimeOverlay, NATIVE_RUNTIME_SOURCE_LIMIT, type RuntimeOverlay } from '../../core/operator/runtime-status';
 import { runtimeCaptureId } from '../../core/operator/runtime-capture';
-import { createHerdrCoreRuntimeTransport } from './herdr-runtime-transport';
+import { createHerdrCoreRuntimeTransport } from './herdr-runtime-source';
 import { configureRuntimeSource } from './runtime-source';
 import { createRuntimeStatusObserver, createNativeRuntimeStatusObserver, runtimeUnavailableReason } from './runtime-status';
 import { readNativeRuntimeSnapshot, type NativeRuntimeSourceConfig } from './native-runtime-source';
