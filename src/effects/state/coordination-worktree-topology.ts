@@ -47,6 +47,8 @@ function mergeLibraryPath(): string {
 type Limits = { deadline?: number; gitBin?: string; closeout?: boolean; ghBin?: string;
   liveSweep?: Pick<SweepContext, 'cwd' | 'env' | 'processes'>;
   closeoutProcesses?: (deadline: number) => WorktreeProcess[] | null;
+  /** Board closeout already verified the PR head and merge in the provider response. */
+  closeoutMergeFromProvider?: true;
   previewObjects?: { directory: string; alternates: string };
 };
 function gitBinary(limits: Limits): string { return limits.gitBin ?? configuredGitBinary(); }
@@ -60,7 +62,7 @@ function git(root: string, args: string[], limits: Limits = {}): string {
   return gitExecFileSync(args, { cwd: root, gitBin: gitBinary(limits), env: withoutRepositorySelectingGitEnv(), encoding: 'utf8', timeout: timeout(limits), stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-const REGENERABLE_TREES = new Set(['node_modules/', 'dist/', 'build/', 'coverage/', '.next/', '.archcontext/generated/', '.archcontext/tmp/']);
+const REGENERABLE_TREES = new Set(['node_modules/', 'dist/', 'build/', 'coverage/', '.next/']);
 const OUTPUT_CONTAINERS = new Set(['.archcontext/', '.codegraph/', '.ai/', '.ai/harness/', '.ai/harness/evidence/',
   '.ai/harness/evidence/events/', '.ai/harness/evidence/blobs/', '.ai/harness/evidence/runs/',
   '.ai/harness/evidence/checkpoints/',
@@ -82,8 +84,6 @@ const CLOSEOUT_RUNTIME_FILES = [
   /^runs\/task-agent-outbox\/(?:[a-f0-9]{64}\/)?(?:result-[1-9]\d*\.json|context-[1-9]\d*\.txt)$/u,
   /^state\/(?:agent-notice(?:-status|-archimap)?|circuit-breaker\.json|protected-paths\.json)$/u,
   /^failures\/latest\.jsonl$/u,
-  /^evidence\/(?:events\/log\.jsonl|blobs\/[0-9a-fA-F]{64}|runs\/[A-Za-z0-9][A-Za-z0-9._-]*\.json)$/u,
-  /^evidence\/checkpoints\/(?:last-published\.json|chk-[0-9a-f]{64}\/checkpoint\.(?:json|md))$/u,
 ];
 const CODEGRAPH_FILE = /^\.codegraph\/(?:\.gitignore|codegraph\.db(?:-wal|-shm|-journal)?|daemon\.(?:pid|log|sock)|writer\.pid)$/u;
 
@@ -218,6 +218,7 @@ type WorktreeInspection = Pick<WorktreeView, 'judgment' | 'reasons' | 'process_c
 type LiveRemovalOptions = {
   readonly target?: MergeTarget;
   readonly allowProvider?: boolean;
+  readonly verifiedMerge?: MergeProof;
   readonly processes?: WorktreeProcess[] | null;
   readonly requireOwnCommits?: boolean;
   readonly env?: NodeJS.ProcessEnv;
@@ -260,9 +261,10 @@ function providerMergeProof(root: string, head: string, { targetRef, target }: M
   return { provider: true, merge_commit_sha: merge };
 }
 
-function branchRemovalProof(root: string, branch: string, head: string, target: MergeTarget, limits: Limits, allowProvider: boolean): {
+function branchRemovalProof(root: string, branch: string, head: string, target: MergeTarget, limits: Limits, allowProvider: boolean, verifiedMerge?: MergeProof): {
   merge: WorktreeInspection['merge']; unpushed: number; proof: MergeProof | null;
 } {
+  if (verifiedMerge) return { merge: 'provider', unpushed: 0, proof: verifiedMerge };
   const local = localMergeMode(root, head, target.target, limits);
   const unpushed = Number(git(root, ['rev-list', '--count', head, '--not', target.target, '--remotes'], limits));
   if (!Number.isSafeInteger(unpushed) || unpushed < 0) throw new Error('invalid unpushed count');
@@ -439,6 +441,8 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
     const live = !renamed && path && existsSync(path);
     const target = { targetRef: expected.target_ref, target: expected.target_oid };
     const sweep = limits.liveSweep;
+    const verifiedMerge: MergeProof | undefined = limits.closeout && limits.closeoutMergeFromProvider
+      ? { provider: true, merge_commit_sha: expected.merge_commit_sha } : undefined;
     let proof: MergeProof;
     if (live) {
       if (!binding) throw new Error('cleanup worktree is not registered in this clone');
@@ -449,7 +453,7 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
     if (live && (sweep || limits.closeout)) {
       const probe = sweep?.processes ?? limits.closeoutProcesses;
       const inspection = inspectRemoval(root, path, sweep?.cwd ?? realpathSync(process.cwd()), limits, {
-        target, allowProvider: true, requireOwnCommits: !!sweep, env: sweep?.env,
+        target, allowProvider: true, verifiedMerge, requireOwnCommits: !!sweep, env: sweep?.env,
         processes: probe?.(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000)),
       });
       if (limits.closeout) {
@@ -461,7 +465,7 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       assertNoOwner(root, path, limits);
       if (live && git(path, ['status', '--porcelain', '--untracked-files=all'], limits)) throw new Error('cleanup_blocked_dirty_worktree');
       if (sweep || limits.closeout) {
-        const checked = branchRemovalProof(root, expected.branch, expected.head_sha, target, limits, true);
+        const checked = branchRemovalProof(root, expected.branch, expected.head_sha, target, limits, true, verifiedMerge);
         if (!checked.proof) throw new Error('cleanup merge is unproven');
         proof = checked.proof;
       } else {
@@ -521,6 +525,17 @@ interface SweepContext {
 }
 export function protectsCwd(path: string, cwd: string): boolean {
   return cwd === path || cwd.startsWith(path + sep);
+}
+
+function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
+  return processes === null ? null : new Set(processes.filter(item => protectsCwd(path, item.cwd)).map(item => item.pid)).size;
+}
+
+/** A closeout preview must prove occupancy before it lists a planned removal. */
+export function assertCloseoutOccupancy(worktree: string): void {
+  const count = worktreeProcessCount(checkoutPath(worktree), worktreeProcesses(Date.now() + 5_000));
+  if (count === null) throw new WorktreeNotGreenError(['process_unknown']);
+  if (count > 0) throw new WorktreeNotGreenError(['process_in_use']);
 }
 
 /** Git documents these backpointers. They are read only to fence whole prune,
@@ -629,7 +644,7 @@ function pathExists(path: string): boolean {
 export function assertNoSubmodules(context: { readonly main: string; readonly limits: Limits }, path: string): void {
   const directory = git(context.main, ['-C', path, 'rev-parse', '--absolute-git-dir'], context.limits);
   if (pathExists(join(path, '.gitmodules')) || pathExists(join(directory, 'modules'))
-    || /^160000$/m.test(git(path, ['ls-files', '--format=%(objectmode)'], context.limits))) throw new Error('submodules present');
+    || /(?:^|\0)160000 /u.test(git(path, ['ls-files', '--stage', '-z'], context.limits))) throw new Error('submodules present');
 }
 
 /**
@@ -778,7 +793,7 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
     if (path === main) reasons.push('primary');
     if (callerCwd !== null && protectsCwd(path, callerCwd)) { reasons.push('session_cwd'); inUse = true; }
     const processes = options.processes === undefined ? worktreeProcesses(limits.deadline ?? Date.now() + 5_000) : options.processes;
-    result.process_count = processes === null ? null : new Set(processes.filter(item => protectsCwd(path, item.cwd)).map(item => item.pid)).size;
+    result.process_count = worktreeProcessCount(path, processes);
     if (result.process_count === null) reasons.push('process_unknown');
     else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
     try {
@@ -808,7 +823,8 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
       if (options.requireOwnCommits) branchError = reject('no_own_commits', () => assertBranchHasCommits(main, branch, limits));
       reject('merge_unproven', () => {
         const target = options.target ?? mergeBackTarget(main, limits);
-        const checked = branchRemovalProof(main, branch, entry.head!, target, limits, options.allowProvider === true && reasons.length === 0);
+        const checked = branchRemovalProof(main, branch, entry.head!, target, limits,
+          options.allowProvider === true && reasons.length === 0, options.verifiedMerge);
         result.merge = checked.merge;
         result.unpushed_commits = checked.unpushed;
         proof = checked.proof;
@@ -880,9 +896,12 @@ export interface WorktreeSweepPlan {
   readonly items: readonly WorktreeSweepPlanItem[];
 }
 
-/** The part of a plan that binds a run: every step except `keep`, without reasons. */
+const isBoundSweepStep = (step: WorktreeSweepPlanItem): boolean => step.action !== 'keep'
+  && (step.action !== 'remove' || !!step.registration);
+
+/** The part of a plan that binds a run. A live removal requires a Git registration identity. */
 export function boundSweepSteps(plan: WorktreeSweepPlan | null): { readonly target_oid: string | null; readonly steps: readonly WorktreeSweepPlanItem[] } {
-  const steps = (plan?.items ?? []).filter(item => item.action !== 'keep')
+  const steps = (plan?.items ?? []).filter(isBoundSweepStep)
     .map(({ action, path, branch, head, registration }) => ({ action, path, branch, head, registration }));
   return { target_oid: steps.length ? plan!.target_oid : null, steps };
 }
@@ -893,7 +912,7 @@ const stepKey = (step: WorktreeSweepPlanItem) => JSON.stringify([step.action, st
 function sweepApproval(plan: WorktreeSweepPlan): SweepApproval {
   const bound = boundSweepSteps(plan);
   const keys = new Set(bound.steps.map(stepKey));
-  return { target_oid: bound.target_oid, allows: step => keys.has(stepKey(step)) };
+  return { target_oid: bound.target_oid, allows: step => isBoundSweepStep(step) && keys.has(stepKey(step)) };
 }
 
 const registrationId = (directory: string, stat: { readonly dev: number; readonly ino: number }) => `${directory}@${stat.dev}:${stat.ino}`;
@@ -904,9 +923,13 @@ function registrations(common: string): Map<string, string> {
   if (!pathExists(directory)) return found;
   for (const name of readdirSync(directory)) {
     const admin = join(directory, name), stat = lstatSync(admin), pointer = join(admin, 'gitdir');
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !pathExists(pointer) || !lstatSync(pointer).isFile()) continue;
+    if (!stat.isDirectory() || !Number.isSafeInteger(stat.dev) || !Number.isSafeInteger(stat.ino) || stat.ino <= 0
+      || !pathExists(pointer) || !lstatSync(pointer).isFile()) continue;
     const value = readFileSync(pointer, 'utf8').trim();
-    if (isAbsolute(value) && basename(value) === '.git') found.set(dirname(value), registrationId(admin, stat));
+    if (basename(value) !== '.git') continue;
+    const path = dirname(resolve(admin, value));
+    // Two registrations claiming one checkout cannot identify its incarnation.
+    found.set(path, found.has(path) ? '' : registrationId(admin, stat));
   }
   return found;
 }
@@ -927,7 +950,8 @@ const intentApproved = (approval: SweepApproval, intent: PrunedWorktreeIntent) =
   return approval.allows(step) || approval.allows({ ...step, action: 'prune' });
 };
 function liveStep(action: 'prune' | 'remove', entry: ReturnType<typeof entries>[number], registered: Map<string, string>): WorktreeSweepPlanItem {
-  return { action, path: checkoutPath(entry.path), branch: entry.branch?.replace(/^refs\/heads\//, ''), head: entry.head ?? undefined, registration: registered.get(entry.path) };
+  return { action, path: checkoutPath(entry.path), branch: entry.branch?.replace(/^refs\/heads\//, ''), head: entry.head ?? undefined,
+    registration: registered.get(entry.path) || undefined };
 }
 /** Git prune drops every missing registration of the clone. An approved run prunes only when each one is a planned step. */
 function pruneScopeApproved(context: SweepContext, approval: SweepApproval): boolean {
@@ -1127,8 +1151,9 @@ export function planManagedWorktreeSweep(root: string, callerCwd: string, env: N
             items.push(liveStep('prune', entry, registered));
             continue;
           }
-          const { view, branchError } = inspectRemoval(main, path, context.cwd, previewLimits, { env, target, processes, requireOwnCommits: true });
           const step = liveStep('remove', entry, registered);
+          if (!step.registration) throw new Error('cleanup registration identity is unavailable');
+          const { view, branchError } = inspectRemoval(main, path, context.cwd, previewLimits, { env, target, processes, requireOwnCommits: true });
           items.push(view.judgment === 'green' ? step : { ...step, action: 'keep', reason: new WorktreeNotGreenError(view.reasons, branchError).message });
         } catch (error) {
           items.push({ ...liveStep('remove', entry, registered), action: 'keep', reason: reasonOf(error) });
@@ -1241,8 +1266,9 @@ export function sweepManagedWorktrees(root: string, callerCwd: string, env: Node
         }
         if (!entry.head) throw new Error('cleanup head is unavailable');
         const verify = approval && (() => {
-          const step = liveStep('remove', entry, registrations(common));
-          if (!approval.allows(step) || (!detached && !pruneScopeApproved(context, approval))) throw new Error(NOT_IN_PREVIEW);
+          const current = entries(main, limits).find(item => checkoutPath(item.path) === path);
+          if (!current || !approval.allows(liveStep('remove', current, registrations(common)))
+            || (!detached && !pruneScopeApproved(context, approval))) throw new Error(NOT_IN_PREVIEW);
         });
         if (detached) {
           removeDetachedWorktree(context, path, entry.head, { targetRef, target }, verify);

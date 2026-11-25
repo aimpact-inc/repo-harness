@@ -19,7 +19,12 @@ export const controlledWorktreeProcessPreload = fileURLToPath(import.meta.url);
 export function setControlledWorktreeProcesses(value: ControlledInventory): void { processes = value; }
 
 /** Give fresh Bun helper processes the fixture inventory from the primary scratch checkout. */
-export function writeControlledWorktreeProcessesConfig(root: string): void {
+export function writeControlledWorktreeProcessesConfig(root: string, inventory?: null): void {
   appendFileSync(join(root, '.git/info/exclude'), '\n/bunfig.toml\n');
-  writeFileSync(join(root, 'bunfig.toml'), `preload = [${JSON.stringify(controlledWorktreeProcessPreload)}]\n`, { flag: 'wx' });
+  let preload = controlledWorktreeProcessPreload;
+  if (inventory === null) {
+    preload = join(root, '.git/unknown-worktree-processes.ts');
+    writeFileSync(preload, `import { setControlledWorktreeProcesses } from ${JSON.stringify(controlledWorktreeProcessPreload)};\nsetControlledWorktreeProcesses(null);\n`, { flag: 'wx' });
+  }
+  writeFileSync(join(root, 'bunfig.toml'), `preload = [${JSON.stringify(preload)}]\n`, { flag: 'wx' });
 }

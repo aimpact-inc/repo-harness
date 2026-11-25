@@ -33,9 +33,9 @@ import { productVersionManifest } from 'archctx-contracts';
 
 setDefaultTimeout(30000);
 
-function initGitRepo(cwd: string): void {
+function initGitRepo(cwd: string, inventory?: null): void {
   initFixtureGitRepo(cwd);
-  writeControlledWorktreeProcessesConfig(cwd);
+  writeControlledWorktreeProcessesConfig(cwd, inventory);
 }
 
 interface IssueStub {
@@ -94,13 +94,13 @@ function writeStartMetadata(cwd: string, slug: string, branch: string): void {
   writeFileSync(join(cwd, ".ai/harness/worktrees", `${slug}.json`), `${JSON.stringify({ slug, branch })}\n`);
 }
 
-function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void, tracked: string[] = []) {
+function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void, tracked: string[] = [], inventory?: null) {
   const parent = tmpWorkspace("ignored-cleanup");
-  try { use(ignoredCleanupFixture(parent, ignores, tracked)); }
+  try { use(ignoredCleanupFixture(parent, ignores, tracked, inventory)); }
   finally { rmSync(parent, { recursive: true, force: true }); }
 }
 
-function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[]) {
+function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[], inventory?: null) {
   const cwd = join(parent, "repo");
   const worktree = join(parent, "repo-wt-demo");
   const marker = join(worktree, ".ai/harness/active-worktree");
@@ -109,7 +109,7 @@ function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[
   const entry = join(ROOT, "src/cli/index.ts");
   const scripts = join(ROOT, "scripts");
   mkdirSync(cwd);
-  initGitRepo(cwd);
+  initGitRepo(cwd, inventory);
   writeFileSync(join(cwd, ".gitignore"), `${ignores}\n`);
   if (tracked.length > 0) {
     writeIgnoredFiles(cwd, tracked);
@@ -170,6 +170,18 @@ describe("contract-worktree helper integration", () => {
     });
   });
 
+  test('slug cleanup with unknown occupancy refuses in preview and apply', () => {
+    withIgnoredCleanupFixture('.ai/', f => {
+      for (const extra of [['--dry-run'], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toContain('process_unknown');
+        expect(result.stdout).not.toContain('would remove worktree');
+        f.retained();
+      }
+    }, [], null);
+  });
+
   test("slug cleanup accepts populated dependency, build and harness runtime outputs", () => {
     withIgnoredCleanupFixture(".ai/harness/\nnode_modules/\ndist/\n.codegraph/\n.ci-affected-tests.json", f => {
       writeIgnoredFiles(f.worktree, [
@@ -210,18 +222,52 @@ describe("contract-worktree helper integration", () => {
     });
   });
 
-  test("slug cleanup accepts a published checkpoint and empty staging directory", () => {
+  test("slug cleanup retains a published checkpoint and its evidence", () => {
     withIgnoredCleanupFixture(".ai/harness/active-worktree\n.ai/harness/evidence/", f => {
       appendGenesisRecord(f.worktree, LEDGER_EPOCH_START_SHA, { worktreeId: "fixture" });
       const checkpoint = publishCheckpointFromLedger(f.worktree, () => new Date("2026-11-20T00:00:00Z"));
       expect(checkpoint.status).toBe("published");
       expect(readdirSync(join(f.worktree, ".ai/harness/evidence/checkpoints/.staging"))).toEqual([]);
-      const preview = f.cli(...f.cleanup, "--dry-run");
-      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
+      if (checkpoint.status !== 'published') throw new Error(`checkpoint fixture failed: ${checkpoint.status}`);
+      const checkpointDir = `.ai/harness/evidence/checkpoints/${checkpoint.checkpointId}`;
+      const evidence = ['.ai/harness/evidence/events/log.jsonl', '.ai/harness/evidence/checkpoints/last-published.json',
+        `${checkpointDir}/checkpoint.json`, `${checkpointDir}/checkpoint.md`];
+      const contents = evidence.map(path => readFileSync(join(f.worktree, path), 'utf8'));
+      for (const extra of [["--dry-run"], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const path of evidence) expect(result.stderr).toContain(JSON.stringify(path));
+        expect(evidence.map(path => readFileSync(join(f.worktree, path), 'utf8'))).toEqual(contents);
+        f.retained();
+      }
+    });
+  });
+
+  test('slug cleanup retains evidence blobs and run records', () => {
+    withIgnoredCleanupFixture('.ai/', f => {
+      const paths = [`.ai/harness/evidence/blobs/${'a'.repeat(64)}`, '.ai/harness/evidence/runs/run.json'];
+      writeIgnoredFiles(f.worktree, paths);
+      const result = f.cli(...f.cleanup);
+      expect(result.status, result.stdout + result.stderr).toBe(1);
+      for (const path of paths) {
+        expect(result.stderr).toContain(JSON.stringify(path));
+        expect(readFileSync(join(f.worktree, path), 'utf8')).toBe('fixture\n');
+      }
       f.retained();
-      const removal = f.cli(...f.cleanup);
-      expect(removal.status, removal.stdout + removal.stderr).toBe(0);
-      expect(existsSync(f.worktree)).toBe(false);
+    });
+  });
+
+  test('slug cleanup keeps local patches in both ArchContext directories', () => {
+    withIgnoredCleanupFixture('.ai/\n.archcontext/', f => {
+      const paths = ['.archcontext/generated/local.patch', '.archcontext/tmp/local.patch'];
+      writeIgnoredFiles(f.worktree, paths);
+      for (const extra of [['--dry-run'], []]) {
+        const result = f.cli(...f.cleanup, ...extra);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        for (const dir of ['generated', 'tmp']) expect(result.stderr).toContain(JSON.stringify(`.archcontext/${dir}/`));
+        for (const path of paths) expect(readFileSync(join(f.worktree, path), 'utf8')).toBe('fixture\n');
+        f.retained();
+      }
     });
   });
 
@@ -229,9 +275,9 @@ describe("contract-worktree helper integration", () => {
   test.each([
     { container: ".codegraph", generated: ["codegraph.db"], local: ["notes.local", ".env", "backup/copy"],
       blocked: ["notes.local", ".env", "backup/"] },
-    { container: ".ai/harness/evidence/checkpoints", generated: ["last-published.json", `${checkpointDir}/checkpoint.json`],
+    { container: ".ai/harness/evidence/checkpoints", generated: ["last-published.json"],
       local: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/checkpoint.json", ".staging/stage-leftover/notes.local"],
-      blocked: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/", ".staging/stage-leftover/"] },
+      blocked: ["notes.local", `${checkpointDir}/notes.local`, "chk-invalid/", ".staging/stage-leftover/", "last-published.json"] },
     { container: ".ai/harness/runs/hook-events.jsonl.archive", generated: [rotatedHookSegment],
       local: ["custom.jsonl"], blocked: ["custom.jsonl"] },
   ])("closeout retains unknown files in collapsed $container", ({ container, generated, local, blocked }) => {
@@ -356,20 +402,19 @@ describe("contract-worktree helper integration", () => {
   test("remove-exact rechecks ignored data added after a successful preview", () => {
     withIgnoredCleanupFixture(".ai/harness/active-worktree\n.ai/harness/evidence/\n.env\n/node_modules\n/ private/", f => {
       const ledger = ".ai/harness/evidence/events/log.jsonl";
-      writeIgnoredFiles(f.worktree, [ledger]);
       const preview = f.cli(...f.cleanup, "--dry-run");
       expect(preview.status, preview.stdout + preview.stderr).toBe(0);
-      const paths = ["build/.env", " private/keep.txt", ".ai/harness/evidence/events/unknown.txt"];
+      const paths = [ledger, "build/.env", " private/keep.txt", ".ai/harness/evidence/events/unknown.txt"];
       writeIgnoredFiles(f.worktree, paths);
       symlinkSync(f.parent, join(f.worktree, "node_modules"), "dir");
       const result = f.cli("runtime", ...f.removeExact);
       expect(result.status, result.stdout + result.stderr).toBe(1);
-      for (const path of ["build/.env", " private/", ".ai/harness/evidence/events/unknown.txt", "node_modules"]) {
+      for (const path of [ledger, "build/.env", " private/", ".ai/harness/evidence/events/unknown.txt", "node_modules"]) {
         expect(result.stderr).toContain(JSON.stringify(path));
       }
       expect(result.stderr).toContain("git status --ignored");
       f.retained();
-      for (const path of [ledger, ...paths]) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
+      for (const path of paths) expect(readFileSync(join(f.worktree, path), "utf8")).toBe("fixture\n");
       expect(lstatSync(join(f.worktree, "node_modules")).isSymbolicLink()).toBe(true);
     });
   });

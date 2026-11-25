@@ -263,7 +263,7 @@ async function removeWorktree(input: BoardCloseoutInput, pr: MergedPullRequest, 
     const busy = await processesGone(input, proof.path);
     if (busy !== null) return observed(proof, pr, busy, failures, stopped);
     removeExactWorktree(proof.main, { worktree: proof.path, branch: pr.head_ref, head_sha: pr.head_oid, target_ref: TARGET_REF, target_oid: proof.target_oid,
-      merge_commit_sha: pr.merge_commit }, { closeout: true, closeoutProcesses: input.processes });
+      merge_commit_sha: pr.merge_commit }, { closeout: true, closeoutMergeFromProvider: true, closeoutProcesses: input.processes });
     return observed(proof, pr, null, failures, stopped);
   } catch (error) {
     return observed(proof, pr, (error as Error).message.split('\n')[0]!, failures, stopped);

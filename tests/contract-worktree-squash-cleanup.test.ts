@@ -20,7 +20,7 @@ import { executeAdmittedVerification } from "../src/effects/evidence/verificatio
 import { seedReviewAdmissionFixture } from './helpers/review-admission-fixture';
 import { parseVerificationPlanFromContractText } from '../src/core/evidence/verification-plan';
 import { nativeVerificationPlan } from "./state/effective-state-fixture";
-import { planManagedWorktreeSweep, removeGreenWorktrees, sweepManagedWorktrees } from "../src/effects/state/coordination-worktree-topology";
+import { boundSweepSteps, planManagedWorktreeSweep, removeExactWorktree, removeGreenWorktrees, sweepManagedWorktrees } from "../src/effects/state/coordination-worktree-topology";
 import { readPrunedWorktreeIntents } from "../src/effects/state/pruned-worktree-intents";
 import { listHelperFiles } from "../src/effects/runtime/helper-runner";
 import { workspaceDirectory } from '../src/effects/terminal/task-session-record';
@@ -93,7 +93,7 @@ function copyHelpers(cwd: string) {
 }
 
 describe("contract-worktree cleanup squash-merge absorption", () => {
-  test("cleanup removes a merged clean worktree that holds an ignored native ledger and executed run", () => {
+  test("cleanup retains a merged clean worktree that holds an ignored native ledger and executed run", () => {
     const cwd = tmpWorkspace("cleanup-native-evidence");
     const worktreePath = `${cwd}-wt-native-evidence`;
     const authorityHome = tmpWorkspace("cleanup-authority");
@@ -125,17 +125,17 @@ describe("contract-worktree cleanup squash-merge absorption", () => {
       const metadataPath = join(cwd, ".ai/harness/worktrees/native-evidence.json");
       const metadata = '{"slug":"native-evidence","branch":"codex/native-evidence"}\n';
       writeFileSync(metadataPath, metadata);
-      const dryRun = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "native-evidence", "--dry-run"], cwd);
-      expect(dryRun.status, dryRun.stdout + dryRun.stderr).toBe(0);
-      expect(existsSync(worktreePath)).toBe(true);
-      expect(readFileSync(runPath, "utf8")).toBe(runBytes);
-      expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBytes);
-      expect(readFileSync(metadataPath, "utf8")).toBe(metadata);
-      const result = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "native-evidence"], cwd);
-      expect(result.status, result.stdout + result.stderr).toBe(0);
-      expect(existsSync(worktreePath)).toBe(false);
-      expect(existsSync(metadataPath)).toBe(false);
-      expect(run("git", ["show-ref", "--verify", "--quiet", "refs/heads/codex/native-evidence"], cwd).status).not.toBe(0);
+      for (const extra of [["--dry-run"], []]) {
+        const result = run("bash", ["scripts/contract-worktree.sh", "cleanup", "--slug", "native-evidence", ...extra], cwd);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toContain('ignored worktree data');
+        expect(result.stderr).toContain('.ai/harness/evidence/events/log.jsonl');
+        expect(result.stdout).not.toContain('would remove worktree');
+        expect(readFileSync(runPath, "utf8")).toBe(runBytes);
+        expect(readFileSync(ledgerPath, "utf8")).toBe(ledgerBytes);
+        expect(readFileSync(metadataPath, "utf8")).toBe(metadata);
+        expect(run("git", ["show-ref", "--verify", "--quiet", "refs/heads/codex/native-evidence"], cwd).status).toBe(0);
+      }
     } finally {
       rmSync(authorityHome, { recursive: true, force: true });
       rmSync(worktreePath, { recursive: true, force: true });
@@ -385,8 +385,8 @@ describe("provider merge proof after a later conflicting target edit", () => {
     git(root, "commit", "-qam", "later conflicting edit");
     git(root, "update-ref", "refs/remotes/origin/main", "HEAD");
     const target = git(root, "rev-parse", "HEAD");
-    mkdirSync(join(path, ".ai/harness/evidence/events"), { recursive: true });
-    writeFileSync(join(path, ".ai/harness/evidence/events/log.jsonl"), "{}\n");
+    mkdirSync(join(path, ".ai/harness/runs"), { recursive: true });
+    writeFileSync(join(path, ".ai/harness/runs/hook-events.jsonl"), "{}\n");
     const log = join(parent, "gh.log");
     answers.forEach((answer, index) => {
       const value = answer(squash, target, head);
@@ -439,7 +439,58 @@ describe("provider merge proof after a later conflicting target edit", () => {
     } finally { f.cleanup(); }
   });
 
-  test('replays the 51 audit classifications and keeps the four additional owner and data cases', async () => {
+  test('closeout reuses a verified PR merge while it checks the bound head and ancestry', () => {
+    const f = squashFixture(() => []);
+    try {
+      const target = f.git(f.root, 'rev-parse', 'refs/remotes/origin/main');
+      const expected = { worktree: f.path, branch: 'fix/squash', head_sha: f.head, target_ref: 'refs/remotes/origin/main',
+        target_oid: target, merge_commit_sha: f.squash };
+      const limits = { closeout: true, closeoutMergeFromProvider: true, closeoutProcesses: () => [], ghBin: f.gh } as const;
+      expect(() => removeExactWorktree(f.root, { ...expected, head_sha: target }, limits)).toThrow('cleanup execution head moved');
+      expect(() => removeExactWorktree(f.root, { ...expected, merge_commit_sha: f.head }, limits)).toThrow();
+      expect(existsSync(f.path)).toBe(true);
+      removeExactWorktree(f.root, expected, limits);
+      expect(existsSync(f.path)).toBe(false);
+      expect(f.git(f.root, 'branch', '--list', expected.branch)).toBe('');
+      expect(f.calls()).toEqual([]);
+    } finally { f.cleanup(); }
+  });
+
+  test('bound detached removal requires a registration and rechecks it after a replacement', () => {
+    const f = squashFixture(mergedPr);
+    try {
+      const detached = join(f.managed, 'repo-wt-detached');
+      const help = run('git', ['worktree', 'add', '-h'], f.root);
+      const relative = (help.stdout + help.stderr).includes('--relative-paths') ? ['--relative-paths'] : [];
+      const add = () => f.git(f.root, 'worktree', 'add', '-q', ...relative, '--detach', detached, f.squash);
+      add();
+      const original = f.plan();
+      const step = original.items.find(item => item.path === detached)!;
+      expect(step).toMatchObject({ action: 'remove', head: f.squash, registration: expect.any(String) });
+      const unbound = { ...original, items: [{ ...step, registration: undefined }] };
+      expect(boundSweepSteps(unbound)).toEqual({ target_oid: null, steps: [] });
+      expect(f.sweep(unbound)).toContain(`${detached}: kept; not in the preview`);
+      let scans = 0;
+      setControlledWorktreeProcesses(() => {
+        if (++scans === 2) {
+          f.git(f.root, 'worktree', 'move', detached, join(dirname(f.managed), 'original-detached'));
+          add();
+        }
+        return [];
+      });
+      expect(f.sweep(original)).toContain(`${detached}: kept; not in the preview`);
+      expect(f.git(detached, 'rev-parse', 'HEAD')).toBe(f.squash);
+      setControlledWorktreeProcesses([]);
+      const replacement = f.plan();
+      expect(replacement.items.find(item => item.path === detached)?.registration).not.toBe(step.registration);
+      expect(f.sweep(replacement)).toContain(`${detached}: removed`);
+    } finally {
+      setControlledWorktreeProcesses([]);
+      f.cleanup();
+    }
+  });
+
+  test('replays the 51 audit classifications with evidence and ArchContext retention', async () => {
     const f = squashFixture(mergedPr);
     let occupant: ReturnType<typeof Bun.spawn> | undefined;
     try {
@@ -464,7 +515,7 @@ describe("provider merge proof after a later conflicting target edit", () => {
         if (merged) git('merge', '--ff-only', `fix/${slug}`);
         return path;
       };
-      const providerCases = new Map([[f.path, 'cleanup merge is unproven']]);
+      const providerCases = new Map<string, string>();
       const pulls = mergedPr(f.squash, '', f.head);
       for (const slug of ['safe-squash-1', 'safe-squash-2']) {
         const path = branch(slug);
@@ -477,7 +528,8 @@ describe("provider merge proof after a later conflicting target edit", () => {
       }
       output(f.root, '.git/info/exclude', '.codegraph/\n.archcontext/\n.env\n');
       const offlineCases: string[] = [];
-      const kept = new Map<string, string>();
+      const kept = new Map([[f.path, 'ignored_data']]);
+      output(f.path, '.ai/harness/evidence/events/log.jsonl', '{}\n');
       for (let i = 0; i < 16; i++) {
         const slug = `safe-marked-${i}`;
         const path = i === 15 ? add(slug) : branch(slug, true);
@@ -495,10 +547,10 @@ describe("provider merge proof after a later conflicting target edit", () => {
         expect(existsSync(workspaceDirectory(repository))).toBe(false);
       }
       for (let i = 0; i < 11; i++) {
-        const path = branch(`safe-outputs-${i}`, true);
+        const path = branch(`zz-outputs-${i}`, true);
         for (const file of ['.ai/harness/state/agent-notice', '.ai/harness/failures/latest.jsonl', '.codegraph/codegraph.db',
           '.archcontext/generated/model.json', '.archcontext/tmp/cache.json']) output(path, file);
-        offlineCases.push(path);
+        kept.set(path, 'ignored_data');
       }
       for (let i = 0; i < 8; i++) offlineCases.push(add(`safe-detached-${i}`, f.squash));
       for (let i = 0; i < 7; i++) {
@@ -517,7 +569,7 @@ describe("provider merge proof after a later conflicting target edit", () => {
       const locked = branch('zz-locked', true);
       git('worktree', 'lock', locked);
       kept.set(locked, 'locked');
-      expect([offlineCases.length, providerCases.size, kept.size]).toEqual([34, 4, 13]);
+      expect([offlineCases.length, providerCases.size, kept.size]).toEqual([23, 3, 25]);
 
       const ignored = branch('zz-ignored', true);
       output(ignored, '.env', 'keep these bytes\n');
@@ -547,7 +599,7 @@ describe("provider merge proof after a later conflicting target edit", () => {
       }
       expect(f.calls()).toEqual([]);
 
-      const readbacks = Array.from({ length: 5 }, () => f.sweep()).join('\n');
+      const readbacks = Array.from({ length: 4 }, () => f.sweep()).join('\n');
       for (const path of [...offlineCases, ...providerCases.keys()]) {
         expect(readbacks).toContain(`${path}: removed`);
         expect(existsSync(path)).toBe(false);
@@ -559,6 +611,11 @@ describe("provider merge proof after a later conflicting target edit", () => {
         protectedPaths.map(([, reason]) => expect.stringContaining(reason)));
       for (const path of [...kept.keys(), ignored, foreign, open, busy]) expect(existsSync(path)).toBe(true);
       expect(readFileSync(join(ignored, '.env'), 'utf8')).toBe('keep these bytes\n');
+      expect(readFileSync(join(f.path, '.ai/harness/evidence/events/log.jsonl'), 'utf8')).toBe('{}\n');
+      for (const dir of ['generated', 'tmp']) {
+        const name = dir === 'generated' ? 'model.json' : 'cache.json';
+        expect(readFileSync(join(f.managed, 'repo-wt-zz-outputs-0', '.archcontext', dir, name), 'utf8')).toBe('fixture\n');
+      }
     } finally {
       setControlledWorktreeProcesses([]);
       occupant?.kill();

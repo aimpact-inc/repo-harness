@@ -305,21 +305,13 @@ describe('exact cleanup and contract-worktree start sweep', () => {
     } finally { setControlledWorktreeProcesses([]); f.cleanup(); }
   });
 
-  test('sweep accepts the harness evidence log and retains unknown ignored files beside it', () => {
+  test('sweep retains a merged clean checkout that holds a non-rebuildable evidence log', () => {
     const f = fixture(); try {
-      const events = join(f.path, '.ai/harness/evidence/events');
-      mkdirSync(events, { recursive: true });
-      writeFileSync(join(events, 'log.jsonl'), '{}\n');
-      const backup = join(events, 'user-backup.jsonl');
-      writeFileSync(backup, 'local backup\n');
+      mkdirSync(join(f.path, '.ai/harness/evidence/events'), { recursive: true });
+      writeFileSync(join(f.path, '.ai/harness/evidence/events/log.jsonl'), '{}\n');
       expect(sweepManagedWorktrees(f.root, f.root, f.env, { ghBin: f.failingGh })).toContain('ignored_data');
-      expect(readFileSync(backup, 'utf8')).toBe('local backup\n');
-      expect(readFileSync(join(events, 'log.jsonl'), 'utf8')).toBe('{}\n');
+      expect(readFileSync(join(f.path, '.ai/harness/evidence/events/log.jsonl'), 'utf8')).toBe('{}\n');
       expect(f.git('branch', '--list', 'codex/demo')).toContain('codex/demo');
-      rmSync(backup);
-      expect(sweepManagedWorktrees(f.root, f.root, f.env, { ghBin: f.failingGh })).toContain('removed=1');
-      expect(existsSync(f.path)).toBe(false);
-      expect(f.git('branch', '--list', 'codex/demo')).toBe('');
     } finally { f.cleanup(); }
   });
 
