@@ -28,6 +28,7 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { ALL_TARGETS } from '../installer/targets/registry';
 import { CLI_VERSION, formatManagedHookProjectionMismatch, inspectManagedProjection } from './status';
+import { compareVersions, readLatestPackageVersion } from './package-version';
 import { runSecurityScan, type SecurityScanReport } from './security';
 import { isOptIn, resolveRepoRoot } from '../hook/runtime';
 import { ROUTES } from '../hook/route-registry';
@@ -46,11 +47,9 @@ import { MAGPIE_BASE_URL, MAGPIE_PORT, MAGPIE_PROVIDER } from '../../effects/rev
 import { checkAntigravityGlobalRules, checkAntigravityHooks, checkAntigravitySkills } from '../installer/targets/antigravity';
 
 const TRUST_STATE_LINE = /^\[hooks\.state\."[^"]+\/\.codex\/hooks\.json:/;
-const PACKAGE_NAME = 'repo-harness';
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const MIN_CODEX_CLI_VERSION = '0.144.0';
 const UPDATE_CHECK_ENV = 'REPO_HARNESS_CHECK_UPDATES';
-const LATEST_VERSION_ENV = 'REPO_HARNESS_LATEST_VERSION';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'na';
 export type DoctorTarget = 'codex' | 'claude' | 'both';
@@ -242,16 +241,6 @@ function checkVersion(): DoctorCheckResult {
   return { id: 'cli-version', describe: 'repo-harness CLI version', status: 'ok', detail: CLI_VERSION };
 }
 
-const VERSION_SHAPE = /^v?\d+\.\d+\.\d+(?:[-+].*)?$/;
-
-/** Semver precedence of two x.y.z versions, pre-release included; null when either is not one. */
-export function compareVersions(a: string, b: string): number | null {
-  const left = a.trim();
-  const right = b.trim();
-  if (!VERSION_SHAPE.test(left) || !VERSION_SHAPE.test(right)) return null;
-  return Bun.semver.order(left, right);
-}
-
 function checkCodexCliVersion(): DoctorCheckResult {
   const id = 'codex-cli-version';
   const describe = `Codex CLI supports generated GPT-5.6 agent profiles (>= ${MIN_CODEX_CLI_VERSION})`;
@@ -298,36 +287,6 @@ function checkCodexCliVersion(): DoctorCheckResult {
     detail: `path=${resolved}; current=${version}; minimum=${MIN_CODEX_CLI_VERSION}`,
     version,
   };
-}
-
-export function readLatestPackageVersion(env?: NodeJS.ProcessEnv): { version?: string; error?: string } {
-  const activeEnv = env ?? process.env;
-  if (activeEnv[LATEST_VERSION_ENV]) {
-    return { version: activeEnv[LATEST_VERSION_ENV] };
-  }
-
-  const result = spawnSync(process.execPath, [
-    'pm',
-    'view',
-    PACKAGE_NAME,
-    'version',
-    '--json',
-    '--registry=https://registry.npmjs.org',
-  ], {
-    encoding: 'utf-8',
-    timeout: 5000,
-    cwd: PACKAGE_ROOT,
-    env: activeEnv,
-  });
-  if (result.status !== 0 || result.error) {
-    return { error: result.stderr || result.stdout || String(result.error?.message ?? result.error ?? 'npm view failed') };
-  }
-  try {
-    const parsed = JSON.parse(result.stdout);
-    return { version: typeof parsed === 'string' ? parsed : String(parsed) };
-  } catch {
-    return { version: result.stdout.trim().replace(/^"|"$/g, '') };
-  }
 }
 
 function checkCliUpdate(target: DoctorTarget): DoctorCheckResult {

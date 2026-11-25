@@ -15,14 +15,13 @@ import {
   checkRetiredPiExtension,
   checkSkillProjection,
   clearRegisteredChecks,
-  compareVersions,
   formatDoctor,
   notifyRelayDoctorCheck,
-  readLatestPackageVersion,
   registerCheck,
   runDoctor,
   type CheckStatus,
 } from '../../src/cli/commands/doctor';
+import { compareVersions, readLatestPackageVersion } from '../../src/cli/commands/package-version';
 import { writeShellExecutableFixture } from '../helpers/repo-fixture';
 import { writeFakeHc } from '../helpers/fake-hc';
 import { installStateFixturePath, recordPluginSelection, seedGlobalPackageFixture, seedPathRecords, withTempHome } from '../helpers/install-ownership';

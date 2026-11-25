@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.59c614d4e80cbc53",
+  "fingerprint": "sha256:c7ab9ae897b6337156692e143946af206df77c7146843678387f3a024e4a6805",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "cycle",
+  "subject": {
+    "selectorKind": "repository",
+    "stableKey": "pair:component.global-runtime-reconciliation.cli-diagnostics|component.global-runtime-reconciliation.primary-cli",
+    "subjectSelectorId": "subject.repository.f2afc1a411623eb2"
+  },
+  "affectedNodeIds": [
+    "component.global-runtime-reconciliation.cli-diagnostics",
+    "component.global-runtime-reconciliation.primary-cli"
+  ],
+  "affectedNodeCount": 2,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "backwardEdgeCount": 1,
+    "forwardEdgeCount": 1,
+    "thinDirectionEdgeCount": 1,
+    "totalEdgeCount": 2
+  },
+  "reason": "Resolved in #3509 by moving the version helpers out of doctor into package-version, owned by Global Runtime Reconciler (cli).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-25T08:52:53.000Z",
+  "provenance": {
+    "headSha": "c9b2cc6694de30b35ad01ac58d3085b525b5d025",
+    "assessmentDigest": "sha256:bd7bb947e55e32d74dec8208a221c1fb23ca590cfd9d697d9542bcafe7500e59",
+    "baselineSnapshotDigest": "sha256:549b9db6af90637832bcda8e858e40922081faf4021db7d11ed274789d1a041d"
+  },
+  "snapshotDigest": "sha256:549b9db6af90637832bcda8e858e40922081faf4021db7d11ed274789d1a041d",
+  "evidenceDigest": "sha256:bd7bb947e55e32d74dec8208a221c1fb23ca590cfd9d697d9542bcafe7500e59",
+  "resolutionDigest": "sha256:b5862aafe37c5738b00ba75ad411b9ac8dcdc65c04682b4dfb47c6c3b179e570",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "moduleDependencies.pairThinDirectionEdgeCount",
+      "subjectSelectorId": "subject.repository.f2afc1a411623eb2",
+      "nodeId": null,
+      "memberNodeIds": [
+        "component.global-runtime-reconciliation.cli-diagnostics",
+        "component.global-runtime-reconciliation.primary-cli"
+      ],
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.6b49b87275c48450"
+    }
+  ]
+}

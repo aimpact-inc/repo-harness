@@ -33,7 +33,7 @@ import { antigravitySourceRoot, hasRecordedAntigravityState } from "../installer
 import { runInstall, type InstallCommandOptions, type InstallCommandResult, type InstallTargetSpec } from "./install";
 import type { OverrideSelection } from "../../core/host-config/override";
 import { jsonFragment } from "../../core/host-config/json-fragment";
-import { compareVersions, readLatestPackageVersion } from "./doctor";
+import { compareVersions, readLatestPackageVersion } from "./package-version";
 import { DEFAULT_PROCESS_MAX_BUFFER_BYTES, redactProcessOutput, runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { gitChildEnv } from "../../effects/git/runner";
 import { leftoverCheckWarning } from "./upgrade";

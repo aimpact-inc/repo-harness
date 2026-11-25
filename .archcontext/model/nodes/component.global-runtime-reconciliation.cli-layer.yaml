@@ -23,7 +23,6 @@ source:
     - src/cli/commands/upgrade.ts
     - src/cli/commands/architecture-projection.ts
     - src/cli/commands/architecture-configuration.ts
-    - src/cli/commands/upgrade-registered.ts
   exclude:
     - src/cli/commands/architecture-configuration.ts
     - src/cli/commands/architecture-projection.ts
