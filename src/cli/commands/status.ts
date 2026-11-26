@@ -160,12 +160,13 @@ function architectureProjectionStatus(repoRoot: string): NonNullable<StatusRepor
   return { selected: false, configured: section.present, configurationPath: section.path, next: setup.message };
 }
 
-export function readInstallStateForStatus(): StatusReport['installState'] {
+export function readInstallStateForStatus(cwd: string = process.cwd()): StatusReport['installState'] {
   try {
     const state = readInstallState();
     if (!state) return { recorded: false };
     const plugins = enabledPlugins(state);
-    const notice = plugins.includes('pi') && piExecutable() !== null && ownedPiPackages().length ? unmeasuredPiVersionLine() : null;
+    const piOptions = { repoRoot: cwd };
+    const notice = plugins.includes('pi') && piExecutable(process.env, piOptions) !== null && ownedPiPackages().length ? unmeasuredPiVersionLine(process.env, piOptions) : null;
     return { recorded: true, core_version: state.core.version, plugins, selection: state.selection, ...(notice ? { pi_version_notice: notice } : {}) };
   } catch (error) {
     if (!(error instanceof InstallStateError)) throw error;
@@ -225,7 +226,7 @@ export function runStatus(cwd: string = process.cwd()): StatusReport {
     byEvent[r.event] = (byEvent[r.event] ?? 0) + 1;
   }
 
-  const installState = readInstallStateForStatus();
+  const installState = readInstallStateForStatus(cwd);
   const targets: StatusReport['targets'] = [];
   for (const target of ALL_TARGETS) {
     if (!target.supportsLocation('global')) continue;

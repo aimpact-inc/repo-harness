@@ -148,7 +148,7 @@ const {
   resolveWindowsLaunchTarget: resolveSharedWindowsLaunchTarget,
   resolveWindowsPathCommand: resolveSharedWindowsPathCommand,
   windowsTargetCheckoutRoots: computeWindowsTargetCheckoutRoots,
-} = require(path.join(PACKAGE_ROOT, "src", "effects", "process-windows-launcher.ts"));
+} = require(path.join(PACKAGE_ROOT, "src", "effects", "process-windows-launcher.mjs"));
 const { rawBaseUrl: WAZA_RAW_BASE_URL, files: WAZA_SHARED_RULES } = require(path.join(PACKAGE_ROOT, "src", "core", "skill-surface", "waza-shared-rules.json"));
 // The release owns the hc floor: it protects this package's hc client code.
 const HERDR_CORE_PIN_SOURCE = "package:src/core/terminal/herdr-core-pin.json";
@@ -225,7 +225,7 @@ function exitOnWindowsLauncherRefusal(reason) {
 
 /**
  * Single owning Windows executable policy for every binary resolved or launched
- * by this checker, delegating to `src/effects/process-windows-launcher.ts`.
+ * by this checker, delegating to `src/effects/process-windows-launcher.mjs`.
  */
 function resolveWindowsLaunchTarget(candidatePath, options = {}) {
   return resolveSharedWindowsLaunchTarget(candidatePath, {
@@ -242,6 +242,9 @@ function resolveWindowsLaunchTarget(candidatePath, options = {}) {
 function resolvePathTarget(command, options = {}) {
   return resolveSharedWindowsPathCommand(command, {
     allowCheckoutLocal: options.allowCheckoutLocal === true,
+    requireDirectLaunch: options.requireDirectLaunch === true,
+    failOnRefusal: options.failOnRefusal === true,
+    packageBin: options.packageBin,
     env: process.env,
     platform: process.platform,
     repoRoot: REPO_ROOT,
@@ -311,14 +314,18 @@ function detectSymlinkCapability() {
 
 function resolveRunTarget(command, options = {}) {
   if (process.platform !== "win32") {
-    return { path: command, command, args: [], entryPath: command, launchError: null };
+    return { path: command, command, args: [], entryPath: command, packageRoot: null, launchError: null };
   }
   const isBareCommand = !command.includes("/") && !command.includes("\\") && !/^[a-zA-Z]:/.test(command);
   if (isBareCommand) {
-    return resolvePathTarget(command, { allowCheckoutLocal: options.allowCheckoutLocal === true });
+    return resolvePathTarget(command, {
+      allowCheckoutLocal: options.allowCheckoutLocal === true,
+      packageBin: options.packageBin,
+    });
   }
   return resolveWindowsLaunchTarget(command, {
     allowCheckoutLocal: options.allowCheckoutLocal === true,
+    packageBin: options.packageBin,
     label: command,
     failOnRefusal: true,
   });
@@ -1715,6 +1722,9 @@ function codeGraphPlatformBundleBin() {
   return path.join(REPO_ROOT, "node_modules", codeGraphPlatformPackageName(), "bin", "codegraph");
 }
 
+const CODEGRAPH_PACKAGE_BIN = { packageName: CODEGRAPH_PACKAGE, binName: "codegraph" };
+const ARCHCTX_PACKAGE_BIN = { packageName: ARCHCTX_CLI_PACKAGE, binName: ARCHCTX_CLI_PACKAGE };
+
 function resolveCodeGraphBinary() {
   const allowRepoLocal = process.env.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL !== "0";
   const allowGlobal = process.env.REPO_HARNESS_CODEGRAPH_ALLOW_GLOBAL !== "0";
@@ -1725,6 +1735,7 @@ function resolveCodeGraphBinary() {
   if (localOverride) {
     localBinPath = resolveWindowsLaunchTarget(localOverride, {
       allowCheckoutLocal: allowWindowsRepoLocalCodegraph,
+      packageBin: CODEGRAPH_PACKAGE_BIN,
       label: "REPO_HARNESS_CODEGRAPH_LOCAL_BIN",
       failOnRefusal: true,
     })?.path ?? null;
@@ -1740,6 +1751,7 @@ function resolveCodeGraphBinary() {
     for (const candidate of localCandidates) {
       const resolved = resolveWindowsLaunchTarget(candidate, {
         allowCheckoutLocal: allowWindowsRepoLocalCodegraph,
+        packageBin: CODEGRAPH_PACKAGE_BIN,
         label: "codegraph",
       })?.path ?? null;
       if (resolved) {
@@ -1754,11 +1766,12 @@ function resolveCodeGraphBinary() {
     if (globalOverride) {
       globalBinPath = resolveWindowsLaunchTarget(globalOverride, {
         allowCheckoutLocal: false,
+        packageBin: CODEGRAPH_PACKAGE_BIN,
         label: "REPO_HARNESS_CODEGRAPH_GLOBAL_BIN",
         failOnRefusal: true,
       })?.path ?? null;
     } else {
-      globalBinPath = resolvePathCommand("codegraph");
+      globalBinPath = resolvePathCommand("codegraph", { packageBin: CODEGRAPH_PACKAGE_BIN });
     }
   }
 
@@ -1792,7 +1805,7 @@ function resolveCodeGraphBinary() {
 }
 
 function codeGraphProbe(binPath, args, timeoutMs, probes, options = {}) {
-  const result = run(binPath, args, { timeoutMs, allowCheckoutLocal: options.allowCheckoutLocal === true });
+  const result = run(binPath, args, { timeoutMs, allowCheckoutLocal: options.allowCheckoutLocal === true, packageBin: CODEGRAPH_PACKAGE_BIN });
   probes.push({
     bin_path: binPath,
     args,
@@ -2073,21 +2086,29 @@ function detectManagedArchctx() {
 /** Inspect the PATH binary separately from the managed runtime. */
 function detectArchctx(managed) {
   if (!managed.selected) return inactivePluginTool("archctx", managed);
-  const pathTarget = resolvePathTarget(ARCHCTX_CLI_PACKAGE);
+  const pathTarget = resolvePathTarget(ARCHCTX_CLI_PACKAGE, {
+    packageBin: ARCHCTX_PACKAGE_BIN,
+    requireDirectLaunch: true,
+  });
   const pathBin = pathTarget?.path ?? null;
-  const versionResult = pathBin ? run(pathBin, ["--version"], { timeoutMs: 1500 }) : null;
+  const versionResult = pathBin ? run(pathBin, ["--version"], { timeoutMs: 1500, packageBin: ARCHCTX_PACKAGE_BIN }) : null;
   // Some archctx builds have no --version flag and answer with a multi-line help
   // envelope at exit 0. Report an unknown version instead of storing that blob.
   const versionOutput = versionResult?.ok ? versionResult.stdout.trim() : "";
   const realBin = pathTarget && resolveRealPath(pathTarget.entryPath);
-  let packageRoot = realBin && path.dirname(realBin);
+  let packageRoot = pathTarget?.packageRoot ?? (realBin && path.dirname(realBin));
   let pathVersion = null;
-  while (packageRoot) {
-    const manifest = readJson(path.join(packageRoot, "package.json"));
-    if (manifest?.name === "archctx") { pathVersion = manifest.version ?? null; break; }
-    const parent = path.dirname(packageRoot);
-    if (parent === packageRoot) break;
-    packageRoot = parent;
+  if (pathTarget?.packageRoot) {
+    const manifest = readJson(path.join(pathTarget.packageRoot, "package.json"));
+    if (manifest?.name === "archctx") pathVersion = manifest.version ?? null;
+  } else {
+    while (packageRoot) {
+      const manifest = readJson(path.join(packageRoot, "package.json"));
+      if (manifest?.name === "archctx") { pathVersion = manifest.version ?? null; break; }
+      const parent = path.dirname(packageRoot);
+      if (parent === packageRoot) break;
+      packageRoot = parent;
+    }
   }
   pathVersion ??= versionOutput && !versionOutput.includes("\n") ? versionOutput : null;
   // `rh update` links PATH archctx to the Bun global copy at the pin; repo-harness may run a nested copy.

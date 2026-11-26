@@ -6,8 +6,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { homedir } from 'node:os';
 import { piAgentDir } from '../../effects/pi-agent-dir';
 import { realPathOrResolved } from '../../effects/path-identity';
-import { piExecutable } from '../../effects/pi-executable';
-import { resolveWindowsLaunchTarget } from '../../effects/process-windows-launcher';
+import { piExecutable, resolvePiPathTarget, type PiResolutionOptions } from '../../effects/pi-executable';
 import { decode, openHostConfigGate, type HostConfigGate } from '../../effects/host-config/gate';
 import { expectedOf, hostConfigPaths, observeFile, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import { jsonFragment, removeJsonFragment } from '../../core/host-config/json-fragment';
@@ -15,12 +14,13 @@ import { HostConfigError } from '../../core/host-config/types';
 import { MEASURED_INSTALLERS, type HostConfigFragmentDeclaration } from '../../effects/host-config/delegated';
 
 /** Package commands run at HOME so project settings cannot supply ownership. */
-export function runPi(args: readonly string[], env: NodeJS.ProcessEnv = process.env): string {
-  const executable = piExecutable(env);
-  if (executable === null) throw new Error('pi not found on PATH');
-  const target = resolveWindowsLaunchTarget(executable, {
-    env,
-    label: 'pi',
+export function runPi(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  options?: PiResolutionOptions,
+): string {
+  const target = resolvePiPathTarget(env, {
+    ...options,
     failOnRefusal: true,
     requireDirectLaunch: true,
   });
@@ -48,8 +48,12 @@ export function piUserPackageSources(output: string): readonly string[] {
     .map(line => line.slice(2).replace(/ \(filtered\)$/, ''));
 }
 
-export function piPackagePresent(source: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const sources = piUserPackageSources(runPi(['list'], env));
+export function piPackagePresent(
+  source: string,
+  env: NodeJS.ProcessEnv = process.env,
+  options?: PiResolutionOptions,
+): boolean {
+  const sources = piUserPackageSources(runPi(['list'], env, options));
   if (sources.length === 0) return false;
   const expected = realPathOrResolved(source);
   const agentDir = piAgentDir(env.HOME ?? env.USERPROFILE ?? homedir(), env);
@@ -93,8 +97,11 @@ export function ownedPiPackages(env: NodeJS.ProcessEnv = process.env, gate: Host
 }
 
 /** The report line for a Pi version that the write set was not measured at; null at the measured version. */
-export function unmeasuredPiVersionLine(env: NodeJS.ProcessEnv = process.env): string | null {
-  const version = runPi(['--version'], env);
+export function unmeasuredPiVersionLine(
+  env: NodeJS.ProcessEnv = process.env,
+  options?: PiResolutionOptions,
+): string | null {
+  const version = runPi(['--version'], env, options);
   return version === MEASURED_INSTALLERS.pi ? null : `pi ${version} is not the measured ${MEASURED_INSTALLERS.pi}; writes outside the declared set were not measured`;
 }
 
@@ -128,10 +135,15 @@ export function adoptPiPackage(source: string, env: NodeJS.ProcessEnv = process.
   if (adopted === 'recorded') throw new HostConfigError('host_config_invalid_state', `rh records this Pi settings file without the Pi package entry that the install state claims, so rh does not move the claim: ${path}`);
 }
 
-export function planPiPackage(source: string, enabled: boolean, env: NodeJS.ProcessEnv = process.env): PiPackageStep {
+export function planPiPackage(
+  source: string,
+  enabled: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+  options?: PiResolutionOptions,
+): PiPackageStep {
   const base = { step: 'install Pi package' as const, source: resolve(source), created: false };
   if (!enabled) return { ...base, status: 'skipped', detail: 'Pi host not selected' };
-  if (piExecutable(env) === null) return { ...base, status: 'skipped', detail: 'pi not found on PATH' };
+  if (piExecutable(env, options) === null) return { ...base, status: 'skipped', detail: 'pi not found on PATH' };
   return { ...base, status: 'ok', detail: 'Pi will check the user package entry before installation', command: ['pi', 'install', base.source] };
 }
 
@@ -141,21 +153,26 @@ export function planPiPackage(source: string, enabled: boolean, env: NodeJS.Proc
  * An entry that was there before stays unowned. A failure keeps the record of
  * what the run created, so the runtime transaction rollback takes it out.
  */
-export function installPiPackage(source: string, enabled: boolean, env: NodeJS.ProcessEnv = process.env): PiPackageStep {
-  const plan = planPiPackage(source, enabled, env);
+export function installPiPackage(
+  source: string,
+  enabled: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+  options?: PiResolutionOptions,
+): PiPackageStep {
+  const plan = planPiPackage(source, enabled, env, options);
   if (plan.status === 'skipped') return plan;
   try {
-    if (piPackagePresent(plan.source, env)) return { ...plan, detail: 'Pi user package entry already present, unowned; no duplicate added' };
+    if (piPackagePresent(plan.source, env, options)) return { ...plan, detail: 'Pi user package entry already present, unowned; no duplicate added' };
     const manifestPath = join(plan.source, 'package.json');
     const manifest = parseJsonText(readFileSync(manifestPath, 'utf8'), manifestPath) as { name?: unknown; pi?: { extensions?: unknown } };
     if (manifest.name !== 'repo-harness' || !Array.isArray(manifest.pi?.extensions) || manifest.pi.extensions.length === 0) {
       throw new Error('installed repo-harness package has no Pi extension declaration');
     }
-    const version = unmeasuredPiVersionLine(env);
+    const version = unmeasuredPiVersionLine(env, options);
     const declaration = piDeclaration(plan.source, env);
     const gate = openHostConfigGate({ env });
-    const { unattributed } = gate.delegate([declaration], () => { runPi(['install', plan.source], env); });
-    if (!piPackagePresent(plan.source, env)) throw new Error('PI_PACKAGE_INSTALL_NOT_RECORDED');
+    const { unattributed } = gate.delegate([declaration], () => { runPi(['install', plan.source], env, options); });
+    if (!piPackagePresent(plan.source, env, options)) throw new Error('PI_PACKAGE_INSTALL_NOT_RECORDED');
     const created = gate.recorded(declaration.path).some((record) => record.owner === 'pi' && record.selector === declaration.selectors[0]);
     const lines = [
       created ? 'Pi user package entry installed and recorded' : 'Pi user package entry installed; rh did not find the declared entry, so it claims none',

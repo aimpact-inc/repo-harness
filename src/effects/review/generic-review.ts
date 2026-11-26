@@ -24,6 +24,7 @@ import { isReviewRuntimeId, type ReviewRuntimeId } from '../../core/review/revie
 import { piExecutable } from '../pi-executable';
 import { PI_UPGRADE_HINT } from '../../pi/compat';
 import { piReviewLaunchBlocker, resolvePiModel } from '../pi-host-probe';
+import { windowsTargetCheckoutRoots } from '../process-windows-launcher.mjs';
 
 type Harness = ReviewRuntimeId;
 const REVIEWER_LABELS: Record<ReviewRuntimeId, AcceptanceReceipt['reviewer']> = {
@@ -161,9 +162,13 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     const timeout = options.timeoutMs ?? REVIEW_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > REVIEW_TIMEOUT_MS) throw new Error('review_invalid_timeout');
     if (!options.verification) throw new Error('review_requires_explicit_verification_report');
+    const piHome = process.env.HOME ?? process.env.USERPROFILE ?? '';
+    const piResolutionOptions = process.platform === 'win32'
+      ? { checkoutRoots: [...new Set([...windowsTargetCheckoutRoots(root, piHome, process.platform), ...windowsTargetCheckoutRoots(reviewerRepo, piHome, process.platform)])] }
+      : { repoRoot: root };
     // One PATH pi per round: the version gate, the model resolver and the launch run the same executable.
     let roundPi: string | undefined;
-    const piCommand = () => roundPi ??= client.piExecutable() ?? (() => { throw new Error('review_provider_executable_missing_or_unsupported'); })();
+    const piCommand = () => roundPi ??= client.piExecutable(process.env, piResolutionOptions) ?? (() => { throw new Error('review_provider_executable_missing_or_unsupported'); })();
     const context = await acceptanceContext({ root, authority: options.authority, verification: options.verification! });
     const identity = contextIdentity(context);
     let session: ReviewSession<Endpoint>;
@@ -181,7 +186,7 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
       const requested = options.harness ?? (owner === 'claude' ? 'codex' : 'claude');
       if (!isReviewRuntimeId(requested)) throw new Error('review_harness_unsupported');
       let actual = requested; let reason: string | null = null;
-      const installed = await client.installation(actual);
+      const installed = await client.installation(actual, actual === 'pi' ? piCommand() : undefined);
       if (installed.kind !== 'available') {
         if (installed.kind !== 'not_found' || options.harness || !owner || owner === 'pi'
           || (await client.installation(owner)).kind !== 'available') throw new Error('review_provider_executable_missing_or_unsupported');
@@ -193,7 +198,7 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
       // integration is checked: the reviewer Pi uses an isolated PI_CODING_AGENT_DIR, and the
       // terminal status comes from the OAR host's own OSC 7501 report.
       if (actual === 'pi') {
-        const blocker = client.piReviewLaunchBlocker(piCommand());
+        const blocker = client.piReviewLaunchBlocker(piCommand(), process.env, piResolutionOptions);
         if (blocker) throw new Error(`review_pi_launch_not_ready: ${blocker}${blocker === 'PI_HOST_UNSUPPORTED_VERSION' ? `; ${PI_UPGRADE_HINT}` : ''}`);
       }
       options.admitSession();
@@ -235,7 +240,7 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     // The one absolute round deadline: the host turn and this wait both end at it.
     const deadline = Date.now() + timeout;
     const pi = session.actual_harness === 'pi'
-      ? preparePiAgentDirectory(outbox, reviewModel!, (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference)) : undefined;
+      ? preparePiAgentDirectory(outbox, reviewModel!, (agentDirectory, reference) => client.resolvePiModel(piCommand(), agentDirectory, reference, process.env, piResolutionOptions)) : undefined;
     const runtimeHome = session.actual_harness === 'codex' ? prepareCodexHome(outbox, reviewModel!).home : pi?.directory;
     // Isolation admission precedes any SDK/native Session creation.
     const repository = taskRepository(root);
@@ -247,7 +252,7 @@ export async function runReviewRound<Session, Endpoint>(options: ReviewOptions<E
     if (!existsSync(profilePath)) writeFileSync(profilePath, policy, { flag: 'wx', mode: 0o600 });
     else if (readFileSync(profilePath, 'utf8') !== policy) throw new Error('review_isolation_changed');
     if (!existsSync(specPath)) {
-      const installation = await client.installation(session.actual_harness);
+      const installation = await client.installation(session.actual_harness, session.actual_harness === 'pi' ? piCommand() : undefined);
       if (installation.kind !== 'available') throw new Error('review_provider_executable_missing_or_unsupported');
       if (session.actual_harness === 'pi' ? installation.via !== 'bundled' : installation.via !== 'executable') throw new Error('review_provider_executable_required');
       const vendorExecutable = session.actual_harness === 'pi' ? piCommand() : installation.via === 'executable' ? installation.command : null;

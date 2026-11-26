@@ -20,10 +20,10 @@ import { runUserUninstall } from '../../src/cli/installer/uninstall';
 import { migrateInstallState } from '../../src/cli/installer/install-state-migration';
 import { bunGlobalPackageRoot } from '../../src/cli/installer/skill-projection';
 import { piAgentDir } from '../../src/effects/pi-agent-dir';
-import { piExecutable } from '../../src/effects/pi-executable';
+import { PI_PACKAGE_BIN, piExecutable } from '../../src/effects/pi-executable';
 import { configureRequiredHerdrSkill } from '../../src/cli/commands/herdr-skill';
-import { piReviewLaunchBlocker } from '../../src/effects/pi-host-probe';
-import { resolveWindowsLaunchTarget } from '../../src/effects/process-windows-launcher';
+import { piReviewLaunchBlocker, probeInstalledPi } from '../../src/effects/pi-host-probe';
+import { resolveWindowsLaunchTarget } from '../../src/effects/process-windows-launcher.mjs';
 import { writeFakeHc } from '../helpers/fake-hc';
 
 const ROOT = join(import.meta.dir, '../..');
@@ -595,7 +595,8 @@ test('Windows pi.CMD shims resolve through resolveWindowsLaunchTarget without a 
   const shimPath = join(scoopBin, 'pi.CMD');
   const piCliSource = readFileSync(join(f.host, 'pi'), 'utf8').replace(/^#!.*\n/, '#!/usr/bin/env node\n');
 
-  f.write(join(pkgRoot, 'package.json'), readFileSync(join(f.host, 'package.json'), 'utf8'));
+  const piManifest = JSON.stringify({ ...JSON.parse(readFileSync(join(f.host, 'package.json'), 'utf8')), bin: { pi: 'dist/bundle/cli.js' } });
+  f.write(join(pkgRoot, 'package.json'), piManifest);
   f.write(join(pkgRoot, 'dist/index.js'), readFileSync(join(f.host, 'dist/index.js'), 'utf8'));
   f.write(join(pkgRoot, 'dist/core/tools/path-utils.js'), readFileSync(join(f.host, 'dist/core/tools/path-utils.js'), 'utf8'));
   // Deliberately leave cli.js and pi.CMD non-executable on POSIX: only node + cli.js works.
@@ -652,7 +653,7 @@ test('Windows pi.CMD shims resolve through resolveWindowsLaunchTarget without a 
     // 2. Classic @IF EXIST "%~dp0\node.exe" shim with sibling node.exe and no separate node dir on PATH.
     const classicBin = join(f.root, 'classic-bin');
     const classicPkg = join(classicBin, 'node_modules/@earendil-works/pi-coding-agent');
-    f.write(join(classicPkg, 'package.json'), readFileSync(join(f.host, 'package.json'), 'utf8'));
+    f.write(join(classicPkg, 'package.json'), piManifest);
     f.write(join(classicPkg, 'dist/index.js'), readFileSync(join(f.host, 'dist/index.js'), 'utf8'));
     f.write(join(classicPkg, 'dist/core/tools/path-utils.js'), readFileSync(join(f.host, 'dist/core/tools/path-utils.js'), 'utf8'));
     f.write(join(classicPkg, 'dist/bundle/cli.js'), piCliSource);
@@ -716,6 +717,114 @@ test('Windows pi.CMD shims resolve through resolveWindowsLaunchTarget without a 
       failOnRefusal: true,
       requireDirectLaunch: true,
     })).toThrow(/refused pi shim target inside target checkout/);
+
+    // 5. Package-backed .CMD shim must target the package's declared bin inside the canonical package root.
+    const ownerBin = join(f.root, 'owner-bin');
+    const ownerPkg = join(ownerBin, 'node_modules/@earendil-works/pi-coding-agent');
+    const outsideScript = join(f.root, 'outside-entry.js');
+    const undeclaredScript = join(ownerPkg, 'dist/bundle/other.js');
+    const outsideExe = join(f.root, 'outside-bin.exe');
+    const ownerShim = join(ownerBin, 'pi.CMD');
+    f.write(join(ownerPkg, 'package.json'), piManifest);
+    f.write(join(ownerPkg, 'dist/index.js'), readFileSync(join(f.host, 'dist/index.js'), 'utf8'));
+    f.write(join(ownerPkg, 'dist/core/tools/path-utils.js'), readFileSync(join(f.host, 'dist/core/tools/path-utils.js'), 'utf8'));
+    f.write(join(ownerPkg, 'dist/bundle/cli.js'), piCliSource);
+    f.write(undeclaredScript, 'throw new Error("undeclared ran");\n');
+    f.write(outsideScript, 'throw new Error("outside ran");\n');
+    f.write(outsideExe, 'not-a-declared-bin');
+    const ownerEnv: NodeJS.ProcessEnv = { ...f.env, PATH: [ownerBin, nodePathDir].join(delimiter), PATHEXT: '.EXE;.CMD' };
+    for (const [shimBody, pattern] of [
+      [`@node "%~dp0\\..\\outside-entry.js" %*\r\n`, /escapes canonical package root/],
+      [`@node "%~dp0\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\other.js" %*\r\n`, /does not match declared bin/],
+      [`@"%~dp0\\..\\outside-bin.exe" %*\r\n`, /escapes canonical package root/],
+    ] as const) {
+      f.write(ownerShim, shimBody);
+      expect(() => resolveWindowsLaunchTarget(ownerShim, {
+        env: ownerEnv,
+        packageBin: PI_PACKAGE_BIN,
+        label: 'pi',
+        failOnRefusal: true,
+        requireDirectLaunch: true,
+      })).toThrow(pattern);
+      const badChecks = checkPiHost(ownerEnv);
+      for (const id of ['pi-cli-version', 'pi-capability', 'pi-package']) {
+        expect(badChecks.find(c => c.id === id)).toMatchObject({ status: 'fail', detail: expect.stringMatching(pattern) });
+      }
+    }
+  } finally {
+    if (process.platform !== platformDescriptor.value) {
+      Object.defineProperty(process, 'platform', platformDescriptor);
+    }
+  }
+}));
+
+test('Windows Pi probes and CLI runs refuse checkout-supplied node_modules/.bin/pi.cmd', () => fixture(f => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const realNode = Bun.which('node') ?? process.execPath;
+  const checkout = join(f.root, 'devdep-checkout');
+  const checkoutBin = join(checkout, 'node_modules/.bin');
+  const checkoutPkg = join(checkout, 'node_modules/@earendil-works/pi-coding-agent');
+  const checkoutShim = join(checkoutBin, 'pi.cmd');
+  const sentinel = join(f.root, 'checkout-pi-ran');
+  const globalBin = join(f.root, 'global-bin');
+  const globalPkg = join(globalBin, 'node_modules/@earendil-works/pi-coding-agent');
+  const nodeBin = join(f.root, 'node-bin');
+  const piManifest = JSON.stringify({ ...JSON.parse(readFileSync(join(f.host, 'package.json'), 'utf8')), bin: { pi: 'dist/bundle/cli.js' } });
+  const piCliSource = readFileSync(join(f.host, 'pi'), 'utf8').replace(/^#!.*\n/, '#!/usr/bin/env node\n');
+
+  mkdirSync(join(checkout, '.git'), { recursive: true });
+  f.write(join(checkoutPkg, 'package.json'), piManifest);
+  f.write(join(checkoutPkg, 'dist/index.js'), `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(sentinel)}, 'sdk'); export const VERSION = '9.9.9'; export function getPackageDir() { return ${JSON.stringify(checkoutPkg)}; }\n`);
+  f.write(join(checkoutPkg, 'dist/core/tools/path-utils.js'), 'export function resolveToCwd(p) { return p; }\n');
+  f.write(join(checkoutPkg, 'dist/bundle/cli.js'), `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(sentinel)}, 'cli'); console.log('No packages installed.');\n`);
+  f.write(checkoutShim, `@node "%~dp0\\..\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\n`);
+
+  f.write(join(globalPkg, 'package.json'), piManifest);
+  f.write(join(globalPkg, 'dist/index.js'), readFileSync(join(f.host, 'dist/index.js'), 'utf8'));
+  f.write(join(globalPkg, 'dist/core/tools/path-utils.js'), readFileSync(join(f.host, 'dist/core/tools/path-utils.js'), 'utf8'));
+  f.write(join(globalPkg, 'dist/bundle/cli.js'), piCliSource);
+  f.write(join(globalBin, 'pi.CMD'), `@node "%~dp0\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\n`);
+
+  mkdirSync(nodeBin, { recursive: true });
+  const nodePathDir = process.platform === 'win32'
+    ? dirname(realNode)
+    : (symlinkSync(realNode, join(nodeBin, 'node.EXE')), nodeBin);
+  f.setPackages([relative(f.env.PI_CODING_AGENT_DIR, f.source)]);
+
+  const checkoutOnlyEnv: NodeJS.ProcessEnv = {
+    ...f.env,
+    PATH: [checkoutBin, nodePathDir].join(delimiter),
+    PATHEXT: '.EXE;.CMD',
+  };
+  const checkoutPrependedEnv: NodeJS.ProcessEnv = {
+    ...f.env,
+    PATH: [checkoutBin, globalBin, nodePathDir].join(delimiter),
+    PATHEXT: '.EXE;.CMD',
+  };
+
+  try {
+    if (process.platform !== 'win32') {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    }
+
+    // Only checkout node_modules/.bin/pi.cmd on PATH: refused before canonicalization, SDK probe, or CLI launch.
+    expect(piExecutable(checkoutOnlyEnv, { repoRoot: checkout })).toBeNull();
+    expect(checkPiHost(checkoutOnlyEnv, checkout).every(c => c.status === 'na')).toBe(true);
+    expect(() => runPi(['list'], checkoutOnlyEnv, { repoRoot: checkout })).toThrow('pi not found on PATH');
+    expect(() => probeInstalledPi(checkoutShim, checkoutOnlyEnv, { repoRoot: checkout })).toThrow(/refused pi inside target checkout/);
+    expect(piReviewLaunchBlocker(checkoutShim, checkoutOnlyEnv, { repoRoot: checkout })).toBe('PI_HOST_PROBE_FAILED');
+    expect(existsSync(sentinel)).toBe(false);
+
+    // Checkout node_modules/.bin prepended before global install (e.g. `bun run rh doctor`): skips checkout shim, uses global Pi.
+    expect(piExecutable(checkoutPrependedEnv, { repoRoot: checkout })).toBe(realpathSync(join(globalBin, 'pi.CMD')));
+    expect(checkPiHost(checkoutPrependedEnv, checkout).map(c => [c.id, c.status])).toEqual([
+      ['pi-path', 'ok'],
+      ['pi-cli-version', 'ok'],
+      ['pi-capability', 'ok'],
+      ['pi-package', 'ok'],
+    ]);
+    expect(runPi(['list'], checkoutPrependedEnv, { repoRoot: checkout })).toContain(f.source);
+    expect(existsSync(sentinel)).toBe(false);
   } finally {
     if (process.platform !== platformDescriptor.value) {
       Object.defineProperty(process, 'platform', platformDescriptor);
