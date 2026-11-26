@@ -5,7 +5,7 @@
   "layoutVersion": "archcontext.docs-layout/v1",
   "generatedFrom": {"codeGraphPackage":"@colbymchenry/codegraph","codeGraphVersion":"1.6.4"},
   "semanticBaseline": {
-    "modelDigest": "sha256:cde6880e6530bd761dbc1160cc76e368017a168ae2cef34e18882825bcf3984c",
+    "modelDigest": "sha256:60e8b4fd73de146b56a08dd55eefe0c49078dd61ef9122a34f06406614e40eea",
     "capabilities": [
       {
         "capabilityId": "capability.organization.board",
@@ -669,7 +669,7 @@
           "component.execution-primitives.task-session-record",
           "component.execution-primitives.terminal-core"
         ],
-        "semanticFingerprint": "sha256:c3bc1c71cfbb41f609181618d4b1cef4bfd61518133bb672e3e90628c8738f04",
+        "semanticFingerprint": "sha256:2da2f2f9d8656c8f233f5f809145bf9ebcf4cf40ace887715b9b63bd2ca593ca",
         "flowProofFingerprint": "sha256:f8ba28ef6309b15c51848296910b603928db23f6b26aa5ae126427c28537cbdf",
         "proofStatus": {
           "p1": "proven",
@@ -681,7 +681,7 @@
           "interfaces": "sha256:1af5182468845a6667797fc9b78217b3fdd85a029221652dfaee678c7b84eeb1",
           "lifecycle": "sha256:9881a559406e3ee3798f12f3793496f4dfb75fe2388bb8840b1f523f92c7910b",
           "names": "sha256:5d5aefb0f9badc7e8a70642391e206e4cbe15472c3b0440176bdfa680a2e2087",
-          "ownership": "sha256:04304b048ce04cfe623c90e431550e18199bf969773301b4dd534799db16cfeb",
+          "ownership": "sha256:bd59fc87de49667554a1c3a4fc9e992bc26e793e6243bcdbe013562b930f09f0",
           "placement": "sha256:b4c6509edbf69bbcd55135c8de16958d5fd9ad6eb074f74f9f2342748de0a754",
           "relations": "sha256:e6519b103840359927d72d269e80e0db7d847cefd13af2238d9eab9b8305d9fd",
           "responsibilities": "sha256:770c0c72d7d7d03da7319f4ba1d7ced7eb8473bc0ec42008c81252ad40280245",
@@ -808,7 +808,7 @@
     "projection_target.entity.capability-workflow-engine-contract-assets":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.contract-assets","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/contract-assets.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:50c6b263b26f2ee47b198e0ebfd2f98455e3320691a7f10234d91f34526c27ef"},
     "projection_target.entity.capability-workflow-engine-execution-primitives":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.execution-primitives","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/execution-primitives.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:e89817428f48ce04ca8c211c0db9e4b98dcada5d7c3a81c809114cf3a89081c2"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.execution-primitives","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/execution-primitives.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:ec17b1be60f123845b13cef64829a175c45aea8bf24eafdc662c4384d20d1adc"},
     "projection_target.entity.capability-workflow-engine-inspection-migration":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.workflow-engine.inspection-migration","entityKind":"capability"},"path":"docs/architecture/modules/workflow-engine/inspection-migration.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:4743dc77da1a60484b6e0398bbc54a4d76eceff65dde7a261c45b2f3f3468e3d"},
     "projection_target.entity.capability-workflow-engine-workflow-state":
