@@ -1,6 +1,6 @@
 # workflow-engine/execution-primitives 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:e89817428f48ce04ca8c211c0db9e4b98dcada5d7c3a81c809114cf3a89081c2" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ec17b1be60f123845b13cef64829a175c45aea8bf24eafdc662c4384d20d1adc" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.execution-primitives`(kind `capability`)
 > **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
@@ -165,7 +165,7 @@ flowchart LR
 | `component.execution-primitives.host-roots` | Host Root Resolution | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.notify-read` | Notify Read Contract | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.execution-primitives.notify-read-core` | Notify Read Contract (core) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
-| `component.execution-primitives.primary` | Bounded Process And Lock Primitives | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.execution-primitives.primary` | Bounded Process And Lock Primitives | `20–50` 個文件 / `5000–10000` 行 | 未宣告 |
 | `component.execution-primitives.public-projections` | Public Text and Worktree Views | `2–5` 個文件 / `100–200` 行 | 未宣告 |
 | `component.execution-primitives.repository-registry` | Repository Registry and Account Home | `1–2` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.execution-primitives.runtime-closeout` | Runtime Closeout | `1–2` 個文件 / `200–500` 行 | 未宣告 |
