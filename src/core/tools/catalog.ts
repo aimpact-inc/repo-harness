@@ -10,8 +10,8 @@ import { decodeReaders } from '../evidence/decode-readers';
 import { SURFACE_OWNERS, type SurfaceOwner } from '../skill-surface/plugin-manifest';
 
 export const TOOL_CATALOG_VERSION = 'repo-harness.tool-catalog.v1';
-export const TOOL_KINDS = ['resource', 'local_tool', 'skill'] as const;
-export const TOOL_CATEGORIES = ['frontend', 'design', 'agent_skills', 'code_navigation', 'orchestration', 'agent_reference'] as const;
+export const TOOL_KINDS = ['resource', 'local_tool', 'skill', 'cli'] as const;
+export const TOOL_CATEGORIES = ['frontend', 'design', 'agent_skills', 'code_navigation', 'orchestration', 'agent_reference', 'research'] as const;
 const TOOL_TAG = /^[a-z0-9][a-z0-9-]{0,31}$/u;
 const TOOL_TAG_LIMIT = 6;
 /** Also the `#tools/<id>` path parameter. */

@@ -533,6 +533,26 @@
       "script_uninstall": [],
       "before_uninstall": [],
       "config_uninstall": null
+    },
+    {
+      "id": "gemini-notebook-mcp-cli",
+      "commands": [
+        "nlm",
+        "notebooklm-mcp"
+      ],
+      "repo": "jacob-bd/gemini-notebook-mcp-cli",
+      "monorepo": false,
+      "packages": [
+        {
+          "registry": "pypi",
+          "name": "notebooklm-mcp-cli"
+        }
+      ],
+      "install_roots": [],
+      "install_files": [],
+      "script_uninstall": [],
+      "before_uninstall": [],
+      "config_uninstall": "rm -rf ~/.notebooklm-mcp-cli"
     }
   ]
 }

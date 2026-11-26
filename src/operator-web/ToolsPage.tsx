@@ -141,6 +141,7 @@ export function ToolsPage({ toolId, onOpen, onClose, locale, t }: PageProps) {
       </div>
       <ToolGroup kind="local_tool" onOpen={onOpen} t={t} buttonRef={buttonRef} />
       <ToolGroup kind="skill" onOpen={onOpen} t={t} buttonRef={buttonRef} />
+      <ToolGroup kind="cli" onOpen={onOpen} t={t} buttonRef={buttonRef} />
       <ToolGroup kind="resource" onOpen={onOpen} t={t} buttonRef={buttonRef} />
       {selected && <ToolDrawer tool={selected} onClose={onClose} locale={locale} t={t} rowButton={() => buttons.current.get(selected.id) ?? null} />}
     </div>

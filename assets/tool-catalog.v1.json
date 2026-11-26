@@ -82,6 +82,27 @@
       "docs_anchor": "#hai-stack"
     },
     {
+      "id": "gemini-notebook-mcp-cli",
+      "name": "gemini-notebook-mcp-cli",
+      "kind": "cli",
+      "category": "research",
+      "url": "https://github.com/jacob-bd/gemini-notebook-mcp-cli",
+      "author": "jacob-bd",
+      "license": "MIT",
+      "tags": [
+        "cli",
+        "mcp",
+        "notebook"
+      ],
+      "owner": null,
+      "summary": {
+        "en": "CLI (nlm) and MCP server for Gemini Notebook (formerly NotebookLM): notebooks, sources, queries, research and studio artifacts.",
+        "zh": "Gemini Notebook（原 NotebookLM）的 CLI（nlm）与 MCP server，支持管理 notebook、来源、查询、研究与 Studio 内容。"
+      },
+      "detector": null,
+      "docs_anchor": null
+    },
+    {
       "id": "shaders",
       "name": "shader-effects-inc/shaders",
       "kind": "resource",

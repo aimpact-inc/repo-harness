@@ -5,6 +5,7 @@ import { decodeCliInventory, type CliInventoryEntry, type CliInventorySnapshotV1
 import type { OperatorTranslate } from './i18n';
 import { ageWords } from './labels';
 import { CommandLine, ExternalLink } from './ui';
+import { ToolGroup } from './ToolsPage';
 import { useObservationRefresh } from './useObservationRefresh';
 
 export type CliInventoryReader = (signal: AbortSignal) => Promise<CliInventorySnapshotV1>;
@@ -87,27 +88,35 @@ function CliRow({ entry, now, t }: { readonly entry: CliInventoryEntry; readonly
   </li>;
 }
 
-export function CliPage({ view, now, t }: { readonly view: CliView; readonly now: number; readonly t: OperatorTranslate }) {
+export function CliPage({ view, now, t, onOpenTool }: {
+  readonly view: CliView;
+  readonly now: number;
+  readonly t: OperatorTranslate;
+  readonly onOpenTool: (id: string) => void;
+}) {
   const { snapshot, failed } = view;
   const hasData = snapshot !== null && snapshot.status !== 'unavailable';
   const pending = !failed && (snapshot === null || snapshot.reason === 'collection_pending');
   const state = hasData ? failed ? 'refresh-failed' : snapshot.status : pending ? 'pending' : 'failed';
-  return <div className="flex min-w-0 flex-col gap-5" data-cli-page data-cli-state={state}>
-    <header className="border-b border-kumo-hairline pb-4">
-      <h1 className="text-xl font-semibold text-kumo-strong">{t('nav.cli')}</h1>
-      <p className="mt-1 text-xs text-kumo-subtle">{t('cli.scope')}</p>
-    </header>
-    {!hasData && (pending
-      ? <Empty size="sm" icon={<Loader size={24} />} title={t('cli.pending')} />
-      : <Empty size="sm" icon={<WarningCircleIcon size={32} />} title={t('cli.failed')} />)}
-    {hasData && <>
-      {(failed || snapshot.status === 'stale') && <Banner variant="alert" title={t('cli.stale')} />}
-      {snapshot.collected_at && <p className="text-xs text-kumo-subtle">{t('cli.collected', { age: ageWords(snapshot.collected_at, now, t) })}</p>}
-      {snapshot.entries.length === 0 ? <Empty size="sm" title={t('cli.empty')} /> : (
-        <ul className="min-w-0 divide-y divide-kumo-hairline rounded-xl border border-kumo-line bg-kumo-base px-4 sm:px-5">
-          {snapshot.entries.map(entry => <CliRow key={entry.id} entry={entry} now={now} t={t} />)}
-        </ul>
-      )}
-    </>}
-  </div>;
+  return <>
+    <div className="flex min-w-0 flex-col gap-5" data-cli-page data-cli-state={state}>
+      <header className="border-b border-kumo-hairline pb-4">
+        <h1 className="text-xl font-semibold text-kumo-strong">{t('nav.cli')}</h1>
+        <p className="mt-1 text-xs text-kumo-subtle">{t('cli.scope')}</p>
+      </header>
+      {!hasData && (pending
+        ? <Empty size="sm" icon={<Loader size={24} />} title={t('cli.pending')} />
+        : <Empty size="sm" icon={<WarningCircleIcon size={32} />} title={t('cli.failed')} />)}
+      {hasData && <>
+        {(failed || snapshot.status === 'stale') && <Banner variant="alert" title={t('cli.stale')} />}
+        {snapshot.collected_at && <p className="text-xs text-kumo-subtle">{t('cli.collected', { age: ageWords(snapshot.collected_at, now, t) })}</p>}
+        {snapshot.entries.length === 0 ? <Empty size="sm" title={t('cli.empty')} /> : (
+          <ul className="min-w-0 divide-y divide-kumo-hairline rounded-xl border border-kumo-line bg-kumo-base px-4 sm:px-5">
+            {snapshot.entries.map(entry => <CliRow key={entry.id} entry={entry} now={now} t={t} />)}
+          </ul>
+        )}
+      </>}
+    </div>
+    <ToolGroup kind="cli" onOpen={onOpenTool} t={t} />
+  </>;
 }
