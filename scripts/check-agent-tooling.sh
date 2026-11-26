@@ -239,6 +239,178 @@ function resolveExecutablePath(basePath) {
   return fileIsExecutable(basePath) ? basePath : null;
 }
 
+let cachedWindowsTargetCheckoutRoots = null;
+
+function stripWindowsExtendedPrefix(value) {
+  if (process.platform !== "win32") return value;
+  if (/^\\\\\?\\UNC\\/i.test(value)) return `\\\\${value.slice(8)}`;
+  if (/^\\\\\?\\[a-zA-Z]:[\\/]/.test(value)) return value.slice(4);
+  return value;
+}
+
+function isQualifiedInstallPath(value) {
+  if (path.sep === "\\") {
+    return /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\[^\\?.][^\\]*\\[^\\]+/.test(value);
+  }
+  return path.isAbsolute(value);
+}
+
+function isOutsideRelativePath(rel) {
+  return (
+    rel === ".." ||
+    rel.startsWith(`..${path.sep}`) ||
+    (path.sep === "\\" && rel.startsWith("../")) ||
+    path.isAbsolute(rel)
+  );
+}
+
+function isPathInsideDir(parentDir, candidatePath) {
+  const parent = path.resolve(stripWindowsExtendedPrefix(parentDir));
+  const candidate = path.resolve(stripWindowsExtendedPrefix(candidatePath));
+  const rel = path.relative(
+    process.platform === "win32" ? parent.toLowerCase() : parent,
+    process.platform === "win32" ? candidate.toLowerCase() : candidate
+  );
+  return !isOutsideRelativePath(rel);
+}
+
+function targetCheckoutRootFor(startDir, homeDirs) {
+  for (let current = startDir; ; current = path.dirname(current)) {
+    if (fs.existsSync(path.join(current, ".git"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+  }
+  const normalized = process.platform === "win32" ? startDir.toLowerCase() : startDir;
+  if (homeDirs.includes(normalized) || startDir === path.dirname(startDir)) {
+    return null;
+  }
+  return startDir;
+}
+
+function windowsTargetCheckoutRoots() {
+  if (cachedWindowsTargetCheckoutRoots !== null) return cachedWindowsTargetCheckoutRoots;
+  const homeDirs = [path.resolve(HOME), resolveRealPath(HOME)]
+    .filter(Boolean)
+    .map((value) => stripWindowsExtendedPrefix(value))
+    .map((value) => (process.platform === "win32" ? value.toLowerCase() : value));
+  const starts = [path.resolve(REPO_ROOT), resolveRealPath(REPO_ROOT)]
+    .filter(Boolean)
+    .map((value) => stripWindowsExtendedPrefix(value));
+  const roots = [];
+  const addRoot = (candidate) => {
+    if (!candidate) return;
+    const cleaned = stripWindowsExtendedPrefix(candidate);
+    if (!roots.includes(cleaned)) roots.push(cleaned);
+  };
+  for (const start of starts) {
+    const root = targetCheckoutRootFor(start, homeDirs);
+    if (root) {
+      addRoot(root);
+      addRoot(resolveRealPath(root));
+    }
+  }
+  cachedWindowsTargetCheckoutRoots = roots;
+  return roots;
+}
+
+function realOrResolvedAncestor(targetPath) {
+  const direct = resolveRealPath(targetPath);
+  if (direct) return direct;
+  const suffix = [];
+  let current = targetPath;
+  while (true) {
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    suffix.unshift(path.basename(current));
+    const realParent = resolveRealPath(parent);
+    if (realParent) return path.join(realParent, ...suffix);
+    current = parent;
+  }
+}
+
+/**
+ * Single owning Windows executable policy for every binary resolved or launched
+ * by this checker. On Windows, refuses any executable whose logical or real
+ * path (or PATH directory) lies inside the target checkout unless the caller
+ * holds the explicit CodeGraph index-mutation exception (`allowCheckoutLocal`).
+ * Env overrides set `failOnRefusal: true` so a checkout-pointing override fails
+ * closed with a clear message instead of silently falling back.
+ */
+function resolveWindowsLaunchTarget(candidatePath, options = {}) {
+  const {
+    allowCheckoutLocal = false,
+    dirPath = null,
+    label = "executable",
+    failOnRefusal = false,
+  } = options;
+  if (!candidatePath) return null;
+  if (process.platform !== "win32" || allowCheckoutLocal) {
+    return resolveExecutablePath(candidatePath);
+  }
+
+  const refusalReason = (targetPath, searchDir = null) => {
+    const normalizedTarget = stripWindowsExtendedPrefix(targetPath);
+    const normalizedDir = searchDir ? stripWindowsExtendedPrefix(searchDir) : null;
+    if (normalizedDir !== null && !isQualifiedInstallPath(normalizedDir)) {
+      return `${label} PATH directory is not a qualified Windows path: ${searchDir}`;
+    }
+    if (!isQualifiedInstallPath(normalizedTarget)) {
+      return `${label} is not a qualified Windows path: ${targetPath}`;
+    }
+    const checkoutRoots = windowsTargetCheckoutRoots();
+    if (checkoutRoots.length === 0) return null;
+    const realDir = normalizedDir ? realOrResolvedAncestor(normalizedDir) : null;
+    const realTarget = realOrResolvedAncestor(normalizedTarget);
+    const checkPaths = [
+      normalizedDir,
+      normalizedTarget,
+      realDir ? stripWindowsExtendedPrefix(realDir) : null,
+      realTarget ? stripWindowsExtendedPrefix(realTarget) : null,
+    ].filter(Boolean);
+    for (const checkoutRoot of checkoutRoots) {
+      if (checkPaths.some((entry) => isPathInsideDir(checkoutRoot, entry))) {
+        return `refused ${label} inside target checkout (${checkoutRoot}) during read-only Windows probe: ${targetPath}`;
+      }
+    }
+    return null;
+  };
+
+  const refuse = (reason) => {
+    if (failOnRefusal) {
+      console.error(`check-agent-tooling.sh: ${reason}`);
+      process.exit(1);
+    }
+    return null;
+  };
+
+  const qualifiedInput = dirPath === null ? path.resolve(REPO_ROOT, candidatePath) : candidatePath;
+  const inputRefusal = refusalReason(qualifiedInput, dirPath);
+  if (inputRefusal) return refuse(inputRefusal);
+
+  const resolved = resolveExecutablePath(qualifiedInput);
+  if (!resolved) return null;
+
+  const resolvedRefusal = refusalReason(resolved, dirPath);
+  if (resolvedRefusal) return refuse(resolvedRefusal);
+
+  return resolved;
+}
+
+function resolvePathCommand(command, options = {}) {
+  const pathValue = process.env.PATH || "";
+  for (const rawDir of pathValue.split(path.delimiter)) {
+    const dir = process.platform === "win32" ? rawDir.replace(/^"(.*)"$/, "$1") : rawDir;
+    if (!dir) continue;
+    const resolved = resolveWindowsLaunchTarget(path.join(dir, command), {
+      allowCheckoutLocal: options.allowCheckoutLocal === true,
+      dirPath: dir,
+      label: command,
+    });
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
 function detectTimeoutBin() {
   if (timeoutBin !== undefined) return timeoutBin;
   // Windows ships System32\timeout.exe (pause utility), not GNU coreutils timeout.
@@ -293,12 +465,38 @@ function detectSymlinkCapability() {
   }
 }
 
+function resolveRunExecutable(command, options = {}) {
+  if (process.platform !== "win32") return command;
+  const isBareCommand = !command.includes("/") && !command.includes("\\") && !/^[a-zA-Z]:/.test(command);
+  if (isBareCommand) {
+    return resolvePathCommand(command, { allowCheckoutLocal: options.allowCheckoutLocal === true });
+  }
+  return resolveWindowsLaunchTarget(command, {
+    allowCheckoutLocal: options.allowCheckoutLocal === true,
+    label: command,
+    failOnRefusal: true,
+  });
+}
+
 function run(command, args, options = {}) {
+  const executable = resolveRunExecutable(command, options);
+  if (!executable) {
+    return {
+      ok: false,
+      status: null,
+      signal: null,
+      error_code: "ENOENT",
+      stdout: "",
+      stderr: "",
+      error: `executable not found outside target checkout: ${command}`,
+      timed_out: false,
+    };
+  }
   const timeoutMs = options.timeoutMs ?? 0;
   const externalTimeout = timeoutMs > 0 ? detectTimeoutBin() : "";
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const spawnCommand = externalTimeout || command;
-  const spawnArgs = externalTimeout ? ["--kill-after=1s", `${timeoutSeconds}s`, command, ...args] : args;
+  const spawnCommand = externalTimeout || executable;
+  const spawnArgs = externalTimeout ? ["--kill-after=1s", `${timeoutSeconds}s`, executable, ...args] : args;
   const result = spawnSync(spawnCommand, spawnArgs, {
     cwd: options.cwd ?? REPO_ROOT,
     encoding: "utf8",
@@ -863,7 +1061,12 @@ function herdrCoreCapability() {
   if (!capability.path) capability.command = "rh update";
   else {
     try {
-      capability.version = execFileSync(capability.path, ["--version"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const hcBin = resolveWindowsLaunchTarget(capability.path, { label: "hc", failOnRefusal: true });
+      if (!hcBin) {
+        capability.status = "unavailable";
+        return capability;
+      }
+      capability.version = execFileSync(hcBin, ["--version"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim();
       const reported = /^hc (\d+\.\d+\.\d+)$/.exec(capability.version)?.[1] ?? null;
       if (!reported || !versionAtLeast(reported, HERDR_CORE_MIN_VERSION)) capability.status = "unavailable";
       if (reported && !versionAtLeast(reported, HERDR_CORE_MIN_VERSION)) capability.command = `hc update --version ${HERDR_CORE_MIN_VERSION}`;
@@ -974,7 +1177,8 @@ function detectRequiredHerdrSkill(herdrCoreRuntime) {
   } catch (_) { /* The catalog check below reports the invalid source. */ }
   let expected = null;
   if (herdrCoreRuntime.status === "present" && herdrCoreRuntime.path) {
-    const result = spawnSync(herdrCoreRuntime.path, ["--skill"], { encoding: "utf8", timeout: 5000 });
+    const hcBin = resolveWindowsLaunchTarget(herdrCoreRuntime.path, { label: "hc", failOnRefusal: true });
+    const result = hcBin ? spawnSync(hcBin, ["--skill"], { encoding: "utf8", timeout: 5000 }) : { status: 1, stdout: "" };
     if (result.status === 0) {
       try { expected = renderHerdrSkill(result.stdout); }
       catch (_) { /* Output that is not the hc manual remains unavailable. */ }
@@ -1630,73 +1834,6 @@ function parseCodeGraphProjectStatus(output) {
   return "unavailable";
 }
 
-function resolvePathCommand(command, accept = null) {
-  const pathValue = process.env.PATH || "";
-  for (const rawDir of pathValue.split(path.delimiter)) {
-    const dir = process.platform === "win32" ? rawDir.replace(/^"(.*)"$/, "$1") : rawDir;
-    if (!dir) continue;
-    const resolved = resolveExecutablePath(path.join(dir, command));
-    if (resolved && (!accept || accept(resolved, dir))) return resolved;
-  }
-  return null;
-}
-
-function isQualifiedInstallPath(value) {
-  if (path.sep === "\\") {
-    return /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
-  }
-  return path.isAbsolute(value);
-}
-
-function isPathInsideDir(parentDir, candidatePath) {
-  const parent = path.resolve(parentDir);
-  const candidate = path.resolve(candidatePath);
-  const rel = path.relative(
-    process.platform === "win32" ? parent.toLowerCase() : parent,
-    process.platform === "win32" ? candidate.toLowerCase() : candidate
-  );
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-function targetCheckoutRootFor(startDir, homeDirs) {
-  for (let current = startDir; ; current = path.dirname(current)) {
-    if (fs.existsSync(path.join(current, ".git"))) return current;
-    const parent = path.dirname(current);
-    if (parent === current) break;
-  }
-  const normalized = process.platform === "win32" ? startDir.toLowerCase() : startDir;
-  if (homeDirs.includes(normalized) || startDir === path.dirname(startDir)) {
-    return null;
-  }
-  return startDir;
-}
-
-function windowsTargetCheckoutRoots() {
-  const homeDirs = [path.resolve(HOME), resolveRealPath(HOME)]
-    .filter(Boolean)
-    .map((value) => (process.platform === "win32" ? value.toLowerCase() : value));
-  const starts = [path.resolve(REPO_ROOT), resolveRealPath(REPO_ROOT)].filter(Boolean);
-  const roots = [];
-  for (const start of starts) {
-    const root = targetCheckoutRootFor(start, homeDirs);
-    if (root && !roots.includes(root)) roots.push(root);
-  }
-  return roots;
-}
-
-function isOutsideWindowsTargetCheckout(candidatePath, dirPath) {
-  if (!isQualifiedInstallPath(dirPath) || !isQualifiedInstallPath(candidatePath)) return false;
-  const checkoutRoots = windowsTargetCheckoutRoots();
-  if (checkoutRoots.length === 0) return true;
-  const checkPaths = [dirPath, candidatePath, resolveRealPath(dirPath), resolveRealPath(candidatePath)].filter(Boolean);
-  for (const checkoutRoot of checkoutRoots) {
-    if (checkPaths.some((candidate) => isPathInsideDir(checkoutRoot, candidate))) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function codeGraphPackageDeclared() {
   const pkg = readJson(path.join(REPO_ROOT, "package.json"));
   if (!pkg || typeof pkg !== "object") return false;
@@ -1719,38 +1856,47 @@ function codeGraphPlatformBundleBin() {
 function resolveCodeGraphBinary() {
   const allowRepoLocal = process.env.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL !== "0";
   const allowGlobal = process.env.REPO_HARNESS_CODEGRAPH_ALLOW_GLOBAL !== "0";
-  const localCandidates = [];
   const localOverride = process.env.REPO_HARNESS_CODEGRAPH_LOCAL_BIN;
   const globalOverride = process.env.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
 
-  if (localOverride) localCandidates.push(localOverride);
+  let localBinPath = null;
+  if (localOverride) {
+    localBinPath = resolveWindowsLaunchTarget(localOverride, {
+      allowCheckoutLocal: allowWindowsRepoLocalCodegraph,
+      label: "REPO_HARNESS_CODEGRAPH_LOCAL_BIN",
+      failOnRefusal: true,
+    });
+  }
   // On Windows, read-only probes must never execute checkout-supplied launchers
   // (such as tracked node_modules/.bin/codegraph.exe) from the target repository;
   // only explicit ensure --init / --sync callers opt into checkout-local lookup.
-  if (allowRepoLocal && (process.platform !== "win32" || allowWindowsRepoLocalCodegraph)) {
-    localCandidates.push(codeGraphPlatformBundleBin());
-    localCandidates.push(path.join(REPO_ROOT, "node_modules", ".bin", "codegraph"));
-  }
-
-  let localBinPath = null;
-  for (const candidate of localCandidates) {
-    const resolved = resolveExecutablePath(candidate);
-    if (resolved) {
-      localBinPath = resolved;
-      break;
+  if (!localBinPath && allowRepoLocal && (process.platform !== "win32" || allowWindowsRepoLocalCodegraph)) {
+    const localCandidates = [
+      codeGraphPlatformBundleBin(),
+      path.join(REPO_ROOT, "node_modules", ".bin", "codegraph"),
+    ];
+    for (const candidate of localCandidates) {
+      const resolved = resolveWindowsLaunchTarget(candidate, {
+        allowCheckoutLocal: allowWindowsRepoLocalCodegraph,
+        label: "codegraph",
+      });
+      if (resolved) {
+        localBinPath = resolved;
+        break;
+      }
     }
   }
 
   let globalBinPath = null;
   if (allowGlobal) {
-    const resolvedOverride = globalOverride ? resolveExecutablePath(globalOverride) : null;
-    if (resolvedOverride) {
-      globalBinPath = resolvedOverride;
-    } else if (!globalOverride) {
-      globalBinPath = resolvePathCommand(
-        "codegraph",
-        process.platform === "win32" ? isOutsideWindowsTargetCheckout : null
-      );
+    if (globalOverride) {
+      globalBinPath = resolveWindowsLaunchTarget(globalOverride, {
+        allowCheckoutLocal: false,
+        label: "REPO_HARNESS_CODEGRAPH_GLOBAL_BIN",
+        failOnRefusal: true,
+      });
+    } else {
+      globalBinPath = resolvePathCommand("codegraph");
     }
   }
 
@@ -1783,8 +1929,8 @@ function resolveCodeGraphBinary() {
   };
 }
 
-function codeGraphProbe(binPath, args, timeoutMs, probes) {
-  const result = run(binPath, args, { timeoutMs });
+function codeGraphProbe(binPath, args, timeoutMs, probes, options = {}) {
+  const result = run(binPath, args, { timeoutMs, allowCheckoutLocal: options.allowCheckoutLocal === true });
   probes.push({
     bin_path: binPath,
     args,
@@ -1797,12 +1943,12 @@ function codeGraphProbe(binPath, args, timeoutMs, probes) {
   return result;
 }
 
-function codeGraphVersion(binPath, probes) {
+function codeGraphVersion(binPath, probes, options = {}) {
   if (!binPath) return null;
-  const result = codeGraphProbe(binPath, ["--version"], 1000, probes);
+  const result = codeGraphProbe(binPath, ["--version"], 1000, probes, options);
   if (result.ok) return result.stdout.trim() || null;
   if (result.timed_out) {
-    const retry = codeGraphProbe(binPath, ["--version"], 1000, probes);
+    const retry = codeGraphProbe(binPath, ["--version"], 1000, probes, options);
     if (retry.ok) return retry.stdout.trim() || null;
   }
   return null;
@@ -1828,8 +1974,9 @@ function detectCodeGraph(managed) {
   if (!managed.selected) return inactivePluginTool("codegraph", managed);
   const resolution = resolveCodeGraphBinary();
   const cliPresent = Boolean(resolution.bin_path);
+  const allowLocalProbe = allowWindowsRepoLocalCodegraph && resolution.source === "local";
   const probes = [];
-  const version = codeGraphVersion(resolution.bin_path, probes);
+  const version = codeGraphVersion(resolution.bin_path, probes, { allowCheckoutLocal: allowLocalProbe });
   const globalVersion = resolution.global_bin_path && resolution.global_bin_path !== resolution.bin_path
     ? codeGraphVersion(resolution.global_bin_path, probes)
     : resolution.source === "global"
@@ -1847,7 +1994,9 @@ function detectCodeGraph(managed) {
   }
 
   const selectedMcpConfigured = SELECTED_HOSTS.every((host) => mcpHosts[host]?.status === "configured");
-  const statusResult = cliPresent ? codeGraphProbe(resolution.bin_path, ["status", "."], 1500, probes) : null;
+  const statusResult = cliPresent
+    ? codeGraphProbe(resolution.bin_path, ["status", "."], 1500, probes, { allowCheckoutLocal: allowLocalProbe })
+    : null;
   const statusOutput = `${statusResult?.stdout || ""}\n${statusResult?.stderr || ""}`;
   const indexPath = path.join(REPO_ROOT, ".codegraph");
   const isDirectory = (candidate) => {
@@ -1987,10 +2136,13 @@ function archctxNodeCount(nodesDir) {
 }
 
 function bunExecutable() {
-  if (process.versions.bun) return process.execPath;
+  if (process.versions.bun) {
+    const selfBun = resolveWindowsLaunchTarget(process.execPath, { label: "bun" });
+    if (selfBun) return selfBun;
+  }
   const onPath = resolvePathCommand("bun");
   if (onPath) return onPath;
-  return resolveExecutablePath(path.join(HOME, ".bun", "bin", "bun"));
+  return resolveWindowsLaunchTarget(path.join(HOME, ".bun", "bin", "bun"), { label: "bun" });
 }
 
 /**
