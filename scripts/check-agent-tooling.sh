@@ -1625,15 +1625,71 @@ function parseCodeGraphProjectStatus(output) {
   return "unavailable";
 }
 
-function resolvePathCommand(command) {
+function resolvePathCommand(command, accept = null) {
   const pathValue = process.env.PATH || "";
   for (const rawDir of pathValue.split(path.delimiter)) {
     const dir = process.platform === "win32" ? rawDir.replace(/^"(.*)"$/, "$1") : rawDir;
     if (!dir) continue;
     const resolved = resolveExecutablePath(path.join(dir, command));
-    if (resolved) return resolved;
+    if (resolved && (!accept || accept(resolved, dir))) return resolved;
   }
   return null;
+}
+
+function isQualifiedInstallPath(value) {
+  if (path.sep === "\\") {
+    return /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
+  }
+  return path.isAbsolute(value);
+}
+
+function isPathInsideDir(parentDir, candidatePath) {
+  const parent = path.resolve(parentDir);
+  const candidate = path.resolve(candidatePath);
+  const rel = path.relative(
+    process.platform === "win32" ? parent.toLowerCase() : parent,
+    process.platform === "win32" ? candidate.toLowerCase() : candidate
+  );
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function targetCheckoutRootFor(startDir, homeDirs) {
+  for (let current = startDir; ; current = path.dirname(current)) {
+    if (fs.existsSync(path.join(current, ".git"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+  }
+  const normalized = process.platform === "win32" ? startDir.toLowerCase() : startDir;
+  if (homeDirs.includes(normalized) || startDir === path.dirname(startDir)) {
+    return null;
+  }
+  return startDir;
+}
+
+function windowsTargetCheckoutRoots() {
+  const homeDirs = [path.resolve(HOME), resolveRealPath(HOME)]
+    .filter(Boolean)
+    .map((value) => (process.platform === "win32" ? value.toLowerCase() : value));
+  const starts = [path.resolve(REPO_ROOT), resolveRealPath(REPO_ROOT)].filter(Boolean);
+  const roots = [];
+  for (const start of starts) {
+    const root = targetCheckoutRootFor(start, homeDirs);
+    if (root && !roots.includes(root)) roots.push(root);
+  }
+  return roots;
+}
+
+function isOutsideWindowsTargetCheckout(candidatePath, dirPath) {
+  if (!isQualifiedInstallPath(dirPath) || !isQualifiedInstallPath(candidatePath)) return false;
+  const checkoutRoots = windowsTargetCheckoutRoots();
+  if (checkoutRoots.length === 0) return true;
+  const checkPaths = [dirPath, candidatePath, resolveRealPath(dirPath), resolveRealPath(candidatePath)].filter(Boolean);
+  for (const checkoutRoot of checkoutRoots) {
+    if (checkPaths.some((candidate) => isPathInsideDir(checkoutRoot, candidate))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function codeGraphPackageDeclared() {
@@ -1663,7 +1719,9 @@ function resolveCodeGraphBinary() {
   const globalOverride = process.env.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
 
   if (localOverride) localCandidates.push(localOverride);
-  if (allowRepoLocal) {
+  // On Windows, read-only probes must never execute checkout-supplied launchers
+  // (such as tracked node_modules/.bin/codegraph.exe) from the target repository.
+  if (allowRepoLocal && process.platform !== "win32") {
     localCandidates.push(codeGraphPlatformBundleBin());
     localCandidates.push(path.join(REPO_ROOT, "node_modules", ".bin", "codegraph"));
   }
@@ -1683,7 +1741,10 @@ function resolveCodeGraphBinary() {
     if (resolvedOverride) {
       globalBinPath = resolvedOverride;
     } else if (!globalOverride) {
-      globalBinPath = resolvePathCommand("codegraph");
+      globalBinPath = resolvePathCommand(
+        "codegraph",
+        process.platform === "win32" ? isOutsideWindowsTargetCheckout : null
+      );
     }
   }
 

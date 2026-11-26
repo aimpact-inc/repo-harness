@@ -144,8 +144,23 @@ create_symlink_or_explain() {
   local dest="$2"
   local rc=0
   case "${OSTYPE:-}" in
-    # Git Bash ln -s copies directories unless MSYS enables native symlinks.
-    msys*|cygwin*|win32*) MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$source" "$dest" || rc=$? ;;
+    msys*|cygwin*|win32*)
+      # Directory junctions work for standard Windows accounts without
+      # Developer Mode or SeCreateSymbolicLinkPrivilege, while preserving
+      # lstat().isSymbolicLink() and readlinkSync() for the host-config gate.
+      local win_source="$source"
+      local win_dest="$dest"
+      if command -v cygpath >/dev/null 2>&1; then
+        win_source="$(cygpath -w "$source")" || rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+          win_dest="$(cygpath -w "$dest")" || rc=$?
+        fi
+      fi
+      if [[ "$rc" -eq 0 ]]; then
+        MSYS_NO_PATHCONV=1 bun -e 'const { symlinkSync } = require("node:fs"); const { resolve } = require("node:path"); symlinkSync(resolve(process.argv[1]), process.argv[2], "junction");' \
+          "$win_source" "$win_dest" || rc=$?
+      fi
+      ;;
     *) ln -s "$source" "$dest" || rc=$? ;;
   esac
   if [[ "$rc" -eq 0 ]]; then

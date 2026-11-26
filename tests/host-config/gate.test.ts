@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { FragmentEdit, HostConfigStrategy, HostPath } from '../../src/core/host-config/types';
 import {
   AntigravityHooksPathError,
@@ -18,7 +18,15 @@ import {
 import { configDiff, configStatus } from '../../src/effects/host-config/inspect';
 import { pathRecordHost } from '../../src/effects/host-config/path-records';
 import { openRepositoryGate, repositoryConfigPaths, repositoryExcludePath } from '../../src/effects/host-config/repository';
-import { observeEntryIdentity, type PathEntry } from '../../src/effects/host-config/whole-path';
+import {
+  keepPreimage,
+  observeEntryIdentity,
+  publishPathEntry,
+  restorePreimage,
+  stagePathEntry,
+  type PathEntry,
+  type WholePathLinkOps,
+} from '../../src/effects/host-config/whole-path';
 import { hostConfigPaths, hostConfigPathsAt, migrateLedgerSchema, parseLedger, putVault, readProjectedLedger, replaceTarget } from '../../src/effects/host-config/store';
 import { hookRenderingKey, jsonFragment, removeJsonHookCommand } from '../../src/core/host-config/json-fragment';
 import { sha256Prefixed } from '../../src/core/evidence/sha256';
@@ -1473,4 +1481,55 @@ test.skipIf(process.platform === 'win32')('Antigravity agentsDir enforces root-s
   expect(existsSync(agentFile)).toBe(false);
   expect(existsSync(agentDir)).toBe(false);
   expect(lstatSync(agentsDir).isDirectory()).toBe(true);
+});
+
+test('Windows whole-path links and preimages use directory junctions and move-aside rename without symlink privilege', () => {
+  const f = fixture();
+  const dirA = join(f.home, 'pkg-a');
+  const dirB = join(f.home, 'pkg-b');
+  const fileTarget = join(f.home, 'plain.txt');
+  const dest = join(f.home, '.codex', 'skills', 'repo-harness');
+  const tx = join(f.home, 'tx-win-junction');
+  mkdirSync(dirA, { recursive: true });
+  mkdirSync(dirB, { recursive: true });
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(join(dirA, 'SKILL.md'), 'a\n');
+  writeFileSync(join(dirB, 'SKILL.md'), 'b\n');
+  writeFileSync(fileTarget, 'plain\n');
+
+  const linkTypes: Array<string | undefined> = [];
+  const ops: WholePathLinkOps = {
+    platform: 'win32',
+    symlinkSync: ((target, path, type) => {
+      linkTypes.push(type ?? undefined);
+      if (type !== 'junction') {
+        throw Object.assign(new Error('EPERM: symlink privilege required'), { code: 'EPERM' });
+      }
+      symlinkSync(target, path, type);
+    }) as typeof symlinkSync,
+    renameSync: ((oldPath, newPath) => {
+      if (lstatSync(newPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        throw Object.assign(new Error('EPERM: cannot rename over Windows symlink/junction'), { code: 'EPERM' });
+      }
+      renameSync(oldPath, newPath);
+    }) as typeof renameSync,
+  };
+
+  const stagedA = stagePathEntry(dest, { type: 'symlink', target: dirA }, `${dest}.stage-a`, ops);
+  publishPathEntry(stagedA.staged, dest, ops);
+  expect(readlinkSync(dest)).toBe(dirA);
+
+  keepPreimage(tx, dest, ops);
+
+  const stagedB = stagePathEntry(dest, { type: 'symlink', target: dirB }, `${dest}.stage-b`, ops);
+  publishPathEntry(stagedB.staged, dest, ops);
+  expect(readlinkSync(dest)).toBe(dirB);
+  expect(readFileSync(join(dirA, 'SKILL.md'), 'utf8')).toBe('a\n');
+
+  restorePreimage(tx, dest, `${dest}.restore`, ops);
+  expect(readlinkSync(dest)).toBe(dirA);
+  expect(readFileSync(join(dirB, 'SKILL.md'), 'utf8')).toBe('b\n');
+  expect(linkTypes).toEqual(['junction', 'junction', 'junction', 'junction']);
+
+  expect(() => stagePathEntry(dest, { type: 'symlink', target: fileTarget }, `${dest}.file-link`, ops)).toThrow('EPERM');
 });

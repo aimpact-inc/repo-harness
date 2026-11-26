@@ -972,6 +972,42 @@ describe("Codex installed copy sync", () => {
     }
   }, 30_000);
 
+  test("Windows link mode creates directory junctions without calling ln", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-win-junction-"));
+    const source = join(tmp, "source");
+    const dest = join(tmp, "dest", "repo-harness");
+    const fakeBin = join(tmp, "fake-bin");
+    const lnLog = join(tmp, "ln.log");
+    const bunLog = join(tmp, "bun.log");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(dirname(dest), { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(source, "SKILL.md"), "---\nname: repo-harness\n---\n");
+      writeExecutable(join(fakeBin, "ln"), `#!/bin/bash\necho "$*" >> "${lnLog}"\nexit 99\n`);
+      writeExecutable(join(fakeBin, "bun"), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunLog}"\nexec "${process.execPath}" "$@"\n`);
+
+      const script = readFileSync(join(ROOT, "scripts", "sync-codex-installed-copies.sh"), "utf-8");
+      const match = script.match(/create_symlink_or_explain\(\) \{[\s\S]*?\n\}/);
+      expect(match).not.toBeNull();
+      const harness = `set -euo pipefail\n${match![0]}\ncreate_symlink_or_explain "$1" "$2"\n`;
+
+      const result = spawnSync("bash", ["-c", harness, "sync-test", source, dest], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: { ...process.env, OSTYPE: "msys", PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(lnLog)).toBe(false);
+      expect(readFileSync(bunLog, "utf-8")).toContain('"junction"');
+      expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+      expect(realpathSync(dest)).toBe(realpathSync(source));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("managed-tree-hash matches the retired shell hash so existing owner markers still verify", () => {
     const tmp = join(tmpdir(), `repo-harness-tree-hash-${Date.now()}`);
     const tree = join(tmp, "tree");

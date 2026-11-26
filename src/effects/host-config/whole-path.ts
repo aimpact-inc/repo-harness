@@ -1,6 +1,7 @@
-import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
+import { dlopen, FFIType, ptr } from 'bun:ffi';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError, type PathCommitted, type PathRecord } from '../../core/host-config/types';
 import { retryWindowsSharingRace } from '../atomic-append';
@@ -94,14 +95,73 @@ export function adoptedIdentity(key: string, record: PathRecord): string | null 
   return before !== null && pathRecordContentHolds(key, record) && observeEntryIdentity(entry) === before ? before : null;
 }
 
+export interface WholePathLinkOps {
+  readonly platform?: NodeJS.Platform;
+  readonly symlinkSync?: typeof symlinkSync;
+  readonly renameSync?: typeof renameSync;
+  readonly isWindowsDirectoryLink?: (path: string) => boolean;
+}
+
+const INVALID_FILE_ATTRIBUTES = 0xffffffff;
+const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+let winGetFileAttributes: ((path: ReturnType<typeof ptr>) => number) | null = null;
+
+function isWindowsLocalDrivePath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value);
+}
+
+function isJunctionEligibleTarget(target: string, platform: NodeJS.Platform): boolean {
+  if (platform !== 'win32') return false;
+  return process.platform === 'win32' ? isWindowsLocalDrivePath(target) : isAbsolute(target);
+}
+
+function isWindowsDirectoryLink(path: string): boolean {
+  const targetStat = statSync(path, { throwIfNoEntry: false });
+  if (targetStat !== undefined) return targetStat.isDirectory();
+  if (process.platform !== 'win32') return false;
+  winGetFileAttributes ??= dlopen('kernel32.dll', {
+    GetFileAttributesW: { args: [FFIType.ptr], returns: FFIType.u32 },
+  }).symbols.GetFileAttributesW as (path: ReturnType<typeof ptr>) => number;
+  const attrs = winGetFileAttributes(ptr(Buffer.from(`${path}\0`, 'utf16le')));
+  return attrs !== INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) !== 0;
+}
+
+function copyPreimageEntry(source: string, dest: string, ops: WholePathLinkOps = {}): void {
+  const platform = ops.platform ?? process.platform;
+  const link = ops.symlinkSync ?? symlinkSync;
+  const checkDirLink = ops.isWindowsDirectoryLink ?? isWindowsDirectoryLink;
+  if (platform === 'win32' && lstatSync(source).isSymbolicLink()) {
+    const linkTarget = readlinkSync(source);
+    if (isJunctionEligibleTarget(linkTarget, platform) && checkDirLink(source)) {
+      link(linkTarget, dest, 'junction');
+      return;
+    }
+  }
+  cpSync(source, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+}
+
 /** Write the entry beside the path, or at `staged`; the caller records it and then publishes it. */
-export function stagePathEntry(path: string, entry: PathEntry, staged = `${path}.${randomUUID()}.rh-stage`): { readonly staged: string; readonly committed: PathCommitted } {
+export function stagePathEntry(
+  path: string,
+  entry: PathEntry,
+  staged = `${path}.${randomUUID()}.rh-stage`,
+  ops: WholePathLinkOps = {},
+): { readonly staged: string; readonly committed: PathCommitted } {
+  const platform = ops.platform ?? process.platform;
+  const link = ops.symlinkSync ?? symlinkSync;
   try {
     if (entry.type === 'file') {
       writeFileSync(staged, entry.bytes, { flag: 'wx', mode: 0o600 });
       chmodSync(staged, (entry.mode ?? 0o644) & 0o777);
-    } else if (entry.type === 'symlink') symlinkSync(entry.target, staged);
-    else cpSync(entry.source, staged, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    } else if (entry.type === 'symlink') {
+      if (isJunctionEligibleTarget(entry.target, platform) && statSync(entry.target, { throwIfNoEntry: false })?.isDirectory()) {
+        link(entry.target, staged, 'junction');
+      } else {
+        link(entry.target, staged);
+      }
+    } else {
+      cpSync(entry.source, staged, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    }
     return { staged, committed: observePathEntry(staged)! };
   } catch (error) {
     rmSync(staged, { recursive: true, force: true });
@@ -111,20 +171,27 @@ export function stagePathEntry(path: string, entry: PathEntry, staged = `${path}
 
 /**
  * Put the staged entry at the path. A file or link replaces the old entry by
- * one rename; a directory cannot, so the old tree moves aside first and goes
- * after the new one is in place.
+ * one rename; a directory (or on Windows, a symlink/junction) cannot, so the
+ * old entry moves aside first and goes after the new one is in place.
  */
-export function publishPathEntry(staged: string, path: string): void {
+export function publishPathEntry(staged: string, path: string, ops: WholePathLinkOps = {}): void {
+  const platform = ops.platform ?? process.platform;
+  const rename = ops.renameSync ?? renameSync;
   const old = lstatSync(path, { throwIfNoEntry: false });
-  if (!old?.isDirectory() || old.isSymbolicLink()) {
-    retryWindowsSharingRace(() => renameSync(staged, path));
+  const needsMoveAside = old !== undefined && (
+    (old.isDirectory() && !old.isSymbolicLink())
+    || (platform === 'win32' && (old.isSymbolicLink() || lstatSync(staged).isSymbolicLink()))
+  );
+  if (!needsMoveAside) {
+    retryWindowsSharingRace(() => rename(staged, path));
     return;
   }
   const aside = `${path}.${randomUUID()}.rh-old`;
-  retryWindowsSharingRace(() => renameSync(path, aside));
-  try { retryWindowsSharingRace(() => renameSync(staged, path)); }
-  catch (error) { renameSync(aside, path); throw error; }
-  rmSync(aside, { recursive: true, force: true });
+  retryWindowsSharingRace(() => rename(path, aside));
+  try { retryWindowsSharingRace(() => rename(staged, path)); }
+  catch (error) { rename(aside, path); throw error; }
+  if (old.isSymbolicLink() || !old.isDirectory()) retryWindowsSharingRace(() => rmSync(aside, { force: true }));
+  else rmSync(aside, { recursive: true, force: true });
 }
 
 export function discardStagedEntry(staged: string): void {
@@ -147,7 +214,7 @@ export function preimagePath(transaction: string, key: string): string {
 }
 
 /** Keep the first entry of the transaction at the path: a later write in the same transaction does not replace it. */
-export function keepPreimage(transaction: string, key: string): void {
+export function keepPreimage(transaction: string, key: string, ops: WholePathLinkOps = {}): void {
   const target = preimagePath(transaction, key);
   if (lstatSync(target, { throwIfNoEntry: false }) || lstatSync(target + '.absent', { throwIfNoEntry: false })) return;
   mkdirSync(transaction, { recursive: true, mode: 0o700 });
@@ -156,7 +223,7 @@ export function keepPreimage(transaction: string, key: string): void {
     writeFileSync(target + '.absent', '', { flag: 'wx', mode: 0o600 });
     return;
   }
-  cpSync(key, target, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+  copyPreimageEntry(key, target, ops);
 }
 
 /** True when the transaction holds an entry for the path. */
@@ -166,10 +233,16 @@ export function hasPreimage(transaction: string, key: string): boolean {
 }
 
 /** Put the transaction's entry back at the path, in place of what is there; the copy waits at `staged` before the rename. */
-export function restorePreimage(transaction: string, key: string, staged = `${key}.${randomUUID()}.rh-stage`): void {
+export function restorePreimage(transaction: string, key: string, staged = `${key}.${randomUUID()}.rh-stage`, ops: WholePathLinkOps = {}): void {
   const source = preimagePath(transaction, key);
+  const rename = ops.renameSync ?? renameSync;
   if (lstatSync(source + '.absent', { throwIfNoEntry: false })) { removePathEntry(key); return; }
-  cpSync(source, staged, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-  if (lstatSync(key, { throwIfNoEntry: false })) publishPathEntry(staged, key);
-  else retryWindowsSharingRace(() => renameSync(staged, key));
+  copyPreimageEntry(source, staged, ops);
+  try {
+    if (lstatSync(key, { throwIfNoEntry: false })) publishPathEntry(staged, key, ops);
+    else retryWindowsSharingRace(() => rename(staged, key));
+  } catch (error) {
+    rmSync(staged, { recursive: true, force: true });
+    throw error;
+  }
 }
