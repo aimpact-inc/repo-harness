@@ -72,7 +72,7 @@
     "smoke:tarball-install": "bash scripts/check-tarball-install-smoke.sh",
     "check:context-files": "rh run check-context-files",
     "check:deploy-sql": "rh run check-deploy-sql-order",
-    "build:hook-bundle": "bun build src/cli/hook-entry.ts --target=bun --outfile dist/hook-entry.js --define REPO_HARNESS_SINGLE_FILE_BUNDLE=true && head -1 dist/hook-entry.js | grep -q '^#!/usr/bin/env bun' && ! grep -q REPO_HARNESS_SINGLE_FILE_BUNDLE dist/hook-entry.js",
+    "build:hook-bundle": "bun build src/cli/hook-entry.ts --target=bun --outfile dist/hook-entry.js --define REPO_HARNESS_SINGLE_FILE_BUNDLE=true && bun -e \"const t=await Bun.file('dist/hook-entry.js').text();if(!/^#!\\/usr\\/bin\\/env bun\\r?\\n/.test(t)||t.includes('REPO_HARNESS_SINGLE_FILE_BUNDLE'))process.exit(1)\"",
     "build:operator-web": "vite build --config vite.operator.config.ts",
     "dev:operator": "vite --config vite.operator.config.ts",
     "prepack": "bun run build:hook-bundle 1>&2 && bun run build:oar-review-host 1>&2",

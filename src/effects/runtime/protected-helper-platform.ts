@@ -307,12 +307,50 @@ function executableFromPath(name: string, env: NodeJS.ProcessEnv, access: Protec
   throw new Error(`Windows protected-helper install could not resolve ${name}.exe from the trusted install PATH`);
 }
 
+function resolveScoopGitShim(gitBin: string, access: ProtectedHelperFileAccess): string {
+  const shimPath = win32.join(win32.dirname(gitBin), 'git.shim');
+  if (!access.exists(shimPath)) return gitBin;
+  const verifiedShim = requireWindowsRegularFile(shimPath, 'Scoop git.shim', access);
+  const pathLines = access.readFile(verifiedShim)
+    .split(/\r?\n/)
+    .map((line) => /^\s*path\s*=\s*(.+?)\s*$/i.exec(line)?.[1] ?? null)
+    .filter((value): value is string => value !== null);
+  const [rawTarget] = pathLines;
+  if (pathLines.length !== 1 || rawTarget === undefined) {
+    throw new Error(`Windows protected-helper install requires a single path entry in Scoop git.shim: ${verifiedShim}`);
+  }
+  const target = rawTarget.replace(/^"(.*)"$/, '$1').trim();
+  if (win32.basename(target).toLowerCase() !== 'git.exe') {
+    throw new Error(`Windows protected-helper install requires Scoop git.shim to target git.exe (found ${target})`);
+  }
+  return requireWindowsRegularFile(
+    requireWindowsAbsolute(target, 'Scoop git.shim target'),
+    'Scoop git.shim target',
+    access,
+  );
+}
+
+/**
+ * Resolve the Bash executable for repo-harness shell scripts. On Windows, bare
+ * `bash` on PATH can resolve to WSL's stub `WindowsApps\bash.exe`; use the
+ * pinned Git-for-Windows Bash from the protected-helper contract instead.
+ */
+export function resolvePlatformBashBin(options: ResolveOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32') return 'bash';
+  return resolveProtectedHelperPlatform({ ...options, platform }).bashBin;
+}
+
 export function discoverWindowsProtectedHelperContract(options: DiscoverOptions = {}): WindowsProtectedHelperContract {
   const env = options.env ?? process.env;
   const access = options.fileAccess ?? DEFAULT_FILE_ACCESS;
   const discoveredGit = executableFromPath('git', env, access);
   let gitBin = requireWindowsRegularFile(discoveredGit, 'discovered git.exe', access);
-  const gitParent = win32.basename(win32.dirname(gitBin)).toLowerCase();
+  let gitParent = win32.basename(win32.dirname(gitBin)).toLowerCase();
+  if (gitParent === 'shims') {
+    gitBin = resolveScoopGitShim(gitBin, access);
+    gitParent = win32.basename(win32.dirname(gitBin)).toLowerCase();
+  }
   if (gitParent !== 'cmd' && gitParent !== 'bin') {
     throw new Error(`Windows protected-helper install requires Git for Windows cmd\\git.exe or bin\\git.exe (found ${gitBin})`);
   }

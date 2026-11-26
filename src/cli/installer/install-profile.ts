@@ -35,7 +35,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { requireHome } from '../../effects/repo-harness-home';
-import { basename, delimiter, dirname, join } from 'path';
+import { basename, dirname, join, posix, win32 } from 'path';
 import {
   compareManagedHookProjection,
   type HookHost,
@@ -528,8 +528,8 @@ export function planSkillSync(plugins: readonly PluginId[], env: NodeJS.ProcessE
     linkSources.set('repo-harness', sourceRoot);
     for (const pkg of catalog.packages) {
       if (pkg.kind !== 'facade' || pkg.source === null || !selected.has(pkg.name)) continue;
-      const target = `${sourceRoot}/${pkg.source}`;
-      if (existsSync(`${target}/SKILL.md`)) linkSources.set(pkg.name, target);
+      const target = join(sourceRoot, pkg.source);
+      if (existsSync(join(target, 'SKILL.md'))) linkSources.set(pkg.name, target);
     }
   }
   const declared = new Map<string, { path: string; owner: SurfaceOwner; adopt?: string }>();
@@ -1142,12 +1142,28 @@ function canonicalEvidence(home: string, hosts: readonly SkillHost[], relativePa
   return existing(hosts.flatMap((host) => relativePaths.map((relative) => join(hostSkillRoot(home, host, env), 'repo-harness', relative))));
 }
 
+export function executableCandidatePaths(
+  name: string,
+  home: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const pathApi = platform === 'win32' ? win32 : posix;
+  const pathDelimiter = platform === 'win32' ? ';' : ':';
+  const bunRoot = env.BUN_INSTALL ?? pathApi.join(home, '.bun');
+  const extensions = platform === 'win32'
+    ? (env.PATHEXT || process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').map((ext) => ext.trim()).filter(Boolean)
+    : [''];
+  const pathDirs = (env.PATH ?? '')
+    .split(pathDelimiter)
+    .map((dir) => (platform === 'win32' ? dir.replace(/^"(.*)"$/, '$1') : dir))
+    .filter(Boolean);
+  const directories = [pathApi.join(bunRoot, 'bin'), ...pathDirs];
+  return [...new Set(directories.flatMap((directory) => extensions.map((extension) => pathApi.join(directory, `${name}${extension}`))))];
+}
+
 function executableEvidence(name: string, env: NodeJS.ProcessEnv): string[] {
-  const home = requireHome(env);
-  const bunRoot = env.BUN_INSTALL ?? join(home, '.bun');
-  const candidates = [join(bunRoot, 'bin', name)];
-  for (const directory of (env.PATH ?? '').split(delimiter).filter(Boolean)) candidates.push(join(directory, name));
-  return existing([...new Set(candidates)]);
+  return existing(executableCandidatePaths(name, requireHome(env), env));
 }
 
 /** The facades and provider skills that an owner's probe requires. */
@@ -1184,9 +1200,16 @@ function probe(checks: Readonly<Record<string, readonly string[]>>): OwnerProbe 
   return { status: missing.length === 0 ? 'present' : 'missing', evidence: Object.values(checks).flat(), missing };
 }
 
+export function canonicalEvidenceMatchesAll(evidence: readonly string[], relativePaths: readonly string[]): boolean {
+  return relativePaths.every((relative) => {
+    const suffix = `/${relative.replaceAll('\\', '/')}`;
+    return evidence.some((path) => path.replaceAll('\\', '/').endsWith(suffix));
+  });
+}
+
 function allOrNone(home: string, hosts: readonly SkillHost[], relativePaths: readonly string[], env: NodeJS.ProcessEnv): string[] {
   const evidence = canonicalEvidence(home, hosts, relativePaths, env);
-  return relativePaths.every((relative) => evidence.some((path) => path.endsWith(relative))) ? evidence : [];
+  return canonicalEvidenceMatchesAll(evidence, relativePaths) ? evidence : [];
 }
 
 function probeCore(env: NodeJS.ProcessEnv, catalog: SkillSurfaceCatalog, hosts: readonly SkillHost[], refused: readonly string[]): OwnerProbe {

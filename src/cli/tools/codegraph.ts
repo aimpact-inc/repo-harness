@@ -17,6 +17,7 @@ import { tmpdir } from "os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
+import { resolvePlatformBashBin } from "../../effects/runtime/protected-helper-platform";
 import { ARCHITECTURE_CONTRACT_VERSION, type ArchitectureDoctorCheck, type CodegraphHostTarget, type CodegraphPort, type CodegraphSetupStep } from "../../core/architecture/contracts";
 
 const CODEGRAPH_SCOPED_MCP_ARGS = ["serve", "--mcp", "--path", "."] as const;
@@ -135,7 +136,7 @@ function readJson(path: string) {
 function readToolingReport(repoRoot: string, env?: NodeJS.ProcessEnv, host: CodegraphHostTarget = "codex") {
   const checker = join(REPO_ROOT, "scripts", "check-agent-tooling.sh");
   // This module runs only in a process that holds the architecture plugin.
-  const report = runJson("bash", [checker, "--json", "--architecture-selected", "--host", host], repoRoot, env);
+  const report = runJson(resolvePlatformBashBin(), [checker, "--json", "--architecture-selected", "--host", host], repoRoot, env);
   return report.tools.codegraph;
 }
 

@@ -1171,7 +1171,7 @@ describe('install command global runtime bootstrap', () => {
       });
 
       expect(result.exitCode, result.stdout).toBe(0);
-      expect(readFileSync(bunLog, 'utf-8').trim().split('\n')).toContain(`add -g ${source}`);
+      expect(readFileSync(bunLog, 'utf-8').trim().split('\n')).toContain(`add -g --omit=dev ${source}`);
       expect(result.steps.find((step) => step.step === 'sync repo-harness skill runtime')?.stdout).toContain(
         'sync runtime',
       );
@@ -1966,7 +1966,7 @@ exit 0
           'set -euo pipefail',
           `printf '%s\\n' "$*" >> "${bunLog}"`,
           'if [[ "${1:-}" == "--version" ]]; then echo "1.4.0"; exit 0; fi',
-          `if [[ "$*" == "add -g ${source}" ]]; then`,
+          `if [[ "$*" == "add -g --omit=dev ${source}" ]]; then`,
           '  echo "error: DependencyLoop" >&2',
           '  echo "Resolution: repo-harness@../../../Projects/repo-harness" >&2',
           '  echo "Dependency: repo-harness@^9.9.9" >&2',
@@ -2017,12 +2017,63 @@ exit 0
       expect(install?.detail).toBe('version=9.9.9; repaired=packed-tarball');
       const bunCommands = readFileSync(bunLog, 'utf-8').trim().split('\n');
       expect(bunCommands[0]).toBe('--version');
-      expect(bunCommands[1]).toBe(`add -g ${source}`);
+      expect(bunCommands[1]).toBe(`add -g --omit=dev ${source}`);
       expect(bunCommands[2]).toBe('remove -g repo-harness');
       expect(bunCommands[3]).toBe(`add -g ${join(home, '.repo-harness', 'packages', 'repo-harness-9.9.9.tgz')}`);
       expect(existsSync(join(home, '.repo-harness', 'packages', 'repo-harness-9.9.9.tgz'))).toBe(true);
       expect(readdirSync(packDir).sort()).toEqual(['other-1.0.0.tgz', 'repo-harness-0.10.0-local.tgz', 'repo-harness-9.9.9.tgz']);
       expect(readFileSync(npmLog, 'utf-8')).toContain('pack --json --pack-destination');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('builds missing dist/hook-entry.js before installing a local checkout CLI', () => {
+    registerArchitecturePlugin();
+    const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-bundle-'));
+    const source = join(tmp, 'source');
+    const home = join(tmp, 'home');
+    const repo = join(tmp, 'repo');
+    const fakeBin = join(tmp, 'bin');
+    const bunLog = join(tmp, 'bun.log');
+    try {
+      mkdirSync(join(source, 'src', 'cli'), { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFakeHc(fakeBin);
+      setupFakeSource(source);
+      setupConsoleFixture(home, source);
+      writeFileSync(join(source, 'src', 'cli', 'hook-entry.ts'), 'export {};\n');
+      writeExecutable(
+        tmp,
+        join(fakeBin, 'bun'),
+        [
+          '#!/bin/bash',
+          'set -euo pipefail',
+          `printf '%s\\n' "$*" >> "${bunLog}"`,
+          'if [[ "${1:-}" == "--version" ]]; then echo "1.4.0"; exit 0; fi',
+          'if [[ "${1:-}" == "run" && "${2:-}" == "build:hook-bundle" ]]; then mkdir -p dist; printf "#!/usr/bin/env bun\\n" > dist/hook-entry.js; exit 0; fi',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+
+      const result = runGlobalRuntimeSetup({
+        plugins: [],
+        sourceRoot: source,
+        cwd: repo,
+        syncSkill: false,
+        hostAdapters: false,
+        externalSkills: false,
+        codegraph: false,
+        env: { ...sanitizedChildEnv(home), HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
+      });
+
+      expect(result.exitCode, result.stdout).toBe(0);
+      const bunCommands = readFileSync(bunLog, 'utf-8').trim().split('\n');
+      expect(bunCommands).toEqual(['--version', 'run build:hook-bundle', `add -g --omit=dev ${source}`]);
+      expect(existsSync(join(source, 'dist', 'hook-entry.js'))).toBe(true);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

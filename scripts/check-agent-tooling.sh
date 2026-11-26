@@ -202,6 +202,7 @@ function readJson(filePath) {
 
 function fileIsExecutable(filePath) {
   try {
+    if (!fs.statSync(filePath).isFile()) return false;
     fs.accessSync(filePath, fs.constants.X_OK);
     return true;
   } catch (_error) {
@@ -209,8 +210,38 @@ function fileIsExecutable(filePath) {
   }
 }
 
+function windowsPathExtensions() {
+  return (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((ext) => ext.trim())
+    .filter(Boolean);
+}
+
+function resolveExecutablePath(basePath) {
+  if (!basePath) return null;
+  if (process.platform !== "win32") {
+    return fileIsExecutable(basePath) ? basePath : null;
+  }
+  const extensions = windowsPathExtensions();
+  const lower = basePath.toLowerCase();
+  if (extensions.some((ext) => lower.endsWith(ext.toLowerCase()))) {
+    return fileIsExecutable(basePath) ? basePath : null;
+  }
+  for (const ext of extensions) {
+    const candidate = `${basePath}${ext}`;
+    if (fileIsExecutable(candidate)) return candidate;
+  }
+  return fileIsExecutable(basePath) ? basePath : null;
+}
+
 function detectTimeoutBin() {
   if (timeoutBin !== undefined) return timeoutBin;
+  // Windows ships System32\timeout.exe (pause utility), not GNU coreutils timeout.
+  // spawnSync enforces timeout natively on Windows.
+  if (process.platform === "win32") {
+    timeoutBin = "";
+    return timeoutBin;
+  }
   timeoutBin = resolvePathCommand("timeout") || "";
   return timeoutBin;
 }
@@ -1596,10 +1627,11 @@ function parseCodeGraphProjectStatus(output) {
 
 function resolvePathCommand(command) {
   const pathValue = process.env.PATH || "";
-  for (const dir of pathValue.split(path.delimiter)) {
+  for (const rawDir of pathValue.split(path.delimiter)) {
+    const dir = process.platform === "win32" ? rawDir.replace(/^"(.*)"$/, "$1") : rawDir;
     if (!dir) continue;
-    const candidate = path.join(dir, command);
-    if (fileIsExecutable(candidate)) return candidate;
+    const resolved = resolveExecutablePath(path.join(dir, command));
+    if (resolved) return resolved;
   }
   return null;
 }
@@ -1638,16 +1670,18 @@ function resolveCodeGraphBinary() {
 
   let localBinPath = null;
   for (const candidate of localCandidates) {
-    if (candidate && fileIsExecutable(candidate)) {
-      localBinPath = candidate;
+    const resolved = resolveExecutablePath(candidate);
+    if (resolved) {
+      localBinPath = resolved;
       break;
     }
   }
 
   let globalBinPath = null;
   if (allowGlobal) {
-    if (globalOverride && fileIsExecutable(globalOverride)) {
-      globalBinPath = globalOverride;
+    const resolvedOverride = globalOverride ? resolveExecutablePath(globalOverride) : null;
+    if (resolvedOverride) {
+      globalBinPath = resolvedOverride;
     } else if (!globalOverride) {
       globalBinPath = resolvePathCommand("codegraph");
     }
@@ -1889,8 +1923,7 @@ function bunExecutable() {
   if (process.versions.bun) return process.execPath;
   const onPath = resolvePathCommand("bun");
   if (onPath) return onPath;
-  const homeBun = path.join(HOME, ".bun", "bin", "bun");
-  return fileIsExecutable(homeBun) ? homeBun : null;
+  return resolveExecutablePath(path.join(HOME, ".bun", "bin", "bun"));
 }
 
 /**

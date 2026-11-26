@@ -29,6 +29,7 @@ import { planAdoption } from '../../effects/adoption/plan';
 import { ReviewBaseUnresolvedError } from '../../effects/adoption/standard-plan';
 import type { AdoptionPlan } from '../../core/adoption/operations';
 import { isRepoHarnessSourceCheckout } from '../../effects/source-checkout';
+import { resolvePlatformBashBin } from '../../effects/runtime/protected-helper-platform';
 import { resolveRepoRoot } from '../hook/runtime';
 import { piRulesPrecedenceConflict, resolveUserConfigFile } from '../../effects/host-config/gate';
 import {
@@ -698,7 +699,13 @@ function collectToolingReport(sourceRoot: string, cwd: string, target: InitHookT
   if (checkUpdates) args.push('--check-updates');
   if (!existsSync(script)) return { command: ['bash', ...args], error: `script not found: ${script}` };
 
-  const result = spawnSync('bash', args, {
+  let bashBin: string;
+  try {
+    bashBin = resolvePlatformBashBin();
+  } catch (error) {
+    return { command: ['bash', ...args], error: error instanceof Error ? error.message : String(error) };
+  }
+  const result = spawnSync(bashBin, args, {
     cwd,
     encoding: 'utf-8',
     env: { ...process.env, ...(env ?? {}) },
@@ -706,13 +713,13 @@ function collectToolingReport(sourceRoot: string, cwd: string, target: InitHookT
   });
   if (result.stdout?.trim()) {
     try {
-      return { command: ['bash', ...args], report: JSON.parse(result.stdout) as ToolingReport };
+      return { command: [bashBin, ...args], report: JSON.parse(result.stdout) as ToolingReport };
     } catch (error) {
-      return { command: ['bash', ...args], error: `could not parse tooling JSON: ${(error as Error).message}` };
+      return { command: [bashBin, ...args], error: `could not parse tooling JSON: ${(error as Error).message}` };
     }
   }
   return {
-    command: ['bash', ...args],
+    command: [bashBin, ...args],
     error: result.stderr || result.error?.message || `tooling check exited ${result.status ?? 'without status'}`,
   };
 }
