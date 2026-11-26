@@ -18,6 +18,8 @@ responsibilities:
 source:
   include:
     - src/effects/process-*.ts
+    - src/effects/process-windows-launcher.mjs
+    - src/effects/process-windows-launcher.d.mts
     - src/effects/expensive-run-lock.ts
     - src/effects/readonly-observation.ts
     - src/effects/observation-loop.ts

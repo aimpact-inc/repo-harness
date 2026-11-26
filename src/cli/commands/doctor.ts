@@ -151,16 +151,17 @@ function checkPath(): DoctorCheckResult {
   };
 }
 
-export function checkPiHost(env: NodeJS.ProcessEnv = process.env): DoctorCheckResult[] {
-  const executable = piExecutable(env);
-  const resolutionError = executable ? null : piExecutableIssue(env);
+export function checkPiHost(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): DoctorCheckResult[] {
+  const piOptions = { repoRoot: cwd };
+  const executable = piExecutable(env, piOptions);
+  const resolutionError = executable ? null : piExecutableIssue(env, piOptions);
   const checks: DoctorCheckResult[] = [{ id: 'pi-path', describe: 'Pi on PATH', status: resolutionError ? 'fail' : executable ? 'ok' : 'na', detail: resolutionError ?? executable ?? 'pi not found on PATH' }];
   if (!executable) {
     for (const id of ['pi-cli-version', 'pi-capability', 'pi-package']) checks.push({ id, describe: id, status: 'na', detail: resolutionError ?? 'pi not found on PATH' });
     return checks;
   }
   try {
-    const { version, ...capability } = probeInstalledPi(executable, env);
+    const { version, ...capability } = probeInstalledPi(executable, env, piOptions);
     checks.push({ id: 'pi-cli-version', describe: 'Pi CLI version', status: piVersionSupported(version) ? 'ok' : 'fail',
       detail: piVersionSupported(version) ? `${version} >= ${MIN_PI_VERSION}` : `PI_HOST_UNSUPPORTED_VERSION: ${version}; minimum ${MIN_PI_VERSION}; ${PI_UPGRADE_HINT}`,
       ...(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version) ? { version } : {}) });
@@ -171,7 +172,7 @@ export function checkPiHost(env: NodeJS.ProcessEnv = process.env): DoctorCheckRe
   }
   try {
     const source = bunGlobalPackageRoot(env);
-    const present = source !== null && piPackagePresent(source, env);
+    const present = source !== null && piPackagePresent(source, env, piOptions);
     const directoryMissing = source !== null && !fs.existsSync(source);
     checks.push({ id: 'pi-package', describe: 'Pi repo-harness package entry', status: present && !directoryMissing ? 'ok' : 'warn',
       detail: directoryMissing ? `package directory missing: ${source}; run: rh install`
@@ -674,7 +675,7 @@ export function runDoctor(ports: DoctorPorts, cwd: string = process.cwd(), targe
   checks.push(checkVersion());
   checks.push(checkSkillProjection(target));
   checks.push(checkCodexCliVersion());
-  if (target === 'both') checks.push(...checkPiHost(), checkRetiredPiExtension(), ...checkAgyHost());
+  if (target === 'both') checks.push(...checkPiHost(process.env, cwd), checkRetiredPiExtension(), ...checkAgyHost());
   checks.push(checkMagpie());
   checks.push(checkCliUpdate(target));
   for (const target of ALL_TARGETS) {
