@@ -576,9 +576,9 @@ export function worktreeOccupyingPids(
     if (cwd.volumeRoot && target.volumeRoot) continue;
     if (target.ids.includes(cwd.ids.at(-1)!)) continue;
     if (cwd.volumeRoot && cwd.ids.some(id => target.ids.includes(id))) continue;
-    // A share can hide parents on its backing volume. A different serial rules
-    // out that ancestry for a checkout on a known local volume.
-    if (target.volumeRoot && target.volumeSerial && cwd.volumeSerial && target.volumeSerial !== cwd.volumeSerial) continue;
+    // A share can hide parents. A local volume root and distinct backing
+    // serials prove disjointness even when the other ancestry stops at a share.
+    if ((target.volumeRoot || cwd.volumeRoot) && target.volumeSerial && cwd.volumeSerial && target.volumeSerial !== cwd.volumeSerial) continue;
     return null;
   }
   return [...occupying];
