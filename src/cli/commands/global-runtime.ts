@@ -61,6 +61,7 @@ import { antigravitySkillRoot, hostSkillRoot, providerSkillLock, stagedSkillRoot
 import { MEASURED_INSTALLERS } from "../../effects/host-config/delegated";
 import {
   discoverWindowsProtectedHelperContract,
+  resolvePlatformBashBin,
   resolveProtectedHelperPlatform,
   writeWindowsProtectedHelperContract,
 } from "../../effects/runtime/protected-helper-platform";
@@ -175,14 +176,18 @@ function defaultSourceRoot(): string {
   return join(SCRIPT_DIR, "..", "..", "..");
 }
 
+/** Global package installs unpack ~165 runtime packages and can exceed 120s on Windows cold caches. */
+const CLI_INSTALL_TIMEOUT_MS = 300_000;
+
 function runProcess(
   command: string,
   args: string[],
   cwd: string,
   env?: NodeJS.ProcessEnv,
   inheritEnv = true,
+  timeoutMs?: number,
 ): GlobalRuntimeStep {
-  const result = runBoundedProcess(command, args, { cwd, env, inheritEnv });
+  const result = runBoundedProcess(command, args, { cwd, env, inheritEnv, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 
   return {
     step: "",
@@ -601,6 +606,24 @@ function isCheckoutSource(sourceRoot: string): boolean {
   return existsSync(join(sourceRoot, 'packages', 'operator-web', 'package.json'));
 }
 
+/**
+ * A fresh checkout or git archive lacks dist/hook-entry.js (built by prepack
+ * for npm). Build it before installing so host adapters resolve the bundle.
+ */
+function ensureCheckoutHookBundle(
+  sourceRoot: string,
+  bunExecutable: string,
+  env: NodeJS.ProcessEnv | undefined,
+  version: string | null,
+): GlobalRuntimeStep | null {
+  if (!existsSync(join(sourceRoot, "src", "cli", "hook-entry.ts")) || existsSync(join(sourceRoot, "dist", "hook-entry.js"))) {
+    return null;
+  }
+  const built = runProcess(bunExecutable, ["run", "build:hook-bundle"], sourceRoot, env, true, CLI_INSTALL_TIMEOUT_MS);
+  if (built.status === "ok") return null;
+  return withStepName(built, "install repo-harness CLI", version ? `version=${version}; hook-bundle build failed` : "hook-bundle build failed");
+}
+
 function installCli(
   sourceRoot: string,
   cwd: string,
@@ -626,15 +649,29 @@ function installCli(
   if (installSpec === undefined && !isCheckoutSource(sourceRoot)) {
     if (!version) return { step: 'install repo-harness CLI', status: 'failed', detail: `package version is unavailable from ${sourceRoot}` };
     const spec = `repo-harness@${version}`;
-    const install = runProcess(bunExecutable, ['add', '-g', spec, '--no-cache'], cwd, env);
+    const install = runProcess(bunExecutable, ['add', '-g', spec, '--no-cache'], cwd, env, true, CLI_INSTALL_TIMEOUT_MS);
     if (install.status !== 'ok') return withStepName(install, 'install repo-harness CLI', `spec=${spec}`);
     const root = bunGlobalPackageRoot(env);
     const actual = root === null ? null : packageVersion(root);
     if (actual !== version) return withStepName({ ...install, status: 'failed' }, 'install repo-harness CLI', `installed CLI version mismatch: expected=${version}; actual=${actual ?? 'unavailable'}`);
     return withStepName(install, 'install repo-harness CLI', `spec=${spec}`);
   }
-  const spec = installSpec ?? (existsSync(join(sourceRoot, "package.json")) ? sourceRoot : "repo-harness");
-  const step = runProcess(bunExecutable, ["add", "-g", spec, ...(installSpec?.startsWith("repo-harness@") ? ["--no-cache"] : [])], cwd, env);
+  const isLocalCheckout = installSpec === undefined && existsSync(join(sourceRoot, "package.json"));
+  if (isLocalCheckout) {
+    const bundleFailure = ensureCheckoutHookBundle(sourceRoot, bunExecutable, env, version);
+    if (bundleFailure !== null) return bundleFailure;
+  }
+  const spec = installSpec ?? (isLocalCheckout ? sourceRoot : "repo-harness");
+  // Omit devDependencies when installing a local checkout globally so Bun does not
+  // unpack UI/build toolchains into the user's global node_modules.
+  const addArgs = [
+    "add",
+    "-g",
+    ...(isLocalCheckout ? ["--omit=dev"] : []),
+    spec,
+    ...(installSpec?.startsWith("repo-harness@") ? ["--no-cache"] : []),
+  ];
+  const step = runProcess(bunExecutable, addArgs, cwd, env, true, CLI_INSTALL_TIMEOUT_MS);
   if (installSpec === undefined && name === "repo-harness" && step.status === "failed" && isBunDependencyLoop(step)) {
     return installCliFromPackedTarball(sourceRoot, cwd, bunExecutable, env, version, step);
   }
@@ -670,7 +707,7 @@ function installCliFromRegistry(
   }
   const previous = packageVersion(globalRoot);
   const spec = `repo-harness@${expected}`;
-  const install = runProcess(bunExecutable, ["add", "-g", spec, "--no-cache"], cwd, env);
+  const install = runProcess(bunExecutable, ["add", "-g", spec, "--no-cache"], cwd, env, true, CLI_INSTALL_TIMEOUT_MS);
   if (install.status !== "ok") return withStepName(install, name, `spec=${spec}`);
 
   const readback = runProcess(bunExecutable, [join(globalRoot, "src", "cli", "index.ts"), "--version"], cwd, env);
@@ -733,7 +770,7 @@ function installCliFromPackedTarball(
       `${detailPrefix}dependency-loop repair remove failed`,
     );
   }
-  const add = runProcess(bunExecutable, ["add", "-g", join(packDir, filename)], cwd, env);
+  const add = runProcess(bunExecutable, ["add", "-g", join(packDir, filename)], cwd, env, true, CLI_INSTALL_TIMEOUT_MS);
   if (add.status === "ok") removeSupersededPackedTarballs(packDir, filename);
   return withStepName(add, "install repo-harness CLI", `${detailPrefix}repaired=packed-tarball`);
 }
@@ -1074,8 +1111,14 @@ function installAgentFleet(sourceRoot: string, bunExecutable: string, env: NodeJ
   if (!existsSync(script)) {
     return { step: AGENT_FLEET_STEP, status: 'failed', detail: `script not found: ${script}` };
   }
+  let bashBin: string;
+  try {
+    bashBin = resolvePlatformBashBin();
+  } catch (error) {
+    return { step: AGENT_FLEET_STEP, status: 'failed', detail: error instanceof Error ? error.message : String(error) };
+  }
   return withStepName(
-    runProcess('bash', [script], sourceRoot, { ...env, REPO_HARNESS_BUN_BIN: bunExecutable, REPO_HARNESS_RUNTIME_TRANSACTION: transaction }),
+    runProcess(bashBin, [script], sourceRoot, { ...env, REPO_HARNESS_BUN_BIN: bunExecutable, REPO_HARNESS_RUNTIME_TRANSACTION: transaction }),
     AGENT_FLEET_STEP,
   );
 }

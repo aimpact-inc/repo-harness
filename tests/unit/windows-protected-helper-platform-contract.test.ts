@@ -5,6 +5,7 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 import {
   discoverWindowsProtectedHelperContract,
+  resolvePlatformBashBin,
   resolveProtectedHelperPlatform,
   validateWindowsProtectedHelperContract,
   writeWindowsProtectedHelperContract,
@@ -396,5 +397,67 @@ describe('Windows protected-helper platform contract', () => {
   test('ship does not require jq for the merge gate', () => {
     const ship = readFileSync(join(import.meta.dir, '..', '..', 'scripts', 'ship-worktrees.sh'), 'utf-8');
     expect(ship).not.toContain('merge gate preflight requires jq');
+  });
+
+  test('resolves Scoop git.shim to its real Git-for-Windows root and rejects malformed or symlinked shims', () => {
+    const shimsDir = 'C:\\Users\\Ada\\scoop\\shims';
+    const shimExe = `${shimsDir}\\git.exe`;
+    const shimFile = `${shimsDir}\\git.shim`;
+    const currentGit = 'C:\\Users\\Ada\\scoop\\apps\\git\\current\\cmd\\git.exe';
+    const scoopRoot = 'C:\\Users\\Ada\\scoop\\apps\\git\\2.56.0.4';
+    const scoopContract: WindowsProtectedHelperContract = {
+      ...CONTRACT,
+      git_root: scoopRoot,
+      git_bin: `${scoopRoot}\\cmd\\git.exe`,
+      bash_bin: `${scoopRoot}\\bin\\bash.exe`,
+      posix_tools_dir: `${scoopRoot}\\usr\\bin`,
+    };
+    const makeAccess = (
+      shimContent: string,
+      overrides: Record<string, FakePathKind> = {},
+    ): ProtectedHelperFileAccess => ({
+      ...access({
+        [shimsDir]: 'directory',
+        [shimExe]: 'file',
+        [shimFile]: 'file',
+        [currentGit]: 'file',
+        [scoopRoot]: 'directory',
+        [scoopContract.git_bin]: 'file',
+        [scoopContract.bash_bin]: 'file',
+        [scoopContract.posix_tools_dir]: 'directory',
+        ...overrides,
+      }, {
+        [currentGit.toLowerCase()]: scoopContract.git_bin,
+      }),
+      readFile: (path) => {
+        if (path.toLowerCase() === shimFile.toLowerCase()) return shimContent;
+        throw new Error(`unexpected read: ${path}`);
+      },
+    });
+    const discover = (shimContent: string, overrides?: Record<string, FakePathKind>) =>
+      discoverWindowsProtectedHelperContract({
+        env: { PATH: `${shimsDir};${CONTRACT.system_tools_dir}`, TEMP: CONTRACT.temp_dir },
+        fileAccess: makeAccess(shimContent, overrides),
+        nativeSystemToolsDirectory: CONTRACT.system_tools_dir,
+        nativeTempDirectory: CONTRACT.temp_dir,
+      });
+
+    expect(discover(`path = "${currentGit}"\r\n`)).toEqual(scoopContract);
+    expect(() => discover(`path = "${currentGit}"\n`, { [shimFile]: 'symlink' })).toThrow('regular file');
+    expect(() => discover('args = "--version"\n')).toThrow('single path entry');
+    expect(() => discover('path = "C:\\Tools\\other.exe"\n')).toThrow('target git.exe');
+    expect(() => discover(`path = "${currentGit}"\n`, { [shimFile]: 'missing' })).toThrow('cmd\\git.exe or bin\\git.exe');
+  });
+
+  test('resolvePlatformBashBin returns bare bash on POSIX and the pinned Git-for-Windows Bash on win32', () => {
+    expect(resolvePlatformBashBin({ platform: 'darwin' })).toBe('bash');
+    expect(resolvePlatformBashBin({
+      platform: 'win32',
+      accountHome: 'C:\\Users\\Ada',
+      contract: CONTRACT,
+      fileAccess: access(),
+      nativeSystemToolsDirectory: CONTRACT.system_tools_dir,
+      nativeTempDirectory: CONTRACT.temp_dir,
+    })).toBe(CONTRACT.bash_bin);
   });
 });

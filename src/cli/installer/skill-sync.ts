@@ -6,6 +6,7 @@ import { parsePluginList, PLUGIN_IDS } from '../../core/skill-surface/plugin-man
 import { requireHome } from '../../effects/repo-harness-home';
 import { openHostConfigGate } from '../../effects/host-config/gate';
 import { runProcess } from '../../effects/process-runner';
+import { resolvePlatformBashBin } from '../../effects/runtime/protected-helper-platform';
 import { planSkillSync, withHostConfigTransaction } from './install-profile';
 import { atomicWriteFileSync } from './shared';
 
@@ -44,7 +45,7 @@ export function syncInstalledSkillCopies(sourceRoot: string, env: NodeJS.Process
       const retiredFile = join(plan, 'retired-paths');
       atomicWriteFileSync(declaredFile, declared.map(entry => entry.path).join('\n') + '\n', { mode: 0o600 });
       atomicWriteFileSync(retiredFile, retired.join('\n') + '\n', { mode: 0o600 });
-      result = runProcess(env.REPO_HARNESS_SYNC_SHELL ?? 'bash', [script], { cwd: packageRoot, env: { ...env,
+      result = runProcess(env.REPO_HARNESS_SYNC_SHELL ?? resolvePlatformBashBin(), [script], { cwd: packageRoot, env: { ...env,
         BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0', REPO_HARNESS_SOURCE_ROOT: packageRoot, REPO_HARNESS_SYNC_DECLARED_PATHS_FILE: declaredFile,
         REPO_HARNESS_SYNC_RETIRED_PATHS_FILE: retiredFile } });
       if (!result.ok) throw new Error(result.stderr || result.error || 'skill sync failed');

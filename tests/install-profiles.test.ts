@@ -13,8 +13,10 @@ import {
   applyInstallSelection,
   assertArchitecturePolicySelection,
   beginInstallHostTransaction,
+  canonicalEvidenceMatchesAll,
   commitInstallHostTransaction,
   effectiveSkillRoots,
+  executableCandidatePaths,
   ownerForInstallPath,
   installProfileHostMutationPaths,
   installProfileTransactionPaths,
@@ -1982,4 +1984,28 @@ describe('skill projection ownership', () => {
     expect(ownedPath(env, paths[0]!)).toBeNull();
     expect(readlinkSync(paths[0]!)).toBe(join(env.HOME!, '.codex/skills/mermaid'));
   }));
+
+  test('Windows install probes resolve PATHEXT launchers and backslash canonical evidence', () => {
+    const candidates = executableCandidatePaths(
+      'rh',
+      'C:\\Users\\Ada',
+      { BUN_INSTALL: 'C:\\Users\\Ada\\scoop\\persist\\bun', PATH: '"C:\\Tools\\Bin";C:\\Windows\\System32', PATHEXT: '.EXE;.CMD' },
+      'win32',
+    );
+    expect(candidates).toEqual([
+      'C:\\Users\\Ada\\scoop\\persist\\bun\\bin\\rh.EXE',
+      'C:\\Users\\Ada\\scoop\\persist\\bun\\bin\\rh.CMD',
+      'C:\\Tools\\Bin\\rh.EXE',
+      'C:\\Tools\\Bin\\rh.CMD',
+      'C:\\Windows\\System32\\rh.EXE',
+      'C:\\Windows\\System32\\rh.CMD',
+    ]);
+    expect(canonicalEvidenceMatchesAll([
+      'C:\\Users\\Ada\\.codex\\skills\\repo-harness\\src\\cli\\hook\\mutation-guard.ts',
+      'C:\\Users\\Ada\\.codex\\skills\\repo-harness\\scripts\\contract-worktree.sh',
+    ], ['src/cli/hook/mutation-guard.ts', 'scripts/contract-worktree.sh'])).toBe(true);
+    expect(canonicalEvidenceMatchesAll([
+      'C:\\Users\\Ada\\.codex\\skills\\repo-harness\\src\\cli\\hook\\mutation-guard.ts',
+    ], ['src/cli/hook/mutation-guard.ts', 'scripts/contract-worktree.sh'])).toBe(false);
+  });
 });

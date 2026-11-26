@@ -161,6 +161,7 @@ test("Herdr skill puts the hc manual verbatim under the caller-context policy", 
   expect(rendered).toContain("If no suitable reviewer exists, start one");
   expect(rendered).not.toContain("HERDR_ENV");
   expect(rendered.endsWith(`(\`hc --skill\`).\n\n${HC_MANUAL}`)).toBe(true);
+  expect(renderHerdrSkill(HC_MANUAL.replace(/\n/g, "\r\n"))).toBe(rendered);
   expect(() => renderHerdrSkill("---\nname: herdr\n---\nCheck HERDR_ENV before control.\n\n## Learn the current CLI\n")).toThrow("hc --skill did not return the hc manual");
 });
 

@@ -3,19 +3,37 @@ set -euo pipefail
 # Script helpers must not write a Bun transpiler cache outside the gate plan.
 export BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 
-RUNTIME_ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
+# Normalize backslashes before stripping so native Windows script paths resolve
+# the package root without depending on an external dirname binary under minimal PATH.
+_script_source="${BASH_SOURCE[0]//\\//}"
+_script_dir="${_script_source%/*}"
+[[ "$_script_dir" == "$_script_source" ]] && _script_dir="."
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*) RUNTIME_ROOT="$(cd "$_script_dir/.." && pwd -W)" ;;
+  *) RUNTIME_ROOT="$(cd "$_script_dir/.." && pwd)" ;;
+esac
 if [[ -z "${REPO_HARNESS_SYNC_DECLARED_PATHS_FILE+x}" ]]; then
-  export REPO_HARNESS_SYNC_SHELL="$BASH"
+  case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*)
+      if command -v cygpath >/dev/null 2>&1; then
+        export REPO_HARNESS_SYNC_SHELL="$(cygpath -w "$BASH")"
+      else
+        export REPO_HARNESS_SYNC_SHELL="$BASH"
+      fi
+      ;;
+    *) export REPO_HARNESS_SYNC_SHELL="$BASH" ;;
+  esac
   exec bun "$RUNTIME_ROOT/scripts/skill-surface-select.ts" sync-installed-copies "$@"
 fi
 [[ -f "$REPO_HARNESS_SYNC_DECLARED_PATHS_FILE" && -f "${REPO_HARNESS_SYNC_RETIRED_PATHS_FILE:-}" ]] || { echo "[sync-installed] gate path plan files are required" >&2; exit 1; }
 
 SOURCE_ROOT="${REPO_HARNESS_SOURCE_ROOT:-}"
 if [[ -z "$SOURCE_ROOT" ]]; then
-  SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  SOURCE_ROOT="$RUNTIME_ROOT"
 fi
 
 SOURCE_ROOT="${SOURCE_ROOT%/}"
+SOURCE_ROOT="${SOURCE_ROOT%\\}"
 LINK_INSTALLED_COPIES="${REPO_HARNESS_LINK_INSTALLED_COPIES:-}"
 # REPO_HARNESS_INSTALL_PLUGINS is the comma-separated plugin selection; an
 # empty value selects core only. Unset, the sync projects every plugin, as a
@@ -104,10 +122,48 @@ require_rsync_for_copy_mode() {
   exit 1
 }
 
+# Join host paths using the platform's native separator so destination strings
+# match the host-config gate's declared-paths/retired-paths files verbatim.
+join_path() {
+  local base="$1" child="$2"
+  case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*)
+      base="${base//\//\\}"
+      base="${base%\\}"
+      child="${child//\//\\}"
+      printf '%s\\%s' "$base" "$child"
+      ;;
+    *)
+      printf '%s/%s' "${base%/}" "$child"
+      ;;
+  esac
+}
+
 create_symlink_or_explain() {
   local source="$1"
   local dest="$2"
-  if ln -s "$source" "$dest"; then
+  local rc=0
+  case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*)
+      # Directory junctions work for standard Windows accounts without
+      # Developer Mode or SeCreateSymbolicLinkPrivilege, while preserving
+      # lstat().isSymbolicLink() and readlinkSync() for the host-config gate.
+      local win_source="$source"
+      local win_dest="$dest"
+      if command -v cygpath >/dev/null 2>&1; then
+        win_source="$(cygpath -w "$source")" || rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+          win_dest="$(cygpath -w "$dest")" || rc=$?
+        fi
+      fi
+      if [[ "$rc" -eq 0 ]]; then
+        MSYS_NO_PATHCONV=1 bun -e 'const { symlinkSync } = require("node:fs"); const { resolve } = require("node:path"); symlinkSync(resolve(process.argv[1]), process.argv[2], "junction");' \
+          "$win_source" "$win_dest" || rc=$?
+      fi
+      ;;
+    *) ln -s "$source" "$dest" || rc=$? ;;
+  esac
+  if [[ "$rc" -eq 0 ]]; then
     return 0
   fi
   echo "[sync-installed] unsupported link-mode: symlink capability is unavailable for $dest." >&2
@@ -194,7 +250,8 @@ sync_claude_alias_links() {
   fi
 
   mkdir -p "$CLAUDE_SKILLS_ROOT"
-  local alias_dest="$CLAUDE_SKILLS_ROOT/repo-harness"
+  local alias_dest
+  alias_dest="$(join_path "$CLAUDE_SKILLS_ROOT" "repo-harness")"
   remove_managed_dest "$alias_dest"
   create_symlink_or_explain "$SOURCE_ROOT" "$alias_dest"
   echo "[sync-installed] Claude skill alias: $alias_dest -> $SOURCE_ROOT"
@@ -206,7 +263,8 @@ sync_claude_alias_copies() {
   fi
 
   mkdir -p "$CLAUDE_SKILLS_ROOT"
-  local alias_dest="$CLAUDE_SKILLS_ROOT/repo-harness"
+  local alias_dest
+  alias_dest="$(join_path "$CLAUDE_SKILLS_ROOT" "repo-harness")"
   sync_copy "$alias_dest" "$SOURCE_ROOT" canonical-skill
   echo "[sync-installed] Claude skill copy: $alias_dest"
 }
@@ -251,31 +309,33 @@ integration_skill() {
 preflight_skill_root() {
   local root="$1"
   [[ -n "$root" ]] || return 0
-  assert_managed_dest "$root/repo-harness" || exit 1
-  local name source
+  assert_managed_dest "$(join_path "$root" "repo-harness")" || exit 1
+  local name source facade_src
   while IFS=$'\t' read -r name source; do
     [[ -n "$name" ]] || continue
     # Sparse packages can declare many facades without shipping their trees.
     # Skip them before scanning the selected-name list for each host.
-    [[ -d "$SOURCE_ROOT/$source" && -f "$SOURCE_ROOT/$source/SKILL.md" ]] || continue
+    facade_src="$(join_path "$SOURCE_ROOT" "$source")"
+    [[ -d "$facade_src" && -f "$facade_src/SKILL.md" ]] || continue
     facade_selected "$name" || continue
-    assert_managed_dest "$root/$name" || exit 1
+    assert_managed_dest "$(join_path "$root" "$name")" || exit 1
   done <<< "$FACADE_SOURCES"
 }
 
 remove_retired_owned_facades() {
   local root="$1"
   [[ -n "$root" && -d "$root" ]] || return 0
-  local dest name source_rel source
-  for dest in "$root"/repo-harness-*; do
-    [[ -e "$dest" || -L "$dest" ]] || continue
-    name="$(basename "$dest")"
+  local entry dest name source_rel source
+  for entry in "$root"/repo-harness-*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    name="${entry##*/}"
+    dest="$(join_path "$root" "$name")"
     provider_skill_for_root "$root" "$name" && continue
     integration_skill "$name" && continue
     facade_selected "$name" && continue
     source_rel="$(facade_source_for "$name")"
     source=""
-    [[ -n "$source_rel" ]] && source="$SOURCE_ROOT/$source_rel"
+    [[ -n "$source_rel" ]] && source="$(join_path "$SOURCE_ROOT" "$source_rel")"
     if [[ -z "$source" || ! -d "$source" ]]; then
       echo "[sync-installed] retiring $dest: canonical facade source no longer exists in the package"
     fi
@@ -306,10 +366,10 @@ sync_command_facades() {
   local name source facade_src dest
   while IFS=$'\t' read -r name source; do
     [[ -n "$name" ]] || continue
-    facade_src="$SOURCE_ROOT/$source"
+    facade_src="$(join_path "$SOURCE_ROOT" "$source")"
     [[ -d "$facade_src" && -f "$facade_src/SKILL.md" ]] || continue
     facade_selected "$name" || continue
-    dest="$root/$name"
+    dest="$(join_path "$root" "$name")"
     if [[ "$mode" == "link" ]]; then
       remove_managed_dest "$dest"
       create_symlink_or_explain "$facade_src" "$dest"
@@ -327,7 +387,7 @@ preflight_skill_root "$CODEX_SKILLS_ROOT"
 preflight_skill_root "$CLAUDE_SKILLS_ROOT"
 preflight_skill_root "$PI_SKILLS_ROOT"
 
-canonical_dest="$CODEX_SKILLS_ROOT/repo-harness"
+canonical_dest="$(join_path "$CODEX_SKILLS_ROOT" "repo-harness")"
 if [[ "$LINK_INSTALLED_COPIES" == "1" ]]; then
   mkdir -p "$CODEX_SKILLS_ROOT"
   remove_managed_dest "$canonical_dest"
@@ -338,9 +398,10 @@ if [[ "$LINK_INSTALLED_COPIES" == "1" ]]; then
   sync_claude_alias_links
   sync_command_facades "$CLAUDE_SKILLS_ROOT" link
   if [[ -n "$PI_SKILLS_ROOT" ]]; then
+    pi_dest="$(join_path "$PI_SKILLS_ROOT" "repo-harness")"
     mkdir -p "$PI_SKILLS_ROOT"
-    remove_managed_dest "$PI_SKILLS_ROOT/repo-harness"
-    create_symlink_or_explain "$SOURCE_ROOT" "$PI_SKILLS_ROOT/repo-harness"
+    remove_managed_dest "$pi_dest"
+    create_symlink_or_explain "$SOURCE_ROOT" "$pi_dest"
     sync_command_facades "$PI_SKILLS_ROOT" link
   fi
   echo "[sync-installed] OK"
@@ -354,7 +415,7 @@ sync_command_facades "$CODEX_SKILLS_ROOT" copy
 sync_claude_alias_copies
 sync_command_facades "$CLAUDE_SKILLS_ROOT" copy
 if [[ -n "$PI_SKILLS_ROOT" ]]; then
-  sync_copy "$PI_SKILLS_ROOT/repo-harness"
+  sync_copy "$(join_path "$PI_SKILLS_ROOT" "repo-harness")"
   sync_command_facades "$PI_SKILLS_ROOT" copy
 fi
 echo "[sync-installed] OK"
