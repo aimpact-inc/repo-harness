@@ -69,10 +69,11 @@ let jsonOutput = false;
 let checkUpdates = false;
 let strictReadiness = false;
 let probeSkillsCli = false;
+let allowWindowsRepoLocalCodegraph = false;
 let hostMode = "both";
 
 function usage() {
-  console.log(`Usage: scripts/check-agent-tooling.sh [--json] [--check-updates] [--strict-readiness] [--probe-skills-cli] [--architecture-selected] [--host claude|codex|both]`);
+  console.log(`Usage: scripts/check-agent-tooling.sh [--json] [--check-updates] [--strict-readiness] [--probe-skills-cli] [--architecture-selected] [--allow-windows-repo-local-codegraph] [--host claude|codex|both]`);
 }
 
 for (let index = 0; index < argv.length; index += 1) {
@@ -91,6 +92,10 @@ for (let index = 0; index < argv.length; index += 1) {
   }
   if (arg === "--probe-skills-cli") {
     probeSkillsCli = true;
+    continue;
+  }
+  if (arg === "--allow-windows-repo-local-codegraph") {
+    allowWindowsRepoLocalCodegraph = true;
     continue;
   }
   if (arg === "--host") {
@@ -1720,8 +1725,9 @@ function resolveCodeGraphBinary() {
 
   if (localOverride) localCandidates.push(localOverride);
   // On Windows, read-only probes must never execute checkout-supplied launchers
-  // (such as tracked node_modules/.bin/codegraph.exe) from the target repository.
-  if (allowRepoLocal && process.platform !== "win32") {
+  // (such as tracked node_modules/.bin/codegraph.exe) from the target repository;
+  // only explicit ensure --init / --sync callers opt into checkout-local lookup.
+  if (allowRepoLocal && (process.platform !== "win32" || allowWindowsRepoLocalCodegraph)) {
     localCandidates.push(codeGraphPlatformBundleBin());
     localCandidates.push(path.join(REPO_ROOT, "node_modules", ".bin", "codegraph"));
   }

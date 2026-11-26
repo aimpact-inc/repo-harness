@@ -150,81 +150,169 @@ describe("ensure-codegraph", () => {
     }, 15000);
   }
 
-  test("Windows probe skips checkout-local codegraph.exe and resolves installed CodeGraph outside the checkout", () => {
-    const envRoot = setupFakeEnvironment("ensure-codegraph-win-boundary");
-    const checkout = join(envRoot.root, "untrusted-checkout");
-    const checkoutBin = join(checkout, "node_modules", ".bin");
-    const globalBin = join(envRoot.root, "global-bin");
-    const sentinel = join(envRoot.root, "checkout-codegraph-ran");
-    const globalLog = join(envRoot.root, "global.log");
-    const preload = join(envRoot.root, "win32-platform.cjs");
-    try {
-      mkdirSync(join(checkout, ".git"), { recursive: true });
-      mkdirSync(checkoutBin, { recursive: true });
-      mkdirSync(globalBin, { recursive: true });
-      for (const utility of ["dirname", "basename", "node", "bun", "git", "bash", "sh", "which", "uname", "cat"]) {
-        const actual = Bun.which(utility);
-        if (actual) symlinkSync(actual, join(envRoot.fakeBin, utility));
+  test.skipIf(process.platform === "win32")(
+    "win32 resolver emulation: read-only probe skips checkout-local codegraph.exe and resolves installed CodeGraph outside the checkout",
+    () => {
+      const envRoot = setupFakeEnvironment("ensure-codegraph-win-boundary");
+      const checkout = join(envRoot.root, "untrusted-checkout");
+      const checkoutBin = join(checkout, "node_modules", ".bin");
+      const globalBin = join(envRoot.root, "global-bin");
+      const sentinel = join(envRoot.root, "checkout-codegraph-ran");
+      const globalLog = join(envRoot.root, "global.log");
+      const preload = join(envRoot.root, "win32-platform.cjs");
+      try {
+        mkdirSync(join(checkout, ".git"), { recursive: true });
+        mkdirSync(checkoutBin, { recursive: true });
+        mkdirSync(globalBin, { recursive: true });
+        for (const utility of ["dirname", "basename", "node", "bun", "git", "bash", "sh", "which", "uname", "cat"]) {
+          const actual = Bun.which(utility);
+          if (actual) symlinkSync(actual, join(envRoot.fakeBin, utility));
+        }
+        writeExecutable(envRoot.root, join(checkoutBin, "codegraph.exe"), [
+          "#!/bin/bash",
+          `echo "executed $*" > "${sentinel}"`,
+          "exit 99",
+          "",
+        ].join("\n"));
+        writeExecutable(envRoot.root, join(globalBin, "codegraph.exe"), [
+          "#!/bin/bash",
+          "set -euo pipefail",
+          `echo "codegraph $*" >> "${globalLog}"`,
+          'case "${1:-}" in',
+          "  \"--version\") echo '0.9.6' ;;",
+          "  \"status\") echo 'CodeGraph Status'; echo 'Index is up to date' ;;",
+          "  *) exit 1 ;;",
+          "esac",
+          "",
+        ].join("\n"));
+        writeFakeBunx(envRoot.fakeBin);
+        writeFileSync(preload, "Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });\n");
+
+        const baseEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          HOME: envRoot.home,
+          PATHEXT: ".exe;.cmd",
+          PATH: [checkoutBin, globalBin, envRoot.fakeBin].join(delimiter),
+          NODE_OPTIONS: `--require=${preload}`,
+        };
+        delete baseEnv.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL;
+        delete baseEnv.REPO_HARNESS_CODEGRAPH_LOCAL_BIN;
+        delete baseEnv.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
+
+        const withGlobal = spawnSync("bash", [SCRIPT, "--check", "--json", "--repo", checkout], {
+          cwd: checkout,
+          encoding: "utf-8",
+          env: baseEnv,
+        });
+        expect(withGlobal.status, withGlobal.stderr).toBe(0);
+        expect(existsSync(sentinel)).toBe(false);
+        const parsedGlobal = JSON.parse(withGlobal.stdout).codegraph;
+        expect(parsedGlobal.source).toBe("global");
+        expect(parsedGlobal.local_bin_path).toBeNull();
+        expect(parsedGlobal.bin_path).toBe(join(globalBin, "codegraph.exe"));
+        expect(parsedGlobal.version).toBe("0.9.6");
+
+        rmSync(join(globalBin, "codegraph.exe"));
+        const withoutGlobal = spawnSync("bash", [SCRIPT, "--check", "--json", "--repo", checkout], {
+          cwd: checkout,
+          encoding: "utf-8",
+          env: baseEnv,
+        });
+        expect(withoutGlobal.status, withoutGlobal.stderr).toBe(0);
+        expect(existsSync(sentinel)).toBe(false);
+        const parsedMissing = JSON.parse(withoutGlobal.stdout).codegraph;
+        expect(parsedMissing.source).toBe("missing");
+        expect(parsedMissing.local_bin_path).toBeNull();
+        expect(parsedMissing.bin_path).toBeNull();
+      } finally {
+        rmSync(envRoot.root, { recursive: true, force: true });
       }
-      writeExecutable(envRoot.root, join(checkoutBin, "codegraph.exe"), [
-        "#!/bin/bash",
-        `echo "executed $*" > "${sentinel}"`,
-        "exit 99",
-        "",
-      ].join("\n"));
-      writeExecutable(envRoot.root, join(globalBin, "codegraph.exe"), [
-        "#!/bin/bash",
-        "set -euo pipefail",
-        `echo "codegraph $*" >> "${globalLog}"`,
-        'case "${1:-}" in',
-        "  \"--version\") echo '0.9.6' ;;",
-        "  \"status\") echo 'CodeGraph Status'; echo 'Index is up to date' ;;",
-        "  *) exit 1 ;;",
-        "esac",
-        "",
-      ].join("\n"));
-      writeFakeBunx(envRoot.fakeBin);
-      writeFileSync(preload, "Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });\n");
+    },
+    15000,
+  );
 
-      const baseEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        HOME: envRoot.home,
-        PATHEXT: ".exe;.cmd",
-        PATH: [checkoutBin, globalBin, envRoot.fakeBin].join(delimiter),
-        ...(process.platform === "win32" ? {} : { NODE_OPTIONS: `--require=${preload}` }),
-      };
-      delete baseEnv.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL;
-      delete baseEnv.REPO_HARNESS_CODEGRAPH_LOCAL_BIN;
-      delete baseEnv.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
+  test.skipIf(process.platform === "win32")(
+    "win32 resolver emulation: explicit ensure --init and --sync use checkout-local codegraph.exe without global CodeGraph",
+    () => {
+      const envRoot = setupFakeEnvironment("ensure-codegraph-win-explicit");
+      const checkout = join(envRoot.root, "pinned-checkout");
+      const checkoutBin = join(checkout, "node_modules", ".bin");
+      const localLog = join(envRoot.root, "local.log");
+      const preload = join(envRoot.root, "win32-platform.cjs");
+      try {
+        mkdirSync(join(checkout, ".git"), { recursive: true });
+        mkdirSync(checkoutBin, { recursive: true });
+        for (const utility of ["dirname", "basename", "node", "bun", "git", "bash", "sh", "which", "uname", "cat", "mkdir", "touch"]) {
+          const actual = Bun.which(utility);
+          if (actual) symlinkSync(actual, join(envRoot.fakeBin, utility));
+        }
+        writeExecutable(envRoot.root, join(checkoutBin, "codegraph.exe"), [
+          "#!/bin/bash",
+          "set -euo pipefail",
+          `echo "codegraph $*" >> "${localLog}"`,
+          'case "${1:-}" in',
+          "  \"--version\") echo '0.9.6' ;;",
+          "  \"status\")",
+          "    if [[ -f .codegraph/initialized ]]; then",
+          "      echo 'CodeGraph Status'; echo 'Index is up to date'",
+          "    else",
+          "      echo 'Not initialized'",
+          "    fi ;;",
+          "  \"init\") mkdir -p .codegraph && touch .codegraph/initialized ;;",
+          "  \"sync\") mkdir -p .codegraph && touch .codegraph/synced ;;",
+          "  *) exit 1 ;;",
+          "esac",
+          "",
+        ].join("\n"));
+        writeFakeBunx(envRoot.fakeBin);
+        writeFileSync(preload, "Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });\n");
 
-      const withGlobal = spawnSync("bash", [SCRIPT, "--check", "--json", "--repo", checkout], {
-        cwd: checkout,
-        encoding: "utf-8",
-        env: baseEnv,
-      });
-      expect(withGlobal.status, withGlobal.stderr).toBe(0);
-      expect(existsSync(sentinel)).toBe(false);
-      const parsedGlobal = JSON.parse(withGlobal.stdout).codegraph;
-      expect(parsedGlobal.source).toBe("global");
-      expect(parsedGlobal.local_bin_path).toBeNull();
-      expect(parsedGlobal.bin_path).toBe(join(globalBin, "codegraph.exe"));
-      expect(parsedGlobal.version).toBe("0.9.6");
+        const baseEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          HOME: envRoot.home,
+          PATHEXT: ".exe;.cmd",
+          PATH: envRoot.fakeBin,
+          NODE_OPTIONS: `--require=${preload}`,
+        };
+        delete baseEnv.REPO_HARNESS_CODEGRAPH_ALLOW_REPO_LOCAL;
+        delete baseEnv.REPO_HARNESS_CODEGRAPH_LOCAL_BIN;
+        delete baseEnv.REPO_HARNESS_CODEGRAPH_GLOBAL_BIN;
 
-      rmSync(join(globalBin, "codegraph.exe"));
-      const withoutGlobal = spawnSync("bash", [SCRIPT, "--check", "--json", "--repo", checkout], {
-        cwd: checkout,
-        encoding: "utf-8",
-        env: baseEnv,
-      });
-      expect(withoutGlobal.status, withoutGlobal.stderr).toBe(0);
-      expect(existsSync(sentinel)).toBe(false);
-      const parsedMissing = JSON.parse(withoutGlobal.stdout).codegraph;
-      expect(parsedMissing.source).toBe("missing");
-      expect(parsedMissing.local_bin_path).toBeNull();
-      expect(parsedMissing.bin_path).toBeNull();
-    } finally {
-      rmSync(envRoot.root, { recursive: true, force: true });
-    }
-  }, 15000);
+        const initRes = spawnSync("bash", [SCRIPT, "--init", "--no-install-deps", "--json", "--repo", checkout], {
+          cwd: checkout,
+          encoding: "utf-8",
+          env: baseEnv,
+        });
+        expect(initRes.status, initRes.stderr).toBe(0);
+        const parsedInit = JSON.parse(initRes.stdout);
+        expect(parsedInit.read_only).toBe(false);
+        expect(parsedInit.changed).toBe(true);
+        expect(parsedInit.codegraph.source).toBe("local");
+        expect(parsedInit.codegraph.local_bin_path).toBe(join(checkoutBin, "codegraph.exe"));
+        expect(parsedInit.codegraph.bin_path).toBe(join(checkoutBin, "codegraph.exe"));
+        expect(parsedInit.actions).toContainEqual(expect.objectContaining({ action: "init-index", status: "changed" }));
+
+        const syncRes = spawnSync("bash", [SCRIPT, "--sync", "--no-install-deps", "--json", "--repo", checkout], {
+          cwd: checkout,
+          encoding: "utf-8",
+          env: baseEnv,
+        });
+        expect(syncRes.status, syncRes.stderr).toBe(0);
+        const parsedSync = JSON.parse(syncRes.stdout);
+        expect(parsedSync.read_only).toBe(false);
+        expect(parsedSync.changed).toBe(true);
+        expect(parsedSync.codegraph.source).toBe("local");
+        expect(parsedSync.codegraph.local_bin_path).toBe(join(checkoutBin, "codegraph.exe"));
+        expect(parsedSync.actions).toContainEqual(expect.objectContaining({ action: "sync-index", status: "changed" }));
+
+        const log = readFileSync(localLog, "utf-8");
+        expect(log).toContain("codegraph init -i .");
+        expect(log).toContain("codegraph sync .");
+      } finally {
+        rmSync(envRoot.root, { recursive: true, force: true });
+      }
+    },
+    15000,
+  );
 
 });

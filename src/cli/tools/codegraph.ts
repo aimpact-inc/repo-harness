@@ -133,10 +133,17 @@ function readJson(path: string) {
   }
 }
 
-function readToolingReport(repoRoot: string, env?: NodeJS.ProcessEnv, host: CodegraphHostTarget = "codex") {
+function readToolingReport(
+  repoRoot: string,
+  env?: NodeJS.ProcessEnv,
+  host: CodegraphHostTarget = "codex",
+  allowWindowsCheckoutLocal = false,
+) {
   const checker = join(REPO_ROOT, "scripts", "check-agent-tooling.sh");
   // This module runs only in a process that holds the architecture plugin.
-  const report = runJson(resolvePlatformBashBin(), [checker, "--json", "--architecture-selected", "--host", host], repoRoot, env);
+  const args = [checker, "--json", "--architecture-selected", "--host", host];
+  if (allowWindowsCheckoutLocal) args.push("--allow-windows-repo-local-codegraph");
+  const report = runJson(resolvePlatformBashBin(), args, repoRoot, env);
   return report.tools.codegraph;
 }
 
@@ -226,22 +233,23 @@ export function ensureCodegraph(opts: CodegraphEnsureOptions): CodegraphEnsureRe
     };
   }
 
-  let codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host);
+  const allowWindowsCheckoutLocal = opts.init === true || opts.sync === true;
+  let codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host, allowWindowsCheckoutLocal);
   if (opts.installDeps !== false && hasCodegraphDependency(opts.repoRoot) && !codegraph.local_bin_path) {
     appendAction(actions, "install-deps", ["bun", "install"], run("bun", ["install"], opts.repoRoot, opts.env));
-    codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host);
+    codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host, allowWindowsCheckoutLocal);
   }
 
   const binPath = codegraph.bin_path;
   if (binPath && opts.init && codegraph.project_index?.status === "not-initialized") {
     appendAction(actions, "init-index", [binPath, "init", "-i", "."], run(binPath, ["init", "-i", "."], opts.repoRoot, opts.env));
-    codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host);
+    codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host, allowWindowsCheckoutLocal);
   }
 
   if (binPath && opts.sync) {
     mkdirSync(join(opts.repoRoot, ".codegraph"), { recursive: true });
     appendAction(actions, "sync-index", [binPath, "sync", "."], run(binPath, ["sync", "."], opts.repoRoot, opts.env));
-    codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host);
+    codegraph = readToolingReport(opts.repoRoot, opts.env, opts.host, allowWindowsCheckoutLocal);
   }
 
   const normalized = normalize(codegraph);
