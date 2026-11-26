@@ -1,5 +1,6 @@
 export const en = {
   'tools.group.skill': 'Recommended skills',
+  'tools.group.cli': 'Recommended CLIs',
   'tools.author': 'Author',
   'tools.tags': 'Tags',
   'tools.tags.none': 'No tags',
@@ -23,6 +24,7 @@ export const en = {
   'tools.category.code_navigation': 'Code navigation',
   'tools.category.orchestration': 'Orchestration',
   'tools.category.agent_reference': 'Agent reference',
+  'tools.category.research': 'Research',
   'tools.reason.unknown': 'The tooling detector reports this tool, but this version does not read its result.',
   'tools.reason.noDetector': 'repo-harness has no detector for this tool.',
   'tools.reason.resource': 'repo-harness does not install or detect resources.',
@@ -32,6 +34,7 @@ export const en = {
 
 export const zh: Readonly<Record<keyof typeof en, string>> = {
   'tools.group.skill': '推荐 Skills',
+  'tools.group.cli': '推荐 CLI',
   'tools.author': '作者',
   'tools.tags': '标签',
   'tools.tags.none': '无标签',
@@ -55,6 +58,7 @@ export const zh: Readonly<Record<keyof typeof en, string>> = {
   'tools.category.code_navigation': '代码导航',
   'tools.category.orchestration': '编排',
   'tools.category.agent_reference': 'Agent 参考',
+  'tools.category.research': '研究',
   'tools.reason.unknown': '工具探测器会报告这个工具，但这个版本还不读取它的结果。',
   'tools.reason.noDetector': 'repo-harness 没有这个工具的探测器。',
   'tools.reason.resource': 'repo-harness 不安装、也不探测资源。',

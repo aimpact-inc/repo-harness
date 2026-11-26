@@ -637,12 +637,13 @@ describe('Tools page', () => {
 
   test('local tools and resources list with counts; no tool reads as installed', async () => {
     await mount('#tools', props(readySetup(NOW)));
-    expect(all('[data-tool-group]').map(group => group.getAttribute('data-tool-group'))).toEqual(['local_tool', 'skill', 'resource']);
+    expect(all('[data-tool-group]').map(group => group.getAttribute('data-tool-group'))).toEqual(['local_tool', 'skill', 'cli', 'resource']);
     expect(text('#tools-local_tool-heading')).toBe('Local tools1');
     expect(text('#tools-skill-heading')).toBe('Recommended skills3');
+    expect(text('#tools-cli-heading')).toBe('Recommended CLIs1');
     expect(text('#tools-resource-heading')).toBe('Recommended resources3');
     const status = Object.fromEntries(all('[data-tool]').map(item => [item.getAttribute('data-tool'), item.querySelector('[data-tool-status]')!.getAttribute('data-tool-status')]));
-    expect(status).toEqual({ waza: 'unknown', codegraph: 'unknown', 'herdr-skill': 'unknown', 'hai-stack': 'na', shaders: 'na', 'awesome-design-md': 'na', 'claude-quickstarts': 'na' });
+    expect(status).toEqual({ waza: 'unknown', codegraph: 'unknown', 'herdr-skill': 'unknown', 'hai-stack': 'na', 'gemini-notebook-mcp-cli': 'na', shaders: 'na', 'awesome-design-md': 'na', 'claude-quickstarts': 'na' });
     expect(text('[data-tool="hai-stack"] [data-tool-status]')).toBe('N/A');
     // hai-stack declares no SPDX license; the license cell says so.
     expect(text('[data-tool="hai-stack"]')).toContain('Unknown');
@@ -732,6 +733,21 @@ describe('CLI inventory page', () => {
     expect(copied).toEqual(['npm rm -g example']);
     expect(reads).toBe(1);
     expect(all('[data-cli-page] form, [data-cli-page] input, [data-cli-page] [draggable="true"]')).toHaveLength(0);
+  });
+
+  test('recommended CLIs remain separate from local inventory and open catalog metadata', async () => {
+    await mount('#cli', props(null, { initialCliInventory: unavailableCliInventory() }));
+    expect(text('#tools-cli-heading')).toBe('Recommended CLIs1');
+    expect(all('[data-tool-group="cli"] [data-tool]').map(item => item.dataset.tool)).toEqual(['gemini-notebook-mcp-cli']);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-tool="gemini-notebook-mcp-cli"] > button')!.click());
+    expect(window.location.hash).toBe('#tools/gemini-notebook-mcp-cli');
+    expect(document.querySelector('[data-tool-drawer]')?.getAttribute('data-tool-drawer')).toBe('gemini-notebook-mcp-cli');
+    expect(text('[data-tool-drawer]')).toContain('jacob-bd');
+    expect(text('[data-tool-drawer]')).toContain('cli · mcp · notebook');
+    expect(text('[data-tool-drawer]')).toContain('Not installed by repo-harness');
+    expect(Array.from(document.querySelectorAll('[data-tool-drawer] a')).map(link => link.getAttribute('href'))).toEqual([
+      'https://github.com/jacob-bd/gemini-notebook-mcp-cli',
+    ]);
   });
 
   test('unknown use, recent use, unused and ambiguous upstreams remain distinct', async () => {

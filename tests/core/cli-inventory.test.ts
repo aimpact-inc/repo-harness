@@ -75,6 +75,12 @@ const byId = (snapshot: CliInventorySnapshotV1) => new Map(snapshot.entries.map(
 describe('cli seed', () => {
   test('the packaged seed decodes', () => {
     expect(CLI_SEED.tools.map(tool => tool.id)).toContain('claude-code');
+    expect(CLI_SEED.tools.find(tool => tool.id === 'gemini-notebook-mcp-cli')).toMatchObject({
+      commands: ['nlm', 'notebooklm-mcp'],
+      repo: 'jacob-bd/gemini-notebook-mcp-cli',
+      packages: [{ registry: 'pypi', name: 'notebooklm-mcp-cli' }],
+      config_uninstall: 'rm -rf ~/.notebooklm-mcp-cli',
+    });
     expect(CLI_SEED.tools.filter(tool => tool.commands.includes('asc')).map(tool => tool.repo)).toEqual(['rorkai/App-Store-Connect-CLI', 'tddworks/asc-cli']);
   });
 

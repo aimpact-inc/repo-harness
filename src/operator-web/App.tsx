@@ -572,7 +572,7 @@ export function OperatorApp({
           {workspace === 'agents' && <AgentsPage view={setup} agents={agentsSettings} seats={seatsSettings} quota={quota} readReportingLanguage={readReportingLanguage} writeReportingLanguage={writeReportingLanguage} generation={refreshGeneration} now={now} t={t} />}
           {workspace === 'skills' && <SkillsPage view={setup} now={now} t={t} onOpenTool={id => openPlace({ workspace: 'tools', module: null, item: id })} />}
           {workspace === 'hooks' && <HooksPage view={setup} now={now} t={t} />}
-          {workspace === 'cli' && <CliPage view={cliInventory} now={now} t={t} />}
+          {workspace === 'cli' && <CliPage view={cliInventory} now={now} t={t} onOpenTool={id => openPlace({ workspace: 'tools', module: null, item: id })} />}
           {workspace === 'tools' && <ToolsPage toolId={place.item} onOpen={id => openPlace({ workspace: 'tools', module: null, item: id })}
             onClose={() => openPlace({ workspace: 'tools', module: null, item: null })} locale={locale} t={t} />}
           {workspace === 'docs' && <Suspense fallback={<p role="status" className="text-sm text-kumo-subtle">{t('workspace.loading')}</p>}>
