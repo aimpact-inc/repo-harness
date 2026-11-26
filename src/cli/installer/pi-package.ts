@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { piAgentDir } from '../../effects/pi-agent-dir';
 import { realPathOrResolved } from '../../effects/path-identity';
 import { piExecutable } from '../../effects/pi-executable';
+import { resolveWindowsLaunchTarget } from '../../effects/process-windows-launcher';
 import { decode, openHostConfigGate, type HostConfigGate } from '../../effects/host-config/gate';
 import { expectedOf, hostConfigPaths, observeFile, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import { jsonFragment, removeJsonFragment } from '../../core/host-config/json-fragment';
@@ -17,7 +18,14 @@ import { MEASURED_INSTALLERS, type HostConfigFragmentDeclaration } from '../../e
 export function runPi(args: readonly string[], env: NodeJS.ProcessEnv = process.env): string {
   const executable = piExecutable(env);
   if (executable === null) throw new Error('pi not found on PATH');
-  const result = spawnSync(executable, [...args], {
+  const target = resolveWindowsLaunchTarget(executable, {
+    env,
+    label: 'pi',
+    failOnRefusal: true,
+    requireDirectLaunch: true,
+  });
+  if (target === null) throw new Error('pi not found on PATH');
+  const result = spawnSync(target.command, [...target.args, ...args], {
     cwd: env.HOME ?? env.USERPROFILE, env: { ...env, NO_COLOR: '1', FORCE_COLOR: '0' },
     encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
   });

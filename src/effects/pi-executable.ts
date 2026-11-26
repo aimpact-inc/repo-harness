@@ -1,9 +1,10 @@
 import { accessSync, constants, lstatSync, realpathSync, statSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
+import { windowsPathDirectories, windowsPathExtensions } from './process-windows-launcher';
 
 function* piCandidates(env: NodeJS.ProcessEnv): Generator<string> {
-  const extensions = process.platform === 'win32' ? (env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';') : [''];
-  for (const directory of (env.PATH ?? '').split(delimiter).filter(Boolean)) {
+  const extensions = process.platform === 'win32' ? windowsPathExtensions(env) : [''];
+  for (const directory of windowsPathDirectories(env)) {
     for (const extension of extensions) yield join(directory, `pi${extension}`);
   }
 }
@@ -13,7 +14,7 @@ export function piExecutable(env: NodeJS.ProcessEnv = process.env): string | nul
   for (const candidate of piCandidates(env)) {
     try {
       if (!statSync(candidate).isFile()) continue;
-      accessSync(candidate, constants.X_OK);
+      if (process.platform !== 'win32') accessSync(candidate, constants.X_OK);
       return realpathSync(candidate);
     } catch { /* Continue through PATH. */ }
   }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -23,6 +23,7 @@ import { piAgentDir } from '../../src/effects/pi-agent-dir';
 import { piExecutable } from '../../src/effects/pi-executable';
 import { configureRequiredHerdrSkill } from '../../src/cli/commands/herdr-skill';
 import { piReviewLaunchBlocker } from '../../src/effects/pi-host-probe';
+import { resolveWindowsLaunchTarget } from '../../src/effects/process-windows-launcher';
 import { writeFakeHc } from '../helpers/fake-hc';
 
 const ROOT = join(import.meta.dir, '../..');
@@ -582,4 +583,142 @@ test('the Pi review launch gate blocks an old Pi or a failed probe', () => fixtu
   expect(piReviewLaunchBlocker(executable, f.env)).toBeNull();
   for (const version of ['1.3.9', '1.4.0', '1.5.1']) expect(piReviewLaunchBlocker(executable, { ...f.env, PI_FIXTURE_VERSION: version })).toBe('PI_HOST_UNSUPPORTED_VERSION');
   expect(piReviewLaunchBlocker('/usr/bin/true', f.env)).toBe('PI_HOST_PROBE_FAILED');
+}));
+
+test('Windows pi.CMD shims resolve through resolveWindowsLaunchTarget without a shell fallback', () => fixture(f => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const realNode = Bun.which('node') ?? process.execPath;
+  const scoopBin = join(f.root, 'scoop-bin');
+  const nodeBin = join(f.root, 'node-bin');
+  const pkgRoot = join(scoopBin, 'node_modules/@earendil-works/pi-coding-agent');
+  const cliScript = join(pkgRoot, 'dist/bundle/cli.js');
+  const shimPath = join(scoopBin, 'pi.CMD');
+  const piCliSource = readFileSync(join(f.host, 'pi'), 'utf8').replace(/^#!.*\n/, '#!/usr/bin/env node\n');
+
+  f.write(join(pkgRoot, 'package.json'), readFileSync(join(f.host, 'package.json'), 'utf8'));
+  f.write(join(pkgRoot, 'dist/index.js'), readFileSync(join(f.host, 'dist/index.js'), 'utf8'));
+  f.write(join(pkgRoot, 'dist/core/tools/path-utils.js'), readFileSync(join(f.host, 'dist/core/tools/path-utils.js'), 'utf8'));
+  // Deliberately leave cli.js and pi.CMD non-executable on POSIX: only node + cli.js works.
+  f.write(cliScript, piCliSource);
+  f.write(shimPath, [
+    '@ECHO off',
+    'GOTO start',
+    ':find_dp0',
+    'SET dp0=%~dp0',
+    'EXIT /b',
+    ':start',
+    'SETLOCAL',
+    'CALL :find_dp0',
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+    ')',
+    '',
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*',
+    '',
+  ].join('\r\n'));
+
+  mkdirSync(nodeBin, { recursive: true });
+  const nodePathDir = process.platform === 'win32'
+    ? dirname(realNode)
+    : (symlinkSync(realNode, join(nodeBin, 'node.EXE')), nodeBin);
+  f.setPackages([relative(f.env.PI_CODING_AGENT_DIR, f.source)]);
+
+  const winEnv: NodeJS.ProcessEnv = {
+    ...f.env,
+    PATH: [scoopBin, nodePathDir].join(delimiter),
+    PATHEXT: '.EXE;.CMD',
+  };
+
+  try {
+    if (process.platform !== 'win32') {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    }
+
+    // 1. Modern npm cmd-shim (Scoop nodejs-lts layout: node.EXE resolved from PATH, not beside pi.CMD).
+    const resolvedShim = piExecutable(winEnv);
+    expect(resolvedShim).toBe(realpathSync(shimPath));
+    expect(checkPiHost(winEnv).map(c => [c.id, c.status])).toEqual([
+      ['pi-path', 'ok'],
+      ['pi-cli-version', 'ok'],
+      ['pi-capability', 'ok'],
+      ['pi-package', 'ok'],
+    ]);
+    expect(runPi(['list'], winEnv)).toContain(f.source);
+    expect(piReviewLaunchBlocker(resolvedShim!, winEnv)).toBeNull();
+
+    // 2. Classic @IF EXIST "%~dp0\node.exe" shim with sibling node.exe and no separate node dir on PATH.
+    const classicBin = join(f.root, 'classic-bin');
+    const classicPkg = join(classicBin, 'node_modules/@earendil-works/pi-coding-agent');
+    f.write(join(classicPkg, 'package.json'), readFileSync(join(f.host, 'package.json'), 'utf8'));
+    f.write(join(classicPkg, 'dist/index.js'), readFileSync(join(f.host, 'dist/index.js'), 'utf8'));
+    f.write(join(classicPkg, 'dist/core/tools/path-utils.js'), readFileSync(join(f.host, 'dist/core/tools/path-utils.js'), 'utf8'));
+    f.write(join(classicPkg, 'dist/bundle/cli.js'), piCliSource);
+    try { symlinkSync(realNode, join(classicBin, 'node.exe')); } catch { copyFileSync(realNode, join(classicBin, 'node.exe')); }
+    f.write(join(classicBin, 'pi.CMD'), [
+      '@IF EXIST "%~dp0\\node.exe" (',
+      '  "%~dp0\\node.exe"  "%~dp0\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*',
+      ') ELSE (',
+      '  @SETLOCAL',
+      '  @SET PATHEXT=%PATHEXT:;.JS;=;%',
+      '  node  "%~dp0\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*',
+      ')',
+      '',
+    ].join('\r\n'));
+    const classicEnv: NodeJS.ProcessEnv = { ...f.env, PATH: classicBin, PATHEXT: '.EXE;.CMD' };
+    expect(checkPiHost(classicEnv).map(c => [c.id, c.status])).toEqual([
+      ['pi-path', 'ok'],
+      ['pi-cli-version', 'ok'],
+      ['pi-capability', 'ok'],
+      ['pi-package', 'ok'],
+    ]);
+
+    // 3. Fail-closed errors (missing interpreter, missing target, unsupported batch syntax; no shell fallback).
+    const noNodeChecks = checkPiHost({ ...f.env, PATH: scoopBin, PATHEXT: '.EXE;.CMD' });
+    for (const id of ['pi-cli-version', 'pi-capability', 'pi-package']) {
+      expect(noNodeChecks.find(c => c.id === id)).toMatchObject({
+        status: 'fail',
+        detail: expect.stringContaining('interpreter "node" not found'),
+      });
+    }
+
+    rmSync(cliScript);
+    const missingTargetChecks = checkPiHost(winEnv);
+    for (const id of ['pi-cli-version', 'pi-capability', 'pi-package']) {
+      expect(missingTargetChecks.find(c => c.id === id)).toMatchObject({
+        status: 'fail',
+        detail: expect.stringContaining('shim target is missing'),
+      });
+    }
+
+    f.write(shimPath, '@echo off\r\necho arbitrary & exit /b 0\r\n');
+    const unsupportedShimChecks = checkPiHost(winEnv);
+    for (const id of ['pi-cli-version', 'pi-capability', 'pi-package']) {
+      expect(unsupportedShimChecks.find(c => c.id === id)).toMatchObject({
+        status: 'fail',
+        detail: expect.stringContaining('unsupported Windows command shim'),
+      });
+    }
+
+    // 4. Checkout exclusion applies to a .CMD shim whose target points inside a checkout root.
+    const checkout = join(f.root, 'untrusted-repo');
+    const checkoutEntry = join(checkout, 'evil.js');
+    const escapeShim = join(f.root, 'outside-bin/pi.CMD');
+    mkdirSync(join(checkout, '.git'), { recursive: true });
+    f.write(checkoutEntry, 'console.log("pwned");\n');
+    f.write(escapeShim, `@node "%~dp0\\..\\untrusted-repo\\evil.js" %*\r\n`);
+    expect(() => resolveWindowsLaunchTarget(escapeShim, {
+      env: winEnv,
+      checkoutRoots: [checkout],
+      label: 'pi',
+      failOnRefusal: true,
+      requireDirectLaunch: true,
+    })).toThrow(/refused pi shim target inside target checkout/);
+  } finally {
+    if (process.platform !== platformDescriptor.value) {
+      Object.defineProperty(process, 'platform', platformDescriptor);
+    }
+  }
 }));
