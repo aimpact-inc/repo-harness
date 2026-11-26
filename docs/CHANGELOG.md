@@ -2,6 +2,26 @@
 
 All notable changes to this skill are documented here.
 
+## [0.37.5] - 2026-11-26
+
+### Fixed
+
+- I2: managed sweep rotates its live-checkout and pruned-intent batches, so an entry that stays kept cannot starve the rest across runs. Each queue saves its last visited key in the existing Git common-directory intent store, the next run starts after that key and wraps at the end, and the two queues alternate which one goes first. Progress is recorded under the topology lock before an inspection can use the remaining time, the combined batch still holds at most eight entries with the existing live checkout reservation and deadline, and an overlapping run cannot overwrite newer progress. A valid cursor-only record from a moved clone reads as empty, pruned intents still bind the original Git common directory, and entries left at the deadline or after cursor contention are reported as deferred. Approval and removal stay with the current preview, the Git registration and the shared removal proof. (#3555, #3556)
+- I2: native Windows gets a process CWD observer and a directory identity matcher for managed sweep and board closeout, so a clean worktree is removed only when occupancy is proved zero. The observer duplicates the live `CurrentDirectory` handle from each eligible process's PEB or WOW64 PEB32, checks that the handle value stayed stable, and reads the 64-bit volume serial and 128-bit file ID through `GetFileInformationByHandleEx(FileIdInfo)`. It reads each visible parent of the CWD, the checkout root and its ancestors the same way. A directory identity match covers local volume paths, loopback UNC, mapped drives, volume GUID paths, reassigned SUBST and repointed junctions, so an alias does not read as an idle worktree. Complete local ancestry, or a shared visible ancestor, can prove disjointness. A live or unproved occupancy keeps the checkout, and a denied, elevated or share-limited query reports `process_unknown`. (#3550, #3558)
+- I2: explicit `rh worktrees cleanup <slug>` preview and apply use the same occupancy proof as managed sweep and board closeout before runtime cleanup, and apply observes the worktree again under the topology lock before removal. A live CWD returns `process_in_use`. A share-limited path proves disjointness only through two distinct nonzero volume serials read from the same `FILE_ID_INFO` record as the leaf directory IDs, or through ancestry; equal, zero or unavailable serials leave the relationship unproved and keep the checkout. Directory identity matches take precedence over the serial comparison. POSIX sweep and board closeout keep their process inventory, path containment and removal rules. (#3550, #3559)
+- `rh install --plugins architecture` exits `0` on native Windows 11 with the default `PATH` and without symlink privilege. Skill sync resolves its root through `pwd -W`, joins Windows paths natively, and creates directory junctions instead of symlinks in link mode, including whole-path junction staging, preimage capture and move-aside replacement. Scoop's `git.shim` is discovered as the protected-helper contract, and one pinned Git-for-Windows `bash.exe` replaces the WSL stub. Every executable that a read-only tooling probe resolves or launches passes one checkout-exclusion policy, which refuses a checkout-supplied launcher instead of falling back, and only an explicit `ensure --init` or `--sync` may use the pinned checkout-local CodeGraph launcher. A local checkout CLI install builds the hook bundle first and passes `--omit=dev`, and `build:hook-bundle` runs on native Windows shells. (#3560, #3562)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.37.5.
+- On native Windows, explicit `rh worktrees cleanup <slug>` now refuses a checkout that a live process holds, and keeps one whose occupancy it cannot prove; a clean merged checkout with no occupant is still removed. Managed sweep and board closeout rotate their batches, so a kept entry no longer blocks the rest across runs. (#3556, #3558, #3559)
+- On native Windows, `rh install` completes for a standard, non-elevated account without symlink privilege or Developer Mode, and a read-only tooling probe refuses a launcher that the checkout supplies. (#3562)
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.37.4 does not prove process occupancy for explicit `rh worktrees cleanup`, never rotates its sweep batches, and its `rh install` fails and rolls back on native Windows. Keep 0.37.5 on upgraded hosts; if you must return to 0.37.4, reinstall 0.37.4 and run `rh update`.
+
 ## [0.37.4] - 2026-11-26
 
 ### Added
