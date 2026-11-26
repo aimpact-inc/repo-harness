@@ -142,8 +142,10 @@ function inspectIgnoredWorktreeEntries(worktree: string, limits: Limits = {}): {
   return { count: entries.length, blockedPaths: [...blocked] };
 }
 
-export function assertNoIgnoredCloseoutData(worktree: string, limits: Limits = {}): void {
+export function assertCloseoutWorktreeSafe(worktree: string, limits: Limits = {}): void {
   assertNoBlockedIgnoredEntries(inspectIgnoredWorktreeEntries(worktree, limits).blockedPaths);
+  const occupancy = inspectWorktreeOccupancy(checkoutPath(worktree), limits);
+  if (occupancy.reason) throw new WorktreeNotGreenError([occupancy.reason]);
 }
 
 function assertNoBlockedIgnoredEntries(blockedPaths: readonly string[]): void {
@@ -220,7 +222,6 @@ type LiveRemovalOptions = {
   readonly allowProvider?: boolean;
   readonly verifiedMerge?: MergeProof;
   readonly processes?: WorktreeProcess[] | null;
-  readonly explicitCloseout?: boolean;
   readonly requireOwnCommits?: boolean;
   readonly env?: NodeJS.ProcessEnv;
 };
@@ -455,8 +456,6 @@ export function cleanupExactWorktree(root: string, expected: ExactWorktreeCleanu
       const probe = sweep?.processes ?? limits.closeoutProcesses;
       const inspection = inspectRemoval(root, path, sweep?.cwd ?? realpathSync(process.cwd()), limits, {
         target, allowProvider: true, verifiedMerge, requireOwnCommits: !!sweep, env: sweep?.env,
-        // Explicit contract cleanup keeps its existing occupancy behavior. Board and sweep supply an observer.
-        explicitCloseout: limits.closeout === true && probe === undefined,
         processes: probe?.(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000)),
       });
       if (limits.closeout) {
@@ -577,14 +576,20 @@ export function worktreeOccupyingPids(
     if (cwd.volumeRoot && target.volumeRoot) continue;
     if (target.ids.includes(cwd.ids.at(-1)!)) continue;
     if (cwd.volumeRoot && cwd.ids.some(id => target.ids.includes(id))) continue;
+    // A share can hide parents. A local volume root and distinct backing
+    // serials prove disjointness even when the other ancestry stops at a share.
+    if ((target.volumeRoot || cwd.volumeRoot) && target.volumeSerial && cwd.volumeSerial && target.volumeSerial !== cwd.volumeSerial) continue;
     return null;
   }
   return [...occupying];
 }
 
-function worktreeProcessCount(path: string, processes: WorktreeProcess[] | null): number | null {
+function inspectWorktreeOccupancy(path: string, limits: Limits, processes = worktreeProcesses(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000))): {
+  count: number | null; reason: 'process_unknown' | 'process_in_use' | null;
+} {
   const pids = worktreeOccupyingPids(path, processes);
-  return pids === null ? null : pids.length;
+  if (pids === null) return { count: null, reason: 'process_unknown' };
+  return { count: pids.length, reason: pids.length > 0 ? 'process_in_use' : null };
 }
 
 /** Git documents these backpointers. They are read only to fence whole prune,
@@ -841,14 +846,10 @@ function inspectRemoval(root: string, path: string, callerCwd: string | null, li
     const entry = topology.find(item => checkoutPath(item.path) === path);
     if (path === main) reasons.push('primary');
     if (callerCwd !== null && protectsCwd(path, callerCwd)) { reasons.push('session_cwd'); inUse = true; }
-    if (!options.explicitCloseout) {
-      const processes = options.processes === undefined
-        ? worktreeProcesses(Math.min(limits.deadline ?? Infinity, Date.now() + 5_000))
-        : options.processes;
-      result.process_count = worktreeProcessCount(path, processes);
-      if (result.process_count === null) reasons.push('process_unknown');
-      else if (result.process_count > 0) { reasons.push('process_in_use'); inUse = true; }
-    }
+    const occupancy = inspectWorktreeOccupancy(path, limits, options.processes);
+    result.process_count = occupancy.count;
+    if (occupancy.reason) reasons.push(occupancy.reason);
+    if (occupancy.reason === 'process_in_use') inUse = true;
     try {
       if (!taskWorktreeRuntimeClosed({ repository_id: common, primary_root: main, execution_root: path })) { reasons.push('runtime_open'); inUse = true; }
     } catch { reasons.push('runtime_unknown'); }

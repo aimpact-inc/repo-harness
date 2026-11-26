@@ -7,6 +7,8 @@ export interface WindowsDirectoryAncestry {
   /** Directory identity followed by its parents, up to the visible root. */
   readonly ids: readonly [string, ...string[]];
   readonly volumeRoot: boolean;
+  /** Backing-volume serial from the leaf directory handle, when nonzero. */
+  readonly volumeSerial?: string;
 }
 
 export interface WorktreeProcess { pid: number; cwd: string; windowsDirectory?: WindowsDirectoryAncestry }
@@ -577,11 +579,10 @@ function withWindowsDirectory<T>(api: WindowsProcessApi, path: string, read: (ha
   }
 }
 
-function queryWindowsDirectoryId(api: WindowsProcessApi, handle: Pointer): string | null {
+function queryWindowsDirectoryId(api: WindowsProcessApi, handle: Pointer): Buffer | null {
   // FILE_ID_INFO is an 8-byte volume serial followed by the 16-byte file ID.
   const info = Buffer.alloc(24);
-  return api.kernel32.GetFileInformationByHandleEx(handle, FILE_ID_INFO_CLASS, ptr(info), info.length) !== 0
-    ? info.toString('hex') : null;
+  return api.kernel32.GetFileInformationByHandleEx(handle, FILE_ID_INFO_CLASS, ptr(info), info.length) !== 0 ? info : null;
 }
 
 function queryWindowsDirectoryAncestry(api: WindowsProcessApi, handle: Pointer, path: string): WindowsDirectoryAncestry | null {
@@ -590,14 +591,15 @@ function queryWindowsDirectoryAncestry(api: WindowsProcessApi, handle: Pointer, 
   const volumePath = windowsVolumeGuid(path) ? path : queryFinalPathNameByFlag(api, handle, FILE_NAME_NORMALIZED_VOLUME_GUID);
   let current = cleanWindowsPath(volumePath ?? path);
   if (current === null) return null;
-  const ids: [string, ...string[]] = [id];
+  const ids: [string, ...string[]] = [id.toString('hex')];
   for (let parent = win32.dirname(current); parent !== current; parent = win32.dirname(current)) {
     const parentId = withWindowsDirectory(api, parent, dir => queryWindowsDirectoryId(api, dir));
     if (parentId === null) return null;
-    ids.push(parentId);
+    ids.push(parentId.toString('hex'));
     current = parent;
   }
-  return { ids, volumeRoot: windowsVolumeGuid(current) !== null };
+  const volumeSerial = id.readBigUInt64LE() === 0n ? undefined : id.toString('hex', 0, 8);
+  return { ids, volumeRoot: windowsVolumeGuid(current) !== null, volumeSerial };
 }
 
 /** Read a checkout directory and its ancestry through the same handle APIs as process CWDs. */

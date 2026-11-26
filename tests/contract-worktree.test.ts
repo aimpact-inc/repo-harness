@@ -21,6 +21,7 @@ import { LEDGER_EPOCH_START_SHA } from "../src/effects/evidence/epoch";
 import { appendGenesisRecord } from "../src/effects/evidence/event-log";
 
 import { sweepManagedWorktrees } from '../src/effects/state/coordination-worktree-topology';
+import type { WorktreeProcess } from '../src/effects/git/worktree-processes';
 import { defaultPolicy } from "../src/effects/adoption/standard-plan";
 import { copyHelpers, ROOT } from "./helpers/helper-script-fixture";
 import { addSelfOrigin, commitAll, initGitRepo as initFixtureGitRepo, run, tmpWorkspace } from "./helpers/repo-fixture";
@@ -33,7 +34,7 @@ import { productVersionManifest } from 'archctx-contracts';
 
 setDefaultTimeout(30000);
 
-function initGitRepo(cwd: string, inventory?: null): void {
+function initGitRepo(cwd: string, inventory?: WorktreeProcess[] | null): void {
   initFixtureGitRepo(cwd);
   writeControlledWorktreeProcessesConfig(cwd, inventory);
 }
@@ -94,13 +95,14 @@ function writeStartMetadata(cwd: string, slug: string, branch: string): void {
   writeFileSync(join(cwd, ".ai/harness/worktrees", `${slug}.json`), `${JSON.stringify({ slug, branch })}\n`);
 }
 
-function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void, tracked: string[] = [], inventory?: null) {
+function withIgnoredCleanupFixture(ignores: string, use: (f: ReturnType<typeof ignoredCleanupFixture>) => void, tracked: string[] = [],
+  inventory?: null | ((worktree: string) => WorktreeProcess[])) {
   const parent = tmpWorkspace("ignored-cleanup");
   try { use(ignoredCleanupFixture(parent, ignores, tracked, inventory)); }
   finally { rmSync(parent, { recursive: true, force: true }); }
 }
 
-function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[], inventory?: null) {
+function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[], inventory?: null | ((worktree: string) => WorktreeProcess[])) {
   const cwd = join(parent, "repo");
   const worktree = join(parent, "repo-wt-demo");
   const marker = join(worktree, ".ai/harness/active-worktree");
@@ -109,7 +111,7 @@ function ignoredCleanupFixture(parent: string, ignores: string, tracked: string[
   const entry = join(ROOT, "src/cli/index.ts");
   const scripts = join(ROOT, "scripts");
   mkdirSync(cwd);
-  initGitRepo(cwd, inventory);
+  initGitRepo(cwd, typeof inventory === 'function' ? inventory(worktree) : inventory);
   writeFileSync(join(cwd, ".gitignore"), `${ignores}\n`);
   if (tracked.length > 0) {
     writeIgnoredFiles(cwd, tracked);
@@ -170,18 +172,18 @@ describe("contract-worktree helper integration", () => {
     });
   });
 
-  test('slug cleanup can preview and remove a clean merged checkout with unknown occupancy', () => {
+  test.each([
+    ['process_unknown', null],
+    ['process_in_use', (worktree: string) => [{ pid: 42, cwd: join(worktree, 'src') }]],
+  ] as const)('slug cleanup keeps a clean merged checkout on %s in preview and apply', (reason, inventory) => {
     withIgnoredCleanupFixture('.ai/', f => {
-      const preview = f.cli(...f.cleanup, '--dry-run');
-      expect(preview.status, preview.stdout + preview.stderr).toBe(0);
-      expect(preview.stdout).toContain('would remove worktree');
-      f.retained();
-      const result = f.cli(...f.cleanup);
-      expect(result.status, result.stdout + result.stderr).toBe(0);
-      expect(existsSync(f.worktree)).toBe(false);
-      expect(existsSync(f.metadata)).toBe(false);
-      expect(f.branchStatus()).not.toBe(0);
-    }, [], null);
+      for (const args of [[...f.cleanup, '--dry-run'], f.cleanup, ['runtime', ...f.removeExact]]) {
+        const result = f.cli(...args);
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stderr).toContain(reason);
+        f.retained();
+      }
+    }, [], inventory);
   });
 
   test("slug cleanup accepts populated dependency, build and harness runtime outputs", () => {

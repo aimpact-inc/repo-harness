@@ -221,6 +221,32 @@ describe('read-only worktree judgment and lifecycle', () => {
     expect(worktreeOccupyingPids('C:\\repo-wt-1', observed, options)).toEqual([101]);
   });
 
+  test.each([
+    ['a different backing volume', '00000000000000bb', []],
+    ['the same backing volume', '00000000000000aa', null],
+    ['an unverified backing volume', undefined, null],
+  ])('windows occupancy with a share-limited CWD on %s', (_label, volumeSerial, expected) => {
+    const observed = [{ pid: 101, cwd: '\\\\server\\share\\repo', windowsDirectory: {
+      ids: ['remote-primary', 'remote-share'] as const, volumeRoot: false, volumeSerial,
+    } }];
+    const options = {
+      platform: 'win32' as const,
+      readTargetAncestry: () => ({ ids: ['checkout', 'volume-root'] as const, volumeRoot: true, volumeSerial: '00000000000000aa' }),
+    };
+    expect(worktreeOccupyingPids('C:\\repo-wt-1', observed, options)).toEqual(expected);
+  });
+
+  test('windows occupancy proves a share-limited checkout disjoint from a local CWD on a different volume', () => {
+    const observed = [{ pid: 101, cwd: 'C:\\repo', windowsDirectory: {
+      ids: ['primary', 'volume-root'] as const, volumeRoot: true, volumeSerial: '00000000000000aa',
+    } }];
+    const options = {
+      platform: 'win32' as const,
+      readTargetAncestry: () => ({ ids: ['checkout', 'share-root'] as const, volumeRoot: false, volumeSerial: '00000000000000bb' }),
+    };
+    expect(worktreeOccupyingPids('\\\\server\\share\\repo-wt-demo', observed, options)).toEqual([]);
+  });
+
   test('windows occupancy is unknown for a UNC target and a volume-GUID CWD with no common identity', () => {
     const observed = [{ pid: 105, cwd: '\\\\?\\Volume{AAAA-1111}\\src',
       windowsDirectory: { ids: ['src', 'volume-root'] as const, volumeRoot: true } }];

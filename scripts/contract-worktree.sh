@@ -605,7 +605,7 @@ cleanup_worktree() {
       echo "contract-worktree: preserve the dirty worktree and ask the user before any deletion" >&2
       exit 1
     fi
-    run_contract_runtime assert-ignored-cleanup-safe --worktree "$worktree_path"
+    run_contract_runtime assert-cleanup-safe --worktree "$worktree_path"
   else
     echo "[ContractWorktree] Worktree already absent, skipping: $branch_name"
   fi
