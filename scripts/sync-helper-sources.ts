@@ -22,6 +22,7 @@ const CAPABILITY_HELPER = "capability-resolver.ts";
 const CAPABILITY_CORE = join(REPO_ROOT, "src", "core", "capabilities", "registry.ts");
 const CAPABILITY_RESOLVER = join(REPO_ROOT, "src", "core", "capabilities", "resolver.ts");
 const GIT_RUNNER = join(REPO_ROOT, "src/effects/git/runner.ts");
+const GIT_ASYNC_CHILD = join(REPO_ROOT, "src/effects/git/async-child.ts");
 const READONLY_OBSERVATION = join(REPO_ROOT, "src/effects/readonly-observation.ts");
 const CAPABILITY_EFFECTS = join(REPO_ROOT, "src", "effects", "architecture", "capability-resolver.ts");
 const ARCHITECTURE_CONTRACTS = join(REPO_ROOT, "src", "core", "architecture", "contracts.ts");
@@ -90,7 +91,8 @@ function buildCapabilityProjection(): ProjectionFileRecord {
   const resolver = stripInlinedImports(readFileSync(CAPABILITY_RESOLVER, "utf-8"), ["./registry"]);
   const contracts = stripInlinedImports(readFileSync(ARCHITECTURE_CONTRACTS, "utf-8"), ["../capabilities/registry"]);
   const observation = readFileSync(READONLY_OBSERVATION, "utf-8");
-  const gitRunner = stripInlinedImports(readFileSync(GIT_RUNNER, "utf-8"), ["../readonly-observation"]);
+  const gitRunner = stripInlinedImports(readFileSync(GIT_RUNNER, "utf-8"), ["../readonly-observation", "./async-child"]);
+  const gitAsyncChild = readFileSync(GIT_ASYNC_CHILD, "utf-8").replace(/^export function /gm, "function ");
   const policySchema = readFileSync(WORKFLOW_POLICY_SCHEMA, "utf-8");
   const policyFile = stripInlinedImports(readFileSync(WORKFLOW_POLICY_FILE, "utf-8"), ["../../core/workflow/policy-schema"]);
   const effects = stripInlinedImports(readFileSync(CAPABILITY_EFFECTS, "utf-8"), [
@@ -110,6 +112,7 @@ function buildCapabilityProjection(): ProjectionFileRecord {
     resolver.trim(),
     contracts.trim(),
     observation.trim(),
+    gitAsyncChild.trim(),
     gitRunner.trim(),
     policySchema.trim(),
     policyFile.trim(),
