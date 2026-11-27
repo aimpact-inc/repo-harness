@@ -7,13 +7,29 @@ import { agySeatAgentName, agySeatBrief } from '../../core/board/seat-launch';
 import { agySeatAgentTools } from '../../core/board/seat-launch-agy-tools';
 import { MAGPIE_EXTENSION_PATH, SEAT_POOL_STALE_MS, buildSeatPool, catalogProbeModelIds, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
 import {
+  SeatOverrideValidationError,
+  applySeatOverrides,
+  decodeEffectiveSeats,
+  decodeSeatOverrideResult,
+  decodeSeatOverrides,
+  effectiveSeatsInvalidMessage,
+  normalizeOverrideInstruction,
+  seatOverridesInvalidMessage,
+  type SeatOverrideRevokeRequestV1,
+  type SeatOverrideResultV1,
+  type SeatOverrideSetRequestV1,
+  type SeatOverridesV1,
+  type SeatRouteOverrideV1,
+} from '../../core/board/seat-overrides';
+import {
   AgySeatSettingsError, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_RUNTIMES, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS,
-  decodeSeatsConfig, retiredSeatModelField, seatsConfigInvalidMessage, seatHostId, seatTakesFleet,
+  agyEffortValid, decodeSeatsConfig, isAgyAllowedSeat, isRetiredSeatModel, retiredSeatModelField, seatHostId, seatModelShapeValid, seatTakesFleet, seatsConfigInvalidMessage,
   type AgyCatalogModel, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatModelV1, type SeatRoutingV1, type SeatRuntime,
   type SeatsConfigV1, type SeatsRangesV1, type SeatsSettingsResultV1,
 } from '../../core/board/seats-settings';
 import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { isRecord } from '../../core/evidence/is-record';
+import { renderJsonObjectUpdate } from '../../core/evidence/json-object-update';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError } from '../../core/host-config/types';
 import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
@@ -37,6 +53,11 @@ export type SeatsConfigurationErrorCode =
   | 'config_is_link'
   | 'revision_conflict'
   | AgySeatSettingsError['code']
+  | 'owner_approval_required'
+  | 'seat_override_instruction_invalid'
+  | 'seat_not_configured'
+  | 'seat_override_not_found'
+  | 'seat_override_active'
   | 'seat_runtime_not_enabled'
   | 'seat_model_invalid'
   | 'seat_model_retired'
@@ -65,7 +86,12 @@ export function seatsRanges(enabledRuntimes: readonly string[], agyModels: reado
 
 export interface SeatsConfiguration {
   readonly revision: string;
+  /** Effective seats with active owner overrides overlaid. */
   readonly seats: SeatsConfigV1;
+  /** Base catalog seats stored in `config.seats` before overrides. */
+  readonly base_seats: SeatsConfigV1;
+  /** Active owner-authorized route overrides stored in `config.seat_overrides`. */
+  readonly overrides: SeatOverridesV1;
   readonly enabled_runtimes: readonly string[];
 }
 
@@ -85,6 +111,22 @@ function decodeSeatsSection(value: unknown): SeatsConfigV1 {
   }
 }
 
+function decodeSeatOverridesSection(value: unknown): SeatOverridesV1 {
+  try { return decodeSeatOverrides(value); } catch (error) {
+    if (error instanceof AgySeatSettingsError) throw new SeatsConfigurationError(error.code, error.message);
+    throw new SeatsConfigurationError('config_invalid', seatOverridesInvalidMessage(error));
+  }
+}
+
+function decodeEffectiveSeatsDocument(config: Record<string, unknown>) {
+  try { return decodeEffectiveSeats(config); } catch (error) {
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError || error instanceof SeatOverrideValidationError) {
+      throw new SeatsConfigurationError(error.code, error.message);
+    }
+    throw new SeatsConfigurationError('config_invalid', effectiveSeatsInvalidMessage(error));
+  }
+}
+
 export function readSeatsConfiguration(env: NodeJS.ProcessEnv = process.env): SeatsConfiguration {
   let document: ReturnType<typeof readGlobalConfiguration>;
   try {
@@ -92,14 +134,25 @@ export function readSeatsConfiguration(env: NodeJS.ProcessEnv = process.env): Se
   } catch {
     throw new SeatsConfigurationError('config_invalid', 'The repo-harness configuration file is not a valid JSON object.');
   }
-  return { revision: document.revision, seats: decodeSeatsSection(document.config.seats), enabled_runtimes: enabledRuntimesOf(document.config) };
+  const resolved = decodeEffectiveSeatsDocument(document.config);
+  return {
+    revision: document.revision,
+    seats: resolved.seats,
+    base_seats: resolved.base_seats,
+    overrides: resolved.overrides,
+    enabled_runtimes: enabledRuntimesOf(document.config),
+  };
 }
 
-/** The model id is the user's (#3250): the request decoder owns its shape, and the seat's `models` in the ranges only recommends. */
-function checkEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
+/** The model id and effort are user text (#3250, #3641): name the field and allowed values, never echo the submitted value. */
+function checkEffort(field: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
   const runtime = RUNTIME_RANGES[runtimeId];
   if (model.effort !== null && (!runtime.effort || !EFFORT_LEVELS.includes(model.effort))) {
-    throw new SeatsConfigurationError('seat_effort_invalid', `The ${subject} cannot use effort ${model.effort} on ${runtimeId}.`);
+    const allowed = runtime.effort ? EFFORT_LEVELS.join(', ') : 'none';
+    throw new SeatsConfigurationError(
+      'seat_effort_invalid',
+      `The effort at ${field} is not valid for ${runtimeId}. Allowed values: ${allowed}.`,
+    );
   }
 }
 
@@ -107,7 +160,7 @@ export function checkSeatRoutingModels(routing: SeatRoutingV1): void {
   if (routing.low_quota_explorer.model === null) {
     throw new SeatsConfigurationError('seat_model_invalid', 'The routing.low_quota_explorer model is required.');
   }
-  checkEffort('routing.low_quota_explorer', routing.low_quota_explorer, 'claude');
+  checkEffort('seats.routing.low_quota_explorer.effort', routing.low_quota_explorer, 'claude');
 }
 
 function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly string[]): void {
@@ -116,7 +169,7 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (!enabledRuntimes.includes(seatHostId(seat.runtime))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Fix the ${id} seat before saving. Its runtime ${seat.runtime} is disabled under Hosts.`);
   }
-  checkEffort(`${id} seat`, seat, seat.runtime);
+  checkEffort(`seats.${id}.effort`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
   const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));
@@ -172,13 +225,13 @@ function agyEffortChanged(stored: SeatConfigV1 | null, next: SeatConfigV1 | null
 }
 
 /** The messages name the seat field only: a model id is user text and a refusal body goes into the operator audit. */
-function checkAgyEffort(id: SeatId, seat: SeatConfigV1 & { readonly effort: string }, catalog: AgyProbe): void {
+function checkAgyEffort(id: SeatId, seat: { readonly model: string | null; readonly effort: string }, catalog: AgyProbe, section: 'seats' | 'seat_overrides' = 'seats'): void {
   const listed = catalog.kind === 'available' ? catalog.models.find(model => model.id === seat.model) : undefined;
   if (catalog.kind !== 'available' || listed?.efforts === null) {
-    throw new SeatsConfigurationError('seat_effort_unverified', `agy did not report the effort menu of the seats.${id}.model, so seats.${id}.effort cannot be checked.`);
+    throw new SeatsConfigurationError('seat_effort_unverified', `agy did not report the effort menu of the ${section}.${id}.model, so ${section}.${id}.effort cannot be checked.`);
   }
   if (!listed?.efforts.includes(seat.effort)) {
-    throw new SeatsConfigurationError('seat_effort_invalid', `The agy catalog does not offer seats.${id}.effort for seats.${id}.model.`);
+    throw new SeatsConfigurationError('seat_effort_invalid', `The agy catalog does not offer ${section}.${id}.effort for ${section}.${id}.model.`);
   }
 }
 
@@ -361,6 +414,13 @@ export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env:
   });
 }
 
+function assertNoActiveOverrideCleared(next: SeatsConfigV1, overrides: SeatOverridesV1): void {
+  const blocked = SEAT_IDS.find(id => next[id] === null && overrides[id] !== undefined);
+  if (blocked !== undefined) {
+    throw new SeatsConfigurationError('seat_override_active', `Revoke the active owner override on ${blocked} before turning the seat off.`);
+  }
+}
+
 /** Replaces the `seats` section. It writes only the configuration file; panes that run keep their launch arguments. */
 export async function applySeatsSettings(
   request: { readonly expected_revision: string; readonly seats: SeatsConfigV1 },
@@ -371,7 +431,7 @@ export async function applySeatsSettings(
   try {
     // The catalog read can take a minute, so it runs before the configuration lock. The expected revision refuses a
     // section that changed after this read.
-    const stored = SEAT_IDS.some(id => agyEffortChanged(null, request.seats[id])) ? readSeatsConfiguration(env).seats : null;
+    const stored = SEAT_IDS.some(id => agyEffortChanged(null, request.seats[id])) ? readSeatsConfiguration(env).base_seats : null;
     const agyChecks = stored === null ? [] : SEAT_IDS.flatMap((id) => {
       const seat = request.seats[id];
       return agyEffortChanged(stored[id], seat) ? [{ id, seat }] : [];
@@ -387,10 +447,148 @@ export async function applySeatsSettings(
       checkSeatRoutingModels(request.seats.routing);
       // One decoder for the read path and the save (#2917): a candidate that `rh quota` or `rh seats argv` would refuse is never written.
       const next = decodeSeatsSection(request.seats);
+      const overrides = decodeSeatOverridesSection(config.seat_overrides);
+      assertNoActiveOverrideCleared(next, overrides);
+      applySeatOverrides(next, overrides);
       const changed = changedKeys(decodeSeatsSection(config.seats), next);
       return { config: { ...config, seats: next }, value: changed };
     }, { expectedRevision: request.expected_revision });
     return { config_revision: result.revision, changed_keys: result.value };
+  } catch (error) {
+    if (error instanceof GlobalConfigurationError || error instanceof SeatOverrideValidationError) {
+      throw new SeatsConfigurationError(error.code, error.message);
+    }
+    throw error;
+  }
+}
+
+function validateOverrideRouteInput(request: SeatOverrideSetRequestV1): string {
+  if (!(SEAT_IDS as readonly string[]).includes(request.seat)) {
+    throw new SeatsConfigurationError('config_invalid', 'The seat_overrides seat is not valid.');
+  }
+  if (!(SEAT_RUNTIMES as readonly string[]).includes(request.runtime)) {
+    throw new SeatsConfigurationError(
+      'seat_runtime_not_allowed',
+      `The runtime at seat_overrides.${request.seat}.runtime is not valid. Allowed values: ${SEAT_RUNTIMES.join(', ')}.`,
+    );
+  }
+  if (request.owner_approved !== true) {
+    throw new SeatsConfigurationError('owner_approval_required', 'Explicit owner approval is required to authorize a seat route override.');
+  }
+  const instruction = normalizeOverrideInstruction(request.instruction);
+  if (instruction === null) {
+    throw new SeatsConfigurationError('seat_override_instruction_invalid', 'Provide a single-line owner instruction between 1 and 280 characters.');
+  }
+  if (request.runtime === 'agy' && !isAgyAllowedSeat(request.seat)) {
+    throw new SeatsConfigurationError('seat_runtime_not_allowed', `The ${request.seat} seat cannot use the agy runtime.`);
+  }
+  const modelValid = request.runtime === 'agy'
+    ? seatModelShapeValid('agy', request.model)
+    : request.model === null || seatModelShapeValid(request.runtime, request.model);
+  if (!modelValid) {
+    throw new SeatsConfigurationError('seat_model_invalid', `The model at seat_overrides.${request.seat}.model is not valid for ${request.runtime}.`);
+  }
+  if (isRetiredSeatModel(request.model)) {
+    throw new SeatsConfigurationError('seat_model_retired', `The model at seat_overrides.${request.seat}.model is retired. Choose another model.`);
+  }
+  checkEffort(`seat_overrides.${request.seat}.effort`, { model: request.model, effort: request.effort }, request.runtime);
+  if (request.runtime === 'agy' && request.model !== null && !agyEffortValid(request.model, request.effort)) {
+    throw new SeatsConfigurationError(
+      'seat_effort_invalid',
+      `The effort at seat_overrides.${request.seat}.effort is not valid for agy. Allowed values: ${EFFORT_LEVELS.join(', ')}.`,
+    );
+  }
+  return instruction;
+}
+
+/**
+ * Authorize one owner seat route override in `~/.repo-harness/config.json#seat_overrides` (#3641).
+ * Reuses the range-checked configuration write lock; base catalog routes stay untouched in `seats`.
+ */
+export async function applySeatOverride(
+  request: SeatOverrideSetRequestV1,
+  env: NodeJS.ProcessEnv = process.env,
+  now: Date = new Date(),
+): Promise<SeatOverrideResultV1> {
+  const instruction = validateOverrideRouteInput(request);
+  try {
+    const needsAgyCatalog = request.runtime === 'agy' && request.effort !== null
+      && readSeatsConfiguration(env).enabled_runtimes.includes(seatHostId('agy'));
+    const catalog = needsAgyCatalog ? await readAgyCatalogOffThread(env) : null;
+    const result = mutateGlobalConfiguration(env, (config) => {
+      const enabled = enabledRuntimesOf(config);
+      if (!enabled.includes(seatHostId(request.runtime))) {
+        throw new SeatsConfigurationError('seat_runtime_not_enabled', `Enable ${request.runtime} under Hosts before authorizing a ${request.seat} override.`);
+      }
+      const base = decodeSeatsSection(config.seats);
+      if (base[request.seat] === null) {
+        throw new SeatsConfigurationError('seat_not_configured', `Configure the ${request.seat} seat before authorizing a route override.`);
+      }
+      if (request.runtime === 'agy' && request.effort !== null) {
+        if (catalog === null) {
+          throw new SeatsConfigurationError('seat_effort_unverified', `agy did not report the effort menu of the seat_overrides.${request.seat}.model, so seat_overrides.${request.seat}.effort cannot be checked.`);
+        }
+        checkAgyEffort(request.seat, { model: request.model, effort: request.effort }, catalog, 'seat_overrides');
+      }
+      const currentOverrides = decodeSeatOverridesSection(config.seat_overrides);
+      const override: SeatRouteOverrideV1 = {
+        runtime: request.runtime,
+        model: request.model,
+        effort: request.effort,
+        authorized_at: now.toISOString(),
+        instruction,
+      };
+      const nextOverrides = decodeSeatOverridesSection({ ...currentOverrides, [request.seat]: override });
+      applySeatOverrides(base, nextOverrides);
+      return { config: { ...config, seat_overrides: nextOverrides }, value: override.authorized_at };
+    }, { expectedRevision: request.expected_revision, render: renderJsonObjectUpdate });
+    return decodeSeatOverrideResult({
+      config_revision: result.revision,
+      seat: request.seat,
+      active: true,
+      authorized_at: result.value,
+      changed_keys: [`seat_overrides.${request.seat}`],
+    });
+  } catch (error) {
+    if (error instanceof GlobalConfigurationError) throw new SeatsConfigurationError(error.code, error.message);
+    if (error instanceof SeatOverrideValidationError) throw new SeatsConfigurationError(error.code, error.message);
+    throw error;
+  }
+}
+
+/** Revoke one active owner seat route override, restoring the stored base catalog route in `seats`. */
+export function revokeSeatOverride(
+  request: SeatOverrideRevokeRequestV1,
+  env: NodeJS.ProcessEnv = process.env,
+): SeatOverrideResultV1 {
+  if (!(SEAT_IDS as readonly string[]).includes(request.seat)) {
+    throw new SeatsConfigurationError('config_invalid', 'The seat_overrides seat is not valid.');
+  }
+  if (request.owner_approved !== true) {
+    throw new SeatsConfigurationError('owner_approval_required', 'Explicit owner approval is required to revoke a seat route override.');
+  }
+  try {
+    const result = mutateGlobalConfiguration(env, (config) => {
+      decodeSeatsSection(config.seats);
+      const currentOverrides = decodeSeatOverridesSection(config.seat_overrides);
+      if (currentOverrides[request.seat] === undefined) {
+        throw new SeatsConfigurationError('seat_override_not_found', `No active owner override exists for the ${request.seat} seat.`);
+      }
+      const remainingEntries = Object.entries(currentOverrides).filter(([id]) => id !== request.seat);
+      if (remainingEntries.length === 0) {
+        const { seat_overrides: _removed, ...rest } = config;
+        return { config: rest, value: true };
+      }
+      const nextOverrides = decodeSeatOverridesSection(Object.fromEntries(remainingEntries));
+      return { config: { ...config, seat_overrides: nextOverrides }, value: true };
+    }, { expectedRevision: request.expected_revision, render: renderJsonObjectUpdate });
+    return decodeSeatOverrideResult({
+      config_revision: result.revision,
+      seat: request.seat,
+      active: false,
+      authorized_at: null,
+      changed_keys: [`seat_overrides.${request.seat}`],
+    });
   } catch (error) {
     if (error instanceof GlobalConfigurationError) throw new SeatsConfigurationError(error.code, error.message);
     throw error;

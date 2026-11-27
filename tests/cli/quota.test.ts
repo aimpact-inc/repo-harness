@@ -12,7 +12,9 @@ import {
   formatQuotaReport,
   type QuotaReport,
 } from '../../src/core/board/quota';
-import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, seatAccount, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
+import { applySeatOverrides, type SeatOverridesV1 } from '../../src/core/board/seat-overrides';
+import { effectiveSeatConfig, formatSeatModes, formatSeatRoutes, hasAgySeat, seatAccount, seatAccountQuotas, selectSeatRoute } from '../../src/core/board/seat-routing';
+import { modelFamily } from '../../src/core/review/model-family';
 import { AGY_HYDROGEN_VARIANTS, LOGICAL_MODEL_IDS, MODEL_CATALOG, catalogEntry, catalogModelIds, isCatalogModelPermittedOnSeat, resolveCatalogRoute } from '../../src/core/board/model-catalog';
 import { SHIPPED_MODEL_IDS } from '../../src/core/board/recommended-models';
 import { decodeSeatPool, seatRuntimeBlock } from '../../src/core/board/seat-pool';
@@ -244,6 +246,55 @@ describe('seat quota routing', () => {
     expect(isCatalogModelPermittedOnSeat('worker-neon-deep', catalogEntry('neon', 'magpie'))).toBe(true);
     expect(isCatalogModelPermittedOnSeat('reviewer', catalogEntry('glm-5.4', 'magpie'))).toBe(true);
     expect(MODEL_CATALOG.astra.planes).toEqual(['council']);
+    // #3641: catalog stays generic with no hard-coded agy route for opus.
+    expect(MODEL_CATALOG.opus.magpie).toEqual({ runtime: 'claude', model: 'opus', effort: 'high' });
+    expect(MODEL_CATALOG.opus.native).toEqual({ runtime: 'claude', model: 'opus', effort: 'high' });
+  });
+
+  test('owner seat overrides distinguish mapped quota accounts from untracked custom providers (#3641)', () => {
+    const claudeExhausted = claude({ seven_day: week(97, 84) });
+    const codexExhausted = classifyQuotaReading(decodeCodexRateLimitsResult({ rateLimits: {
+      primary: { usedPercent: 97, windowDurationMins: 10080, resetsAt: (NOW + 84 * HOUR) / 1000 },
+    } }, new Date(NOW).toISOString()), NOW);
+    const agyHealthy = classifyQuotaReading({
+      account: 'agy_other', source: 'agy_account_usage', observed_at: new Date(NOW).toISOString(), reason: null,
+      windows: [{ window: 'weekly', window_minutes: 10080, used_percent: 20, resets_at: (NOW + 84 * HOUR) / 1000, absent: false, reason: null }],
+    }, NOW);
+
+    // Group A: mapped provider route reads its own quota account (agy_other) instead of Claude.
+    const mappedOverrides: SeatOverridesV1 = {
+      'worker-opus': {
+        runtime: 'pi', model: 'magpie/agy-cli/custom-other', effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z', instruction: 'Owner authorized mapped provider',
+      },
+    };
+    const mappedSeats = applySeatOverrides(DEFAULT_SEATS_CONFIG, mappedOverrides);
+    expect(seatAccount(mappedSeats['worker-opus'])).toBe('agy_other');
+    expect(hasAgySeat(mappedSeats)).toBe(true);
+    const mappedRoutes = formatSeatRoutes(mappedSeats, seatAccountQuotas([claudeExhausted, agyHealthy], mappedSeats.routing), mappedOverrides);
+    expect(mappedRoutes).toContain('route frontend: worker-opus (pi seats.worker-opus.model high; owner override; agy_other normal)');
+
+    // Group B: unmapped custom provider reports quota untracked, borrows no other provider quota, and triggers no automatic fallback.
+    const unmappedOverrides: SeatOverridesV1 = {
+      'worker-opus': {
+        runtime: 'pi', model: 'example-provider/custom-model', effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z', instruction: 'Owner authorized custom provider',
+      },
+      gatekeeper: {
+        runtime: 'pi', model: 'example-provider/custom-model', effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z', instruction: 'Owner authorized custom gatekeeper provider',
+      },
+    };
+    const withFallback = { ...DEFAULT_SEATS_CONFIG, 'gatekeeper-fallback': DEFAULT_SEATS_CONFIG['worker-light'] };
+    const unmappedSeats = applySeatOverrides(withFallback, unmappedOverrides);
+    expect(seatAccount(unmappedSeats['worker-opus'])).toBeNull();
+    const unmappedQuota = seatAccountQuotas([claudeExhausted, codexExhausted], unmappedSeats.routing);
+    const unmappedRoutes = formatSeatRoutes(unmappedSeats, unmappedQuota, unmappedOverrides);
+    expect(unmappedRoutes).toContain('route frontend: worker-opus (pi seats.worker-opus.model high; owner override; quota untracked)');
+    expect(unmappedRoutes).toContain('gatekeeper: gatekeeper (pi seats.gatekeeper.model high; owner override; quota untracked)');
+    // Model family stays independent of provider overrides.
+    expect(modelFamily('example-provider/custom-model')).toBeNull();
+    expect(modelFamily('seats.worker-opus.model')).toBeNull();
   });
 
   test('unknown weekly quota has no derived mode; short-window exhaustion still stops Claude', () => {

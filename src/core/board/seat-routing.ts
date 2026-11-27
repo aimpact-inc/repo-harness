@@ -1,6 +1,7 @@
 import { AGY_QUOTA_ACCOUNTS, weeklyRemainingPercent, type QuotaAccount, type QuotaAccountReport, type QuotaState } from './quota';
 import { catalogEntry, catalogSeatAccount } from './model-catalog';
 import { SHIPPED_MODEL_IDS } from './recommended-models';
+import type { SeatOverridesV1 } from './seat-overrides';
 import { PI_NEON_MODEL, ROUTING_CLASSES, SEAT_IDS, isCouncilSeat, isNeonSeat, isReviewSeat, unavailablePiSeat, type CodexCreditMode, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRoutingV1, type SeatsConfigV1 } from './seats-settings';
 
 interface AccountQuota { readonly state: QuotaState; readonly remaining: number | null }
@@ -85,10 +86,10 @@ export function seatState(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuot
  * One model projection serves the launch argv and the human dispatch lines. The advisor takes its config entry in
  * hyper mode for its route. Claude hyper routes workers as normal.
  */
-export function effectiveSeatConfig<Id extends SeatId>(id: Id, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatsConfigV1[Id];
-export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatConfigV1 | null {
+export function effectiveSeatConfig<Id extends SeatId>(id: Id, seats: SeatsConfigV1, quota: SeatAccountQuotas, overrides?: SeatOverridesV1): SeatsConfigV1[Id];
+export function effectiveSeatConfig(id: SeatId, seats: SeatsConfigV1, quota: SeatAccountQuotas, overrides?: SeatOverridesV1): SeatConfigV1 | null {
   const configured = seats[id];
-  if (configured === null || isCouncilSeat(id)) return configured;
+  if (configured === null || isCouncilSeat(id) || overrides?.[id] !== undefined) return configured;
   const seat = configured.runtime === 'claude' && quota.claude.mode === 'saving' ? { ...configured, advisor_model: null } : configured;
   if (seat.runtime === 'claude') {
     const reserved = claudeReserved(quota);
@@ -113,7 +114,10 @@ export const shownModel = (field: string, model: string | null): string =>
   model === null ? 'default' : SHIPPED_MODEL_IDS.has(model) ? model : field;
 const modelText = (field: string, seat: { readonly model: string | null; readonly effort: string | null }): string =>
   [shownModel(field, seat.model), seat.effort].filter(value => value !== null).join(' ');
-const launchText = (id: SeatId, seat: SeatConfigV1): string => `${seat.runtime} ${modelText(`seats.${id}.model`, seat)}`;
+const launchText = (id: SeatId, seat: SeatConfigV1, overrides?: SeatOverridesV1): string => {
+  const base = `${seat.runtime} ${modelText(`seats.${id}.model`, seat)}`;
+  return overrides?.[id] === undefined ? base : `${base}; owner override`;
+};
 
 function accountText(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas): string | null {
   const account = seatAccount(seat);
@@ -156,14 +160,14 @@ export type SeatModelCheck = (id: SeatId, seat: SeatConfigV1) => string | null;
  * Evaluates configured route chains strictly left-to-right after filtering reserved or exhausted accounts (ADR-0006 §2).
  */
 export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota: SeatAccountQuotas, allow: (seat: SeatConfigV1) => boolean = () => true,
-  modelBlock: SeatModelCheck = (_id, seat) => unavailablePiSeat(seat, seats.routing)): SeatRouteV1 {
+  modelBlock: SeatModelCheck = (_id, seat) => unavailablePiSeat(seat, seats.routing), overrides?: SeatOverridesV1): SeatRouteV1 {
   const reservedClaude = claudeReserved(quota);
   const reservedAgy = agyReserved(quota);
   const ids = seats.routing[task];
   const hasClaude = ids.some(id => seats[id]!.runtime === 'claude');
   const hasNeon = ids.some(id => isNeonSeat(seats[id]!));
   const candidates = ids
-    .map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota)! })).filter(({ seat }) => allow(seat))
+    .map(id => ({ id, seat: effectiveSeatConfig(id, seats, quota, overrides)! })).filter(({ seat }) => allow(seat))
     .map(candidate => ({ ...candidate, modelBlock: modelBlock(candidate.id, candidate.seat) }));
   if (candidates.length === 0) return { id: null, line: `route ${task}: none (no seat in the route may take this task)` };
   const isAvailable = ({ id, seat, modelBlock }: typeof candidates[number]) => {
@@ -179,14 +183,15 @@ export function selectSeatRoute(task: RoutingClass, seats: SeatsConfigV1, quota:
     ?? available.find(({ id, seat }) => seatState(id, seat, quota) === 'unknown');
   if (selected === undefined) {
     const reasons = [...new Set(candidates.map(reason))].join('; ');
-    const waitingFor = hasNeon ? (hasClaude ? 'claude or neon' : 'neon') : 'claude';
+    const waitingFor = hasNeon ? (hasClaude ? 'claude or neon' : 'neon') : (hasClaude ? 'claude' : 'configured frontend seats');
     return { id: null, line: `route ${task}: none (${reasons}${task === 'frontend' ? `; frontend waits for ${waitingFor}` : ''})` };
   }
   const selectedState = seatState(selected.id, selected.seat, quota);
-  const showAccount = isAgyAccount(seatAccount(selected.seat)) || selectedState === 'unknown' || selectedState === 'tight';
-  const warning = showAccount ? accountSuffix(selected.id, selected.seat, quota) : '';
+  const isOverridden = overrides?.[selected.id] !== undefined;
+  const showAccount = isOverridden || isAgyAccount(seatAccount(selected.seat)) || selectedState === 'unknown' || selectedState === 'tight';
+  const warning = showAccount ? accountSuffix(selected.id, selected.seat, quota, overrides) : '';
   const skipped = candidates.slice(0, candidates.indexOf(selected)).map(candidate => `; skipped ${candidate.id}: ${reason(candidate)}`).join('');
-  return { id: selected.id, seat: selected.seat, line: `route ${task}: ${selected.id} (${launchText(selected.id, selected.seat)}${warning})${skipped}` };
+  return { id: selected.id, seat: selected.seat, line: `route ${task}: ${selected.id} (${launchText(selected.id, selected.seat, overrides)}${warning})${skipped}` };
 }
 
 /**
@@ -203,52 +208,56 @@ function reviewSeatBlocked(id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuo
     );
 }
 
-const accountSuffix = (id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas): string => seatAccount(seat) === null ? '' : `; ${accountText(id, seat, quota)}`;
+const accountSuffix = (id: SeatId, seat: SeatConfigV1, quota: SeatAccountQuotas, overrides?: SeatOverridesV1): string => {
+  const text = accountText(id, seat, quota);
+  if (text !== null) return `; ${text}`;
+  return overrides?.[id] !== undefined ? '; quota untracked' : '';
+};
 
 /**
  * The effective gatekeeper (#2253): the one source of the gatekeeper route line, of `seats argv gatekeeper` and of the review plan.
  * The gatekeeper-fallback seat takes over only while the gatekeeper account is exhausted; a tight, unknown or reserved gatekeeper keeps its own rule.
  */
-export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuotas): SeatRouteV1 {
-  const gatekeeper = effectiveSeatConfig('gatekeeper', seats, quota);
+export function effectiveGatekeeper(seats: SeatsConfigV1, quota: SeatAccountQuotas, overrides?: SeatOverridesV1): SeatRouteV1 {
+  const gatekeeper = effectiveSeatConfig('gatekeeper', seats, quota, overrides);
   if (!reviewSeatBlocked('gatekeeper', gatekeeper, quota, seats.routing)) {
-    return { id: 'gatekeeper', seat: gatekeeper, line: `gatekeeper: gatekeeper (${launchText('gatekeeper', gatekeeper)}${accountSuffix('gatekeeper', gatekeeper, quota)})` };
+    return { id: 'gatekeeper', seat: gatekeeper, line: `gatekeeper: gatekeeper (${launchText('gatekeeper', gatekeeper, overrides)}${accountSuffix('gatekeeper', gatekeeper, quota, overrides)})` };
   }
   const cause = blockText('gatekeeper', gatekeeper, quota, seats.routing);
-  const fallback = effectiveSeatConfig('gatekeeper-fallback', seats, quota);
+  const fallback = effectiveSeatConfig('gatekeeper-fallback', seats, quota, overrides);
   const account = seatAccount(gatekeeper);
   if (fallback === null || account === null || quota[account].state !== 'exhausted') return { id: null, line: `gatekeeper: none (${cause})` };
   if (reviewSeatBlocked('gatekeeper-fallback', fallback, quota, seats.routing)) {
     return { id: null, line: `gatekeeper: none (${cause}; gatekeeper-fallback: ${blockText('gatekeeper-fallback', fallback, quota, seats.routing)})` };
   }
   return { id: 'gatekeeper-fallback', seat: fallback,
-    line: `gatekeeper: gatekeeper-fallback (${launchText('gatekeeper-fallback', fallback)}${accountSuffix('gatekeeper-fallback', fallback, quota)}; gatekeeper: ${cause})` };
+    line: `gatekeeper: gatekeeper-fallback (${launchText('gatekeeper-fallback', fallback, overrides)}${accountSuffix('gatekeeper-fallback', fallback, quota, overrides)}; gatekeeper: ${cause})` };
 }
 
 /** The route line of a review seat that has no fallback. */
-function reviewSeatLine(id: 'reviewer', seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
-  const seat = effectiveSeatConfig(id, seats, quota);
+function reviewSeatLine(id: 'reviewer', seats: SeatsConfigV1, quota: SeatAccountQuotas, overrides?: SeatOverridesV1): string {
+  const seat = effectiveSeatConfig(id, seats, quota, overrides);
   return reviewSeatBlocked(id, seat, quota, seats.routing)
     ? `${id}: none (${blockText(id, seat, quota, seats.routing)})`
-    : `${id}: ${id} (${launchText(id, seat)}${accountSuffix(id, seat, quota)})`;
+    : `${id}: ${id} (${launchText(id, seat, overrides)}${accountSuffix(id, seat, quota, overrides)})`;
 }
 
 const EXPLORER_FIELD = 'seats.routing.low_quota_explorer.model';
 
 /** The saving threshold reserves Claude and Google Ultra; pace-based tight is only a display state. */
-export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas): string {
+export function formatSeatRoutes(seats: SeatsConfigV1, quota: SeatAccountQuotas, overrides?: SeatOverridesV1): string {
   const reserved = claudeReserved(quota);
-  const lines: string[] = ROUTING_CLASSES.map(task => selectSeatRoute(task, seats, quota).line);
+  const lines: string[] = ROUTING_CLASSES.map(task => selectSeatRoute(task, seats, quota, undefined, undefined, overrides).line);
   lines.push(reserved
     ? `explorer: ${modelText(EXPLORER_FIELD, seats.routing.low_quota_explorer)} (claude ${quota.claude.state === 'exhausted' ? 'exhausted' : quota.claude.mode}; pass model ${shownModel(EXPLORER_FIELD, seats.routing.low_quota_explorer.model)} when you call the explorer)`
     : 'explorer: default');
-  lines.push(effectiveGatekeeper(seats, quota).line);
-  lines.push(reviewSeatLine('reviewer', seats, quota));
-  const advisor = effectiveSeatConfig('advisor', seats, quota);
+  lines.push(effectiveGatekeeper(seats, quota, overrides).line);
+  lines.push(reviewSeatLine('reviewer', seats, quota, overrides));
+  const advisor = effectiveSeatConfig('advisor', seats, quota, overrides);
   const agyAdvisor = isAgyAccount(seatAccount(advisor));
-  const advisorQuota = agyAdvisor ? accountSuffix('advisor', advisor, quota) : '';
+  const advisorQuota = (agyAdvisor || overrides?.advisor !== undefined) ? accountSuffix('advisor', advisor, quota, overrides) : '';
   const advisorBlock = unavailablePiSeat(advisor, seats.routing)
     ?? (agyAdvisor && seatState('advisor', advisor, quota) === 'exhausted' ? accountText('advisor', advisor, quota) : null);
-  lines.push(advisorBlock === null ? `advisor: advisor (${launchText('advisor', advisor)}${advisorQuota})` : `advisor: none (${advisorBlock})`);
+  lines.push(advisorBlock === null ? `advisor: advisor (${launchText('advisor', advisor, overrides)}${advisorQuota})` : `advisor: none (${advisorBlock})`);
   return lines.join('\n');
 }

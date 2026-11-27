@@ -31,7 +31,13 @@ import {
   type OperatorRouteV1,
 } from '../../src/effects/operator/server';
 import { OPERATOR_SETTINGS_AGENTS_PATH, OPERATOR_SETTINGS_AGENTS_ROUTE } from '../../src/effects/operator/agents-settings-route';
-import { OPERATOR_SETTINGS_SEATS_PATH, OPERATOR_SETTINGS_SEATS_ROUTE } from '../../src/effects/operator/seats-settings-route';
+import {
+  OPERATOR_SETTINGS_SEATS_PATH,
+  OPERATOR_SETTINGS_SEATS_ROUTE,
+  OPERATOR_SETTINGS_SEAT_OVERRIDES_PATH,
+  OPERATOR_SETTINGS_SEAT_OVERRIDES_REVOKE_ROUTE,
+  OPERATOR_SETTINGS_SEAT_OVERRIDES_ROUTE,
+} from '../../src/effects/operator/seats-settings-route';
 import { OPERATOR_QUOTA_PATH } from '../../src/core/board/quota';
 import { OPERATOR_WORKTREES_CLEANUP_ROUTE } from '../../src/effects/operator/worktree-cleanup';
 import { OPERATOR_WORKTREES_CLEANUP_INVESTIGATION_ROUTE, OPERATOR_WORKTREES_CLEANUP_INVESTIGATION_STATUS_ROUTE } from '../../src/effects/operator/worktree-cleanup-investigation';
@@ -49,12 +55,12 @@ function writeRouteIds(routes: readonly OperatorRouteV1[]): readonly string[] {
 
 describe('operator structural write boundary', () => {
   test('declares only the admitted write routes and rejects every mutation verb even when mislabeled read-only', () => {
-    expect(writeRouteIds(OPERATOR_ROUTES)).toEqual(['worktrees_cleanup', 'worktrees_cleanup_plan', 'worktrees_cleanup_execute', 'worktrees_cleanup_investigation', 'rules_promote', 'rules_reconcile', 'advisor_seat_messages', 'advisor_boss_commands', 'settings_report_language_write', 'repository_documentation_language_write', 'settings_agents_write', 'settings_seats_write']);
+    expect(writeRouteIds(OPERATOR_ROUTES)).toEqual(['worktrees_cleanup', 'worktrees_cleanup_plan', 'worktrees_cleanup_execute', 'worktrees_cleanup_investigation', 'rules_promote', 'rules_reconcile', 'advisor_seat_messages', 'advisor_boss_commands', 'settings_report_language_write', 'repository_documentation_language_write', 'settings_agents_write', 'settings_seats_write', 'settings_seat_overrides_write', 'settings_seat_overrides_revoke']);
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
       const mutation: OperatorRouteV1 = { id: 'fake_write', method, pattern: '/api/v1/fleet/tasks/anything', write: false };
-      expect(writeRouteIds([...OPERATOR_ROUTES, mutation])).toEqual(['worktrees_cleanup', 'worktrees_cleanup_plan', 'worktrees_cleanup_execute', 'worktrees_cleanup_investigation', 'rules_promote', 'rules_reconcile', 'advisor_seat_messages', 'advisor_boss_commands', 'settings_report_language_write', 'repository_documentation_language_write', 'settings_agents_write', 'settings_seats_write', 'fake_write']);
+      expect(writeRouteIds([...OPERATOR_ROUTES, mutation])).toEqual(['worktrees_cleanup', 'worktrees_cleanup_plan', 'worktrees_cleanup_execute', 'worktrees_cleanup_investigation', 'rules_promote', 'rules_reconcile', 'advisor_seat_messages', 'advisor_boss_commands', 'settings_report_language_write', 'repository_documentation_language_write', 'settings_agents_write', 'settings_seats_write', 'settings_seat_overrides_write', 'settings_seat_overrides_revoke', 'fake_write']);
     }
-    expect(writeRouteIds([...OPERATOR_ROUTES, { id: 'get_write', method: 'GET', pattern: '/api/write', write: true }])).toEqual(['worktrees_cleanup', 'worktrees_cleanup_plan', 'worktrees_cleanup_execute', 'worktrees_cleanup_investigation', 'rules_promote', 'rules_reconcile', 'advisor_seat_messages', 'advisor_boss_commands', 'settings_report_language_write', 'repository_documentation_language_write', 'settings_agents_write', 'settings_seats_write', 'get_write']);
+    expect(writeRouteIds([...OPERATOR_ROUTES, { id: 'get_write', method: 'GET', pattern: '/api/write', write: true }])).toEqual(['worktrees_cleanup', 'worktrees_cleanup_plan', 'worktrees_cleanup_execute', 'worktrees_cleanup_investigation', 'rules_promote', 'rules_reconcile', 'advisor_seat_messages', 'advisor_boss_commands', 'settings_report_language_write', 'repository_documentation_language_write', 'settings_agents_write', 'settings_seats_write', 'settings_seat_overrides_write', 'settings_seat_overrides_revoke', 'get_write']);
   });
 
   test('the dispatcher admits only GET, HEAD and, for a write route, POST', async () => {
@@ -111,8 +117,11 @@ describe('operator structural write boundary', () => {
       'repository_documentation_language_write',
       'settings_agents_write',
       'settings_seats',
+      'settings_seat_overrides',
       'quota',
       'settings_seats_write',
+      'settings_seat_overrides_write',
+      'settings_seat_overrides_revoke',
       'architecture_modules',
       'architecture_module',
       'architecture_review_prompt',
@@ -154,8 +163,11 @@ describe('operator structural write boundary', () => {
     expect(OPERATOR_ROUTES.find(route => route.id === 'settings_agents')).toEqual({ id: 'settings_agents', method: 'GET', pattern: OPERATOR_SETTINGS_AGENTS_PATH, write: false });
     expect(OPERATOR_ROUTES.find(route => route.id === 'settings_agents_write')).toEqual({ id: 'settings_agents_write', method: 'POST', pattern: OPERATOR_SETTINGS_AGENTS_ROUTE.source, write: true });
     expect(OPERATOR_ROUTES.find(route => route.id === 'settings_seats')).toEqual({ id: 'settings_seats', method: 'GET', pattern: OPERATOR_SETTINGS_SEATS_PATH, write: false });
+    expect(OPERATOR_ROUTES.find(route => route.id === 'settings_seat_overrides')).toEqual({ id: 'settings_seat_overrides', method: 'GET', pattern: OPERATOR_SETTINGS_SEAT_OVERRIDES_PATH, write: false });
     expect(OPERATOR_ROUTES.find(route => route.id === 'quota')).toEqual({ id: 'quota', method: 'GET', pattern: OPERATOR_QUOTA_PATH, write: false });
     expect(OPERATOR_ROUTES.find(route => route.id === 'settings_seats_write')).toEqual({ id: 'settings_seats_write', method: 'POST', pattern: OPERATOR_SETTINGS_SEATS_ROUTE.source, write: true });
+    expect(OPERATOR_ROUTES.find(route => route.id === 'settings_seat_overrides_write')).toEqual({ id: 'settings_seat_overrides_write', method: 'POST', pattern: OPERATOR_SETTINGS_SEAT_OVERRIDES_ROUTE.source, write: true });
+    expect(OPERATOR_ROUTES.find(route => route.id === 'settings_seat_overrides_revoke')).toEqual({ id: 'settings_seat_overrides_revoke', method: 'POST', pattern: OPERATOR_SETTINGS_SEAT_OVERRIDES_REVOKE_ROUTE.source, write: true });
     expect(OPERATOR_ROUTES.find(route => route.id === 'worktrees_cleanup')).toEqual({ id: 'worktrees_cleanup', method: 'POST', pattern: OPERATOR_WORKTREES_CLEANUP_ROUTE.source, write: true });
     // The start is a write route; its status is a read of the job record.
     expect(OPERATOR_ROUTES.find(route => route.id === 'worktrees_cleanup_investigation')).toEqual({ id: 'worktrees_cleanup_investigation', method: 'POST', pattern: OPERATOR_WORKTREES_CLEANUP_INVESTIGATION_ROUTE.source, write: true });

@@ -19,7 +19,7 @@ import { checkSeatRoutingModels } from '../../effects/board/seats-configuration'
 import { EFFORT_LEVELS } from '../../effects/terminal/task-role-profiles';
 import { chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { syncDirectoryDurably, writeAllSync } from '../../effects/atomic-append';
-import { renderJsonObjectUpdate } from "../../effects/adoption/standard-plan";
+import { renderJsonObjectUpdate } from "../../core/evidence/json-object-update";
 import { retireUserExcludesBlock, writeRepositoryExcludes } from "../installer/repository-excludes";
 import { sha256Hex } from "../../core/evidence/sha256";
 import { tmpdir, userInfo } from "os";

@@ -6,12 +6,13 @@ import {
   type AgentsSettingsResultV1,
 } from '../../core/board/agents-settings';
 import {
+  decodeEffectiveSeats,
+  effectiveSeatsInvalidMessage,
+} from '../../core/board/seat-overrides';
+import {
   SEAT_IDS,
   SEAT_RUNTIMES,
-  decodeSeatsConfig,
-  seatsConfigInvalidMessage,
   seatHostId,
-  type SeatsConfigV1,
 } from '../../core/board/seats-settings';
 import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { isDocsHostRuntimeId } from '../../core/operator/docs-host-runtimes';
@@ -110,23 +111,24 @@ function nextSection(current: AgentsConfigV1, request: AgentsSettingsRequestV1, 
   return { enabled: sorted(enabled), uses: { docs: sorted(docs), review: sorted(review) }, default_docs: defaultDocs };
 }
 
-function checkSeatRuntimes(value: unknown, before: readonly string[], after: readonly string[]): void {
+function checkSeatRuntimes(config: Record<string, unknown>, before: readonly string[], after: readonly string[]): void {
   const disabled = SEAT_RUNTIMES.filter(runtime => {
     const host = seatHostId(runtime);
     return before.includes(host) && !after.includes(host);
   });
   if (disabled.length === 0) return;
 
-  let seats: SeatsConfigV1;
+  let resolved: ReturnType<typeof decodeEffectiveSeats>;
   try {
-    seats = decodeSeatsConfig(value);
+    resolved = decodeEffectiveSeats(config);
   } catch (error) {
     if (error instanceof SeatsConfigMigrationRequiredError) throw new AgentsConfigurationError(error.code, error.message);
-    throw new AgentsConfigurationError('seats_config_invalid', seatsConfigInvalidMessage(error));
+    throw new AgentsConfigurationError('seats_config_invalid', effectiveSeatsInvalidMessage(error));
   }
   const affected = SEAT_IDS.flatMap(id => {
-    const runtime = seats[id]?.runtime;
-    return runtime !== undefined && disabled.includes(runtime) ? [`${id} (${runtime})`] : [];
+    const runtimes = new Set([resolved.base_seats[id]?.runtime, resolved.seats[id]?.runtime]
+      .filter((runtime): runtime is typeof SEAT_RUNTIMES[number] => runtime !== undefined && disabled.includes(runtime)));
+    return [...runtimes].map(runtime => `${id} (${runtime})`);
   });
   if (affected.length > 0) {
     throw new AgentsConfigurationError('runtime_in_use', `The runtime change would leave ${affected.join(', ')} without an enabled runtime.`);
@@ -151,7 +153,7 @@ export function applyAgentsSettings(
     const result = mutateGlobalConfiguration(env, (config) => {
       const current = sectionOf(config);
       const next = nextSection(current, request, new Set(knownRuntimes));
-      checkSeatRuntimes(config.seats, current.enabled, next.enabled);
+      checkSeatRuntimes(config, current.enabled, next.enabled);
       const changed = changedKeys(current, next);
       return { ...(changed.length ? { config: { ...config, agents: next } } : {}), value: changed };
     }, { expectedRevision: request.expected_revision });
