@@ -12,7 +12,8 @@ import { migrateInstallState } from './installer/install-state-migration';
 import { pathRecordsDigest, readPathRecords } from '../effects/host-config/path-records';
 import { GLOBAL_RULES_REFRESH_STEP, RETIRED_AGENT_FLEET_STEP, RETIRED_CLI_LINK_STEP, RETIRED_CLI_REFERENCES_STEP, HERDR_CORE_STEP, runGlobalRuntimeSetup, type GlobalRuntimeResult } from './commands/global-runtime';
 import { assertCandidateReconciliationReceipt, assertInstalledAdapterProjection, CANDIDATE_RECONCILIATION_PROTOCOL, STAGED_SKILLS_HANDOFF_ENV, candidatePackageIdentity, consumeCandidateReconciliationCapability, parseCandidateRequest, routeRegistryDigest, type CandidateReconciliationReceipt } from './commands/candidate-reconciliation';
-import { applyInstallSelection, commandPluginRepairLines, rollbackRuntimeHostConfig, migrateInParentTransaction, requireInstallState, resolveRecordedSelection } from './installer/install-profile';
+import { applyInstallSelection, rollbackRuntimeHostConfig, migrateInParentTransaction, requireInstallState, resolveRecordedSelection } from './installer/install-profile';
+import { commandPluginRepairLines } from './installer/selection-lines';
 import { mcpLocalConfigCheck, refusedPaths, registerArchitecturePlugin, selectionLines } from './runtime-transaction';
 
 function candidateSourceRoot(): string {
