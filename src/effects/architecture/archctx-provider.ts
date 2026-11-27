@@ -336,7 +336,7 @@ function isLocalStoreExemptSubcommand(command: string, args: readonly string[]):
   return false;
 }
 
-/** Returns true when pinned `archctx@0.18.4` opens `ARCHCONTEXT_LOCAL_STORE_PATH` for this command. */
+/** Returns true when pinned `archctx@0.18.5` opens `ARCHCONTEXT_LOCAL_STORE_PATH` for this command. */
 export function usesArchctxLocalStore(args: readonly string[]): boolean {
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) return false;
   const command = args[0]!;
@@ -610,7 +610,7 @@ const CODEGRAPH_SEED_STRIPPED_ENV_KEYS = ['CODEGRAPH_DIR', 'CODEGRAPH_NO_WATCH',
 
 /**
  * Strips caller diagnostic store/state overrides before automatic hook invocations (`prepare`,
- * `checkpoint`). `archctx@0.18.4` isolates v2 cache at `local-cache-v2.sqlite` with zero legacy `DROP`
+ * `checkpoint`). `archctx@0.18.5` isolates v2 cache at `local-cache-v2.sqlite` with zero legacy `DROP`
  * paths and enforces `PRAGMA table_xinfo` / `index` / DDL store ownership, and automatic hooks still
  * isolate `ARCHCONTEXT_LOCAL_STORE_PATH` and `ARCHCONTEXT_STATE_DIR` so user diagnostic paths are
  * never touched implicitly (I2).
@@ -1048,7 +1048,7 @@ function assertProvenLocalStoreDatabase(storePath: string): void {
 }
 
 /**
- * Preflights explicit `ARCHCONTEXT_LOCAL_STORE_PATH` overrides before spawning `archctx@0.18.4`,
+ * Preflights explicit `ARCHCONTEXT_LOCAL_STORE_PATH` overrides before spawning `archctx@0.18.5`,
  * returning the filesystem-canonical path so the child cannot open a different target than preflight.
  * `archctx` runtime startup calls `ensurePrivateDir` (`chmod 0o700`) and acquires/unlinks
  * `<database>.cache.lock` before proving SQLite ownership, so an unproven path, parent mode, foreign
@@ -1225,7 +1225,7 @@ function resolveVerifiedGitRoot(
 }
 
 /**
- * Verifies a repository path before invoking pinned `archctx@0.18.4`.
+ * Verifies a repository path before invoking pinned `archctx@0.18.5`.
  * Rejects leading/trailing whitespace, control characters (including literal `\r`),
  * and ambiguous Git discovery roots before canonicalizing or mutating state (I2).
  */
@@ -1371,7 +1371,7 @@ function assertNoCodeGraphSidecars(indexDirectory: string): void {
 
 /**
  * After our own `index seed` succeeds (preflight already proved no sidecars existed beforehand),
- * quiesce any empty writable-WAL sidecars left behind in `.codegraph/` while `archctx@0.18.4`
+ * quiesce any empty writable-WAL sidecars left behind in `.codegraph/` while `archctx@0.18.5`
  * keeps all read-only CodeGraph opens isolated inside private scratch copies (leaving sidecars
  * intact if another process holds `codegraph.db` open).
  */
@@ -1721,7 +1721,7 @@ const PROJECTION_WRITE_RECONCILE_GUIDANCE =
   'outcome unknown. Run rh arch projection check --json and git diff to reconcile before authorizing a fresh apply.';
 
 /**
- * Structured `archctx@0.18.4` error codes emitted exclusively before `changeSetEngine.apply`
+ * Structured `archctx@0.18.5` error codes emitted exclusively before `changeSetEngine.apply`
  * writes files. Never include `AC_UNCLASSIFIED_FAILURE`, `AC_RUNTIME_UNAVAILABLE`,
  * or unvetted codes that can surface after partial or committed writes.
  */

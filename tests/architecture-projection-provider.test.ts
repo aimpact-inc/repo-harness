@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import {
+  ARCHCONTEXT_NODE_RANGE,
   PROJECTION_HUMAN_ACTION_REASON_CODES,
   PROJECTION_REQUEST_SCHEMA_VERSION,
   errorEnvelope,
@@ -108,7 +109,7 @@ function fixture({ git = true } = {}) {
   mkdirSync(join(repoRoot, '.ai', 'harness'), { recursive: true });
   mkdirSync(join(repoRoot, '.archcontext', 'model', 'nodes'), { recursive: true });
   mkdirSync(join(repoRoot, 'src', 'core'), { recursive: true });
-  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: ARCHCONTEXT_NODE_RANGE }, bin: { archctx: './bin/archctx' } })}\n`);
   const binary = join(packageRoot, 'bin', 'archctx');
   writeFileSync(binary, '#!/bin/sh\nexit 99\n');
   chmodSync(binary, 0o755);
@@ -217,7 +218,7 @@ function escapeRegExp(value: string): string {
 function vendorArchctx(root: string, version: string): string {
   const packageRoot = join(root, 'node_modules', 'archctx');
   mkdirSync(join(packageRoot, 'bin'), { recursive: true });
-  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version, engines: { node: ARCHCONTEXT_NODE_RANGE }, bin: { archctx: './bin/archctx' } })}\n`);
   const binary = join(packageRoot, 'bin', 'archctx');
   writeFileSync(binary, '#!/bin/sh\nexit 99\n');
   chmodSync(binary, 0o755);
@@ -1470,7 +1471,7 @@ describe('package-local ArchContext projection provider', () => {
       trustedNodeCandidateSource: () => [],
     });
     expect(readiness.projectionProvider.state).toBe('error');
-    expect(readiness.projectionProvider.reason).toContain('requires Node >=22.22 <26');
+    expect(readiness.projectionProvider.reason).toContain(`requires Node ${ARCHCONTEXT_NODE_RANGE}`);
     expect(readiness.projectionProvider.reason).toContain('trusted candidates ((none))');
   });
 
@@ -1491,7 +1492,7 @@ describe('package-local ArchContext projection provider', () => {
     });
     // Model reads need archctx even when projection is disabled; the runtime fault is not hidden as "not adopted".
     expect(readiness.projectionProvider).toMatchObject({ provider: 'disabled', state: 'error' });
-    expect(readiness.projectionProvider.reason).toContain('requires Node >=22.22 <26');
+    expect(readiness.projectionProvider.reason).toContain(`requires Node ${ARCHCONTEXT_NODE_RANGE}`);
     expect(readiness.apply.enabled).toBe(false);
   });
 
@@ -1544,7 +1545,8 @@ describe('package-local ArchContext projection provider', () => {
     const f = fixture();
     const fakeBin = join(f.root, 'bin');
     mkdirSync(fakeBin, { recursive: true });
-    writeNodeStub(join(fakeBin, 'node'), { version: '26.10.0' });
+    // Above the archctx Node range, so the incompatible PATH runtime must defer to a keg.
+    writeNodeStub(join(fakeBin, 'node'), { version: '27.10.0' });
     const prefix = join(f.root, 'homebrew');
     mkdirSync(join(prefix, 'opt'), { recursive: true });
     for (const major of [20, 24]) {
@@ -1591,7 +1593,7 @@ describe('package-local ArchContext projection provider', () => {
     writeNodeStub(staleNode, { version: '20.11.0' });
     const scrubbedEnv: NodeJS.ProcessEnv = { PATH: fakeBin, HOME: home };
     const scoped = () => trustedNodeCandidates(home).filter((candidate) => candidate.startsWith(`${home}${sep}`));
-    expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(/requires Node >=22.22 <26/);
+    expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(`requires Node ${ARCHCONTEXT_NODE_RANGE}`);
     expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(/REPO_HARNESS_NODE_BIN \(unset\)/);
     expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(new RegExp(`PATH \\(${escapeRegExp(fakeBin)}\\)`));
     expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(new RegExp(`trusted candidates \\(${escapeRegExp(join(home, '.local', 'bin', 'node'))}, ${escapeRegExp(staleNode)}\\)`));
@@ -1603,7 +1605,7 @@ describe('package-local ArchContext projection provider', () => {
     mkdirSync(fakeBin, { recursive: true });
     const staleNode = writeNodeStub(join(fakeBin, 'node-22.21'), { version: '22.21.0' });
     expect(() => resolveCompatibleNodeRuntime({ PATH: '/usr/bin:/bin', REPO_HARNESS_NODE_BIN: staleNode }))
-      .toThrow('must satisfy Node >=22.22 <26');
+      .toThrow(`must satisfy Node ${ARCHCONTEXT_NODE_RANGE}`);
     const node = writeNodeStub(join(fakeBin, 'node-22.22'), { version: '22.22.0' });
     expect(resolveCompatibleNodeRuntime({ PATH: '/usr/bin:/bin', REPO_HARNESS_NODE_BIN: node })).toBe(realpathSync(node));
     expect(() => resolveCompatibleNodeRuntime({ PATH: '/usr/bin:/bin', REPO_HARNESS_NODE_BIN: 'node' })).toThrow('must be an absolute path');
@@ -1612,7 +1614,7 @@ describe('package-local ArchContext projection provider', () => {
   // Windows sets no execute bit on a regular file, so a POSIX bit test refuses a real node.exe.
   test('the explicit Node pin accepts a Windows runtime file without a POSIX execute bit', () => {
     const pin = unexecutableNodeFile();
-    const input = { range: '>=22.22 <26', explicit: pin, candidates: [] as string[], versionOf: () => '24.1.0' };
+    const input = { range: ARCHCONTEXT_NODE_RANGE, explicit: pin, candidates: [] as string[], versionOf: () => '24.1.0' };
     expect(selectCompatibleNode({ ...input, platform: 'win32' }))
       .toEqual({ status: 'selected', path: realpathSync(pin) });
     expect(selectCompatibleNode({ ...input, platform: 'darwin' }))
@@ -1621,7 +1623,7 @@ describe('package-local ArchContext projection provider', () => {
 
   test('the trusted Node candidates accept a Windows runtime file without a POSIX execute bit', () => {
     const candidate = unexecutableNodeFile();
-    const input = { range: '>=22.22 <26', candidates: [candidate], versionOf: () => '24.1.0' };
+    const input = { range: ARCHCONTEXT_NODE_RANGE, candidates: [candidate], versionOf: () => '24.1.0' };
     expect(selectCompatibleNode({ ...input, platform: 'win32' }))
       .toEqual({ status: 'selected', path: realpathSync(candidate) });
     expect(selectCompatibleNode({ ...input, platform: 'darwin' })).toEqual({ status: 'not-found' });

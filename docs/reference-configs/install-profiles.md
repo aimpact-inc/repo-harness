@@ -150,7 +150,7 @@ command that adds `architecture`. `--with-obsidian-skills` needs
 
 Update also reconciles the installed runtime dependency closure. It requires
 exact package-local `archctx` and `archctx-contracts` versions, ArchContext's
-exact package-local CodeGraph dependency, Node `>=22.22 <26`, and a successful
+exact package-local CodeGraph dependency, Node `>=22.22 <27`, and a successful
 `archctx capabilities --json` handshake. With `architecture`, update refreshes
 the exact global CodeGraph CLI and MCP. Waza and Mermaid are mutable
 third-party providers: `install` fetches them by default

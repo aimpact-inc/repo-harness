@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ARCHCONTEXT_NODE_RANGE } from 'archctx-contracts';
 import { ARCHCTX_COMMAND_DISPOSITIONS, ARCHCTX_REQUIRED_VERSION, archctxRefusal } from '../../src/core/architecture/projection';
 import { indexPackageLocalCodeGraph, resolveCompatibleNodeRuntime, resolvePackageLocalArchctx, runArchctxPassThrough } from '../../src/effects/architecture/archctx-provider';
 import { pluginSelectionEnv, recordPluginSelection } from '../helpers/install-ownership';
@@ -20,7 +21,7 @@ function fakeConsumer(): { root: string; argvFile: string } {
   roots.push(root);
   const packageRoot = join(root, 'node_modules', 'archctx');
   mkdirSync(join(packageRoot, 'bin'), { recursive: true });
-  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: ARCHCONTEXT_NODE_RANGE }, bin: { archctx: './bin/archctx' } })}\n`);
   const argvFile = join(root, 'argv.json');
   const binary = join(packageRoot, 'bin', 'archctx');
   writeFileSync(binary, `#!/usr/bin/env node
@@ -452,7 +453,7 @@ describe('rh arch', () => {
       expect(existsSync(join(spacedSibling, '.codegraph'))).toBe(false);
     }
 
-    // 8e. Real pinned archctx@0.18.4 read-only commands leave zero SQLite sidecars so subsequent public seed succeeds.
+    // 8e. Real pinned archctx@0.18.5 read-only commands leave zero SQLite sidecars so subsequent public seed succeeds.
     const readChecks: Array<{ args: readonly string[]; allowedStatuses: readonly number[] }> = [
       { args: ['doctor', '--json'], allowedStatuses: [0] },
       { args: ['prepare', '--task', 'verify-zero-sidecars', '--json'], allowedStatuses: [0] },
@@ -497,7 +498,7 @@ describe('rh arch', () => {
       expect(existsSync(join(crSibling, '.codegraph'))).toBe(false);
     }
 
-    // 8g. Real lockfile-installed archctx@0.18.4 fails closed on an unrelated SQLite DB with overlapping table names
+    // 8g. Real lockfile-installed archctx@0.18.5 fails closed on an unrelated SQLite DB with overlapping table names
     // (preserving exact DB, -wal, and -shm bytes when ARCHCONTEXT_LOCAL_STORE_PATH is passed via rh arch).
     const foreignStoreDir = mkdtempSync(join(tmpdir(), 'repo-harness-foreign-store-'));
     roots.push(foreignStoreDir);
@@ -655,7 +656,7 @@ describe('rh arch', () => {
       expect(readFileSync(targetLockPath, 'utf8')).toBe(targetLockPayload);
     }
 
-    // 8h. Real lockfile-installed archctx@0.18.4 fails closed when a WAL DB holds legacy v1 core tables +
+    // 8h. Real lockfile-installed archctx@0.18.5 fails closed when a WAL DB holds legacy v1 core tables +
     // custom/spoofed objects, or matches v1/v2 cache column layouts alongside generated columns and custom indexes.
     const legacyCoreSql = `
       PRAGMA journal_mode = WAL;
