@@ -1,6 +1,6 @@
 # runtime-harness/task-agent-host 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-task-agent-host" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:871ee534669af15e452902062b3df449651b9412a53041b1a1a383808c2f590c" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-task-agent-host" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:390956bcd47dac820843c4aa12ced4b05a4c315275f47aaf70498c69268442a7" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.task-agent-host`(kind `capability`)
 > **Matched Prefixes**:`src/effects/terminal/task-session.ts`、`src/effects/terminal/task-runtime-observation.ts`、`assets/herdr/**`、`src/effects/terminal/native-task-session.ts`、`src/effects/review-runner/**`
@@ -40,6 +40,7 @@ flowchart LR
 | `entrypoint.task-agent-host.session` | `src/effects/terminal/task-session.ts#startTaskApplicationHost` | `sink.task-agent-host.start` → `src/effects/terminal/task-session.ts#startTaskAgent` |
 | `entrypoint.task-agent-host.session` | `src/effects/terminal/task-session.ts#sendTaskRequest` | `sink.task-agent-host.send` → `src/effects/terminal/task-session-io.ts#nextSessionRound` |
 | `entrypoint.task-agent-host.session` | `src/effects/terminal/task-session.ts#collectTaskResult` | `sink.task-agent-host.collect` → `src/effects/terminal/runtime-closeout.ts#readTaskRequestResult` |
+| `entrypoint.task-agent-host.native-session` | `src/effects/terminal/native-task-session.ts#bindNativeTaskSession` | `sink.task-agent-host.native-session-record` → `src/effects/terminal/task-session-io.ts#writeSessionArtifact` |
 | `entrypoint.task-agent-host.review-runner` | `src/effects/review-runner/task-review-runner.ts#send` | `sink.task-agent-host.reserve-inbox` → `src/effects/review-runner/task-pre-prompt-inbox.ts#preparePrePromptInbox` |
 | `entrypoint.task-agent-host.review-runner` | `src/effects/review-runner/task-review-runner.ts#settleCompanion` | `sink.task-agent-host.commit-inbox` → `src/effects/review-runner/task-pre-prompt-inbox.ts#commitPrePromptInbox` |
 | `entrypoint.task-agent-host.review-runner` | `src/effects/review-runner/task-review-runner.ts#recoverCompanions` | `sink.task-agent-host.recover-inbox` → `src/effects/review-runner/task-pre-prompt-inbox.ts#commitPrePromptInbox` |

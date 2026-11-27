@@ -1,6 +1,6 @@
 # runtime-harness/operator 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:b52809c5cac4910ea139b63009448310d64922960ba7f8ca9d379feb166d39b8" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-operator" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:77ef961c1de0c03f7b1e8aaa4ab368803efa12534aac9718b3999ce52e9e2621" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.operator`(kind `capability`)
 > **Matched Prefixes**:`docs/kanban-runtime-status.md`、`src/effects/operator/**`、`src/operator-web/**`、`packages/operator-web/**`、`src/effects/setup/**`、`src/effects/dev-activity/**`、`vite.operator.config.ts`
@@ -68,6 +68,11 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.operator.primary` | `entrypoint.operator.http-server` | `src/effects/operator/server.ts#startOperatorServer` | `sink.operator.dev-activity-collector` → `src/effects/dev-activity/collector.ts#startDevActivityCollector`、`sink.operator.notify-collector` → `src/effects/operator/notify-collector.ts#startNotifyCollector`、`sink.operator.bot-access-collector` → `src/effects/operator/bot-access.ts#startBotAccessCollector`、`sink.operator.slack-review-collector` → `src/effects/operator/slack-review-collector.ts#startSlackReviewCollector`、`sink.operator.docs-collector` → `src/effects/operator/docs-collector.ts#startDocsCollector`、`sink.operator.tests-collector` → `src/effects/operator/tests-collector.ts#startTestsCollector`、`sink.operator.execution-collector` → `src/effects/operator/execution-collector.ts#startExecutionCollector`、`sink.operator.architecture-map-collector` → `src/effects/operator/architecture-map-collector.ts#startArchitectureMapCollector`、`sink.operator.cli-inventory-collector` → `src/effects/setup/cli-inventory.ts#startCliInventoryCollector` |
 | `component.operator.primary` | `entrypoint.operator.http-server` | `src/effects/operator/server.ts#handleRequest` | `sink.operator.dev-activity-decode` → `src/core/dev-activity/decode.ts#decodeDevActivitySnapshot`、`sink.operator.dev-activity-unavailable` → `src/core/dev-activity/decode.ts#unavailableDevActivitySnapshot`、`sink.operator.architecture-request` → `src/core/operator/architecture.ts#parseArchitectureRequest` |
+| `component.operator.primary` | `entrypoint.operator.architecture-read` | `src/effects/operator/architecture.ts#readArchitecture` | `sink.operator.architecture-read-decode` → `src/core/operator/architecture.ts#decodeArchitectureModuleIndex` |
+| `component.operator.primary` | `entrypoint.operator.runtime-capture` | `src/effects/operator/runtime-capture.ts#runRuntimeCapture` | `sink.operator.runtime-capture-pty` → `src/effects/operator/runtime-capture-pty.ts#prepareRuntimePty` |
+| `component.operator.primary` | `entrypoint.operator.diagram-readback` | `src/effects/operator/diagram-readback.ts#readbackDiagram` | `sink.operator.diagram-readback-probe` → `src/effects/operator/diagram-render.ts#probeRenderCapability` |
+| `component.operator.primary` | `entrypoint.operator.worktree-cleanup` | `src/effects/operator/worktree-cleanup.ts#runWorktreeCleanup` | `sink.operator.worktree-cleanup-remove` → `src/effects/state/coordination-worktree-topology.ts#removeGreenWorktrees` |
+| `component.operator.primary` | `entrypoint.operator.write-run` | `src/effects/operator/write-run.ts#runOperatorWrite` | `sink.operator.write-run-state-dir` → `src/effects/operator/write-audit.ts#prepareOperatorStateDir` |
 | `component.operator.web-console` | `entrypoint.operator.web-dev-activity` | `src/operator-web/dev-activity.ts#fetchDevActivity` | `sink.operator.web-dev-activity-decode` → `src/core/dev-activity/decode.ts#decodeDevActivitySnapshot` |
 
 ### 1.3 規模信號
@@ -182,7 +187,7 @@ flowchart LR
 | `component.operator.console-collectors` | Console Collectors | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.operator.core-layer` | Operator Board (core) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 | `component.operator.herdr-runtime-transport` | Herdr Runtime Transport | `1–2` 個文件 / `20–50` 行 | 未宣告 |
-| `component.operator.primary` | Operator HTTP Reader | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.operator.http-server` |
+| `component.operator.primary` | Operator HTTP Reader | `20–50` 個文件 / `5000–10000` 行 | `entrypoint.operator.http-server`、`entrypoint.operator.architecture-read`、`entrypoint.operator.runtime-capture`、`entrypoint.operator.diagram-readback`、`entrypoint.operator.worktree-cleanup`、`entrypoint.operator.write-run` |
 | `component.operator.primary-cli` | Operator HTTP Reader (cli) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.operator.view-projections` | Operator View Projections | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.operator.web-console` | Operator Web Console | `100–200` 個文件 / `50k–100k` 行 | `entrypoint.operator.web-dev-activity` |

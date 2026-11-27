@@ -1,6 +1,6 @@
 # runtime-harness/global-runtime-reconciliation 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:6d449454f6eb383fb98cf9b6be61b297f5a2b85e31598fa522a742ab486a3040" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4ec7d03c52cead89738d926eb647996cc80674fa051c131941a7823c91398758" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.global-runtime-reconciliation`(kind `capability`)
 > **Matched Prefixes**:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
@@ -66,6 +66,7 @@ flowchart LR
 | 組件 | 宣告入口 | 錨點 | 職責 |
 | --- | --- | --- | --- |
 | `component.global-runtime-reconciliation.cli-root` | `entrypoint.global-runtime-reconciliation.cli-root` | `src/cli/candidate-runtime-reconciliation.ts#runCandidateRuntimeReconciliation` | `sink.global-runtime-reconciliation.setup` → `src/cli/commands/global-runtime.ts#runGlobalRuntimeSetup` |
+| `component.global-runtime-reconciliation.cli-root` | `entrypoint.global-runtime-reconciliation.cli-root-program` | `src/cli/index.ts#buildProgram` | `sink.global-runtime-reconciliation.cli-root-setup` → `src/cli/commands/setup-check.ts#buildSetupCommand` |
 
 ### 1.3 規模信號
 
@@ -174,7 +175,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.global-runtime-reconciliation.cli-diagnostics` | CLI Diagnostics and Shared Options | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.cli-layer` | Global Runtime Reconciliation (cli) | `2–5` 個文件 / `50–100` 行 | 未宣告 |
-| `component.global-runtime-reconciliation.cli-root` | CLI Composition Root | `10–20` 個文件 / `1000–2000` 行 | `entrypoint.global-runtime-reconciliation.cli-root` |
+| `component.global-runtime-reconciliation.cli-root` | CLI Composition Root | `10–20` 個文件 / `1000–2000` 行 | `entrypoint.global-runtime-reconciliation.cli-root`、`entrypoint.global-runtime-reconciliation.cli-root-program` |
 | `component.global-runtime-reconciliation.global-configuration` | Global Configuration Store | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.managed-runtime-root` | Managed Runtime Check Process Root | `1–2` 個文件 / `20–50` 行 | 未宣告 |
 | `component.global-runtime-reconciliation.primary` | Global Runtime Reconciler | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
