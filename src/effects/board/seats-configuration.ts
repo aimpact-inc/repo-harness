@@ -3,7 +3,8 @@ import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
-import { agySeatAgentName, agySeatAgentTools, agySeatBrief } from '../../core/board/seat-launch';
+import { agySeatAgentName, agySeatBrief } from '../../core/board/seat-launch';
+import { agySeatAgentTools } from '../../core/board/seat-launch-agy-tools';
 import { MAGPIE_EXTENSION_PATH, SEAT_POOL_STALE_MS, buildSeatPool, catalogProbeModelIds, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
 import {
   AgySeatSettingsError, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_RUNTIMES, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS,

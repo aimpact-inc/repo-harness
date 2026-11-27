@@ -1,7 +1,9 @@
 import type { BoardHostPortsV1, BoardSeatTerminalReadV1 } from './board';
-import { hcStatusClass, type HcStatusClass } from './desk';
-import { hasUnredactedSecret, KEY_BEGIN, KEY_END, replaceSecrets } from '../security/secret-patterns';
+import { hasUnredactedSecret } from '../security/secret-patterns';
 import { HC_LOCAL_ADDRESS } from '../terminal/hc-address';
+import { ADVISOR_BOSS_COMMANDS, type AdvisorBossCommand } from './advisor-boss-commands';
+import { ADVISOR_SEAT_CLI_FAILURES, type AdvisorSeatCliFailure, type AdvisorSeatFailure } from './advisor-seat-failures';
+import { privateKeyLines, redactAdvisorLine } from './advisor-seat-redaction';
 
 /**
  * The advisor seat of one board (#1756, D11): the only console channel that
@@ -26,88 +28,6 @@ export const ADVISOR_TRANSCRIPT_LINE_WITHHELD = '[line withheld]';
 export const ADVISOR_SEAT_SEND_KIND = 'repo-harness.advisor-seat-send' as const;
 export const ADVISOR_SEAT_SEND_FAILURE_KIND = 'repo-harness.advisor-seat-send-failure' as const;
 export const ADVISOR_SEAT_TRANSCRIPT_KIND = 'repo-harness.advisor-seat-transcript' as const;
-
-/**
- * The board CLI failures; the operator routes add their registry, capacity,
- * timeout and decode codes. `advisor_send_unconfirmed`: `hc send` ran or may
- * have run and did not confirm, so the text may have reached the seat.
- */
-export const ADVISOR_SEAT_CLI_FAILURES = ['text_invalid', 'hc_unavailable', 'advisor_seat_absent', 'advisor_seat_ambiguous', 'advisor_send_unconfirmed', 'advisor_read_failed'] as const;
-export type AdvisorSeatCliFailure = typeof ADVISOR_SEAT_CLI_FAILURES[number];
-
-/**
- * Every refusal code of the operator advisor routes. The boss command route
- * adds `boss_cooldown`, `advisor_turn_running` and `advisor_turn_unknown`;
- * each stops before a send.
- */
-export const ADVISOR_SEAT_FAILURES = [
-  ...ADVISOR_SEAT_CLI_FAILURES,
-  'repository_read_only', 'registry_unavailable', 'repository_not_found', 'github_unavailable',
-  'advisor_busy', 'advisor_timeout', 'advisor_unavailable', 'advisor_invalid', 'invalid_request',
-  'boss_cooldown', 'advisor_turn_running', 'advisor_turn_unknown',
-] as const;
-export type AdvisorSeatFailure = typeof ADVISOR_SEAT_FAILURES[number];
-
-/**
- * The send failures that prove the text was not sent: each one stops before
- * `hc send` runs. Any other failure of a send leaves delivery unknown.
- */
-export const ADVISOR_SEAT_NOT_SENT: ReadonlySet<AdvisorSeatFailure> = new Set<AdvisorSeatFailure>([
-  'text_invalid', 'hc_unavailable', 'advisor_seat_absent', 'advisor_seat_ambiguous',
-  'repository_read_only', 'repository_not_found', 'registry_unavailable', 'github_unavailable', 'advisor_busy',
-  'boss_cooldown', 'advisor_turn_running', 'advisor_turn_unknown',
-]);
-
-/**
- * The four boss commands (#1757, owner M71): preset texts to the advisor seat
- * only. The client sends the id; the server fills `{parent}` and owns the
- * cooldown. The ids are the `RH_CMD_KEYS` of the approved mockup (#1737).
- */
-export const ADVISOR_BOSS_COMMANDS = ['rage', 'carrot', 'mine', 'valve'] as const;
-export type AdvisorBossCommand = typeof ADVISOR_BOSS_COMMANDS[number];
-
-export const ADVISOR_BOSS_COMMAND_TABLE: Readonly<Record<AdvisorBossCommand, { readonly cooldown_seconds: number; readonly text: string }>> = Object.freeze({
-  rage: {
-    cooldown_seconds: 30 * 60,
-    text: '【大棒】检查 parent #{parent} 下的执行席和审查席：列出超过时限、没有新提交、推送、评论或 CI 变化的席位，每个给一条处理建议（催一下、重派或停掉）。催一下的直接交给编排席；重派和停掉先回复我，等我确认。',
-  },
-  carrot: {
-    cooldown_seconds: 60 * 60,
-    text: '【萝卜】按当前席位上限和配额状态，为 parent #{parent} 提出下一批可并行派工的 issue、写入范围和顺序。只回复方案，等我批准后再交给编排席。',
-  },
-  mine: {
-    cooldown_seconds: 30 * 60,
-    text: '【排雷】对比 parent #{parent} 在跑和排队任务的写入范围，列出每个冲突（文件、涉及的 issue）和消除冲突的顺序。只回复结果，不派工。',
-  },
-  valve: {
-    cooldown_seconds: 60 * 60,
-    text: '【收放】按配额报告（`rh quota`）和 parent #{parent} 的队列长度，提议新的执行席上限（例如 6 → 5）和理由。只回复方案，等我批准。',
-  },
-});
-
-/**
- * The advisor turn as the read-back `status` (the hc status word) proves it.
- * A boss command goes only to a seat whose turn is over: an allow list, so a
- * missing or new status word never sends. With `blocked` the text and Enter
- * could answer a pending prompt.
- */
-const ADVISOR_TURN: Readonly<Record<HcStatusClass, 'over' | 'running' | 'unknown'>> = {
-  idle: 'over', done: 'over', working: 'running', blocked: 'running', error: 'unknown', unreported: 'unknown', other: 'unknown',
-};
-
-export function advisorTurnState(status: string | null): 'over' | 'running' | 'unknown' {
-  return ADVISOR_TURN[hcStatusClass(status)];
-}
-
-export function advisorBossCommandText(command: AdvisorBossCommand, parent: number): string {
-  return ADVISOR_BOSS_COMMAND_TABLE[command].text.replace('{parent}', String(parent));
-}
-
-/** The whole seconds left in the cooldown of one command after its counted sends; 0 when none is inside it. */
-export function advisorBossCooldownSeconds(command: AdvisorBossCommand, sentAtMs: readonly number[], nowMs: number): number {
-  const window = ADVISOR_BOSS_COMMAND_TABLE[command].cooldown_seconds * 1000;
-  return sentAtMs.reduce((remaining, at) => Math.max(remaining, Math.ceil((at + window - nowMs) / 1000)), 0);
-}
 
 export class AdvisorSeatError extends Error {
   constructor(
@@ -294,52 +214,6 @@ export function decodeAdvisorSeatTranscript(value: unknown): AdvisorSeatTranscri
   };
 }
 
-// A marker walks only its own header, so the search stays linear on a line of any length.
-const BEGIN_MARKER = new RegExp(KEY_BEGIN, 'gu');
-const END_MARKER = new RegExp(KEY_END, 'gu');
-
-/** The positions of the first and the last marker on one line; -1 when the line has none. */
-function markers(line: string, marker: RegExp): { readonly first: number; readonly last: number } {
-  let first = -1, last = -1;
-  for (const match of line.matchAll(marker)) {
-    if (first < 0) first = match.index;
-    last = match.index;
-  }
-  return { first, last };
-}
-
-/**
- * One linear pass that marks every line of a private key block: BEGIN through
- * END, BEGIN to the last line when no END follows, and the first line to END
- * when no BEGIN precedes it, because the window or the hc read cut the block.
- * An open block keeps its earliest BEGIN, so a second BEGIN never releases the
- * lines before it.
- */
-function privateKeyLines(lines: readonly string[]): readonly boolean[] {
-  const marked = lines.map(() => false);
-  const mark = (from: number, to: number) => { for (let at = from; at <= to; at += 1) marked[at] = true; };
-  let open: number | null = null;
-  lines.forEach((line, at) => {
-    const begin = markers(line, BEGIN_MARKER), end = markers(line, END_MARKER);
-    if (end.last >= 0) {
-      // An END closes the open block; with none open, an END before every BEGIN of its line closes a block that began above the window.
-      mark(open ?? (begin.first < 0 || end.first < begin.first ? 0 : at), at);
-      open = null;
-    }
-    // A BEGIN after the last END of its line leaves a block open.
-    if (begin.last > end.last) open ??= at;
-  });
-  if (open !== null) mark(open, lines.length - 1);
-  return marked;
-}
-
-/** One line outside a key block: the shared token rules, then a secret left over or a line over the limit withholds it. */
-function redactAdvisorLine(line: string): string {
-  if (line.length > ADVISOR_TRANSCRIPT_LINE_MAX_CHARS) return ADVISOR_TRANSCRIPT_LINE_WITHHELD;
-  const redacted = replaceSecrets(line);
-  return redacted.length > ADVISOR_TRANSCRIPT_LINE_MAX_CHARS || hasUnredactedSecret(redacted) ? ADVISOR_TRANSCRIPT_LINE_WITHHELD : redacted;
-}
-
 /**
  * The read-back lines of one hc read: the last ADVISOR_TRANSCRIPT_LINES lines,
  * every private key block withheld, then each other line redacted. The whole
@@ -348,7 +222,7 @@ function redactAdvisorLine(line: string): string {
 export function advisorTranscriptLines(text: string): readonly string[] {
   const lines = text.split('\n').slice(-ADVISOR_TRANSCRIPT_LINES);
   const keys = privateKeyLines(lines);
-  return Object.freeze(lines.map((line, at) => keys[at] ? ADVISOR_TRANSCRIPT_LINE_WITHHELD : redactAdvisorLine(line)));
+  return Object.freeze(lines.map((line, at) => keys[at] ? ADVISOR_TRANSCRIPT_LINE_WITHHELD : redactAdvisorLine(line, ADVISOR_TRANSCRIPT_LINE_MAX_CHARS, ADVISOR_TRANSCRIPT_LINE_WITHHELD)));
 }
 
 /** The longest seat status message that leaves the server. */

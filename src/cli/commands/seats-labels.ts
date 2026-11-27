@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { delimiter, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { SeatPaneNameError } from '../../core/board/seat-launch';
+import { SeatPaneNameError } from '../../core/board/seat-pane-name';
 import { LAUNCH_SEAT_IDS, isCouncilSeat, isReviewSeat, type LaunchSeatId } from '../../core/board/seats-settings';
 import { githubRemoteRepository } from '../../core/board/source';
 import { resolveGitCommonDirectory } from '../../effects/git/common-directory';

@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
-import { ADVISOR_BOSS_COMMAND_TABLE, decodeAdvisorSeatSend, type AdvisorBossCommand, type AdvisorBossCommandRequestV1 } from '../core/board/advisor-seat';
+import { ADVISOR_BOSS_COMMAND_TABLE, type AdvisorBossCommand } from '../core/board/advisor-boss-commands';
+import { decodeAdvisorSeatSend, type AdvisorBossCommandRequestV1 } from '../core/board/advisor-seat';
 import { postOperatorWrite, type OperatorWriteFailure } from './operator-write';
 
 /**

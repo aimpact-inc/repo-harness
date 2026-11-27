@@ -1,4 +1,4 @@
-import type { AdvisorBossCommand } from '../core/board/advisor-seat';
+import type { AdvisorBossCommand } from '../core/board/advisor-boss-commands';
 import type { BoardAcceptanceMergeV1 } from '../core/board/board';
 import type { DeskState } from '../core/board/desk';
 import {
