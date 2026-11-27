@@ -153,6 +153,7 @@ export function resolveToolchain(env: NodeJS.ProcessEnv): { readonly hash: strin
   }
   const runnerSources = [
     ["verification-execution", join(packageRoot, "src/effects/evidence/verification-execution.ts")],
+    ["verification-execution-store", join(packageRoot, "src/effects/evidence/verification-execution-store.ts")],
     ["verification-toolchain", join(packageRoot, "src/effects/evidence/verification-toolchain.ts")],
     ["verification-ledger-view", join(packageRoot, "src/effects/evidence/verification-ledger-view.ts")],
     ["verification-plan", join(packageRoot, "src/core/evidence/verification-plan.ts")],

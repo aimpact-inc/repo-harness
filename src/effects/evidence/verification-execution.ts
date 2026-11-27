@@ -1,13 +1,7 @@
 import { randomUUID } from "crypto";
-import { isAbsolute, resolve } from "path";
+import { resolve } from "path";
 
-import { canonicalize } from "../../core/evidence/canonical-json";
-import { sha256Prefixed } from "../../core/evidence/sha256";
-import type { JsonValue, AdmittedReviewSubjectIdentity, EvalCatalogSubjectIdentity } from "../../core/evidence/types";
-import { redactPayloadStrings } from "../../core/evidence/redaction";
 import {
-  fingerprintVerificationCheck,
-  fingerprintVerificationCheckExecution,
   hashVerificationPlan,
   type VerificationCheck,
   type VerificationPlan,
@@ -15,17 +9,10 @@ import {
 import { readEvalCatalogPlan, type EvalCatalogSource } from "./eval-catalog";
 import { resolveGitCommonDirectory } from "../git/common-directory";
 import { acquireExclusiveDirectoryLock, ExclusiveLockContentionError } from "../locking/exclusive-directory-lock";
-import { resolveInsideRepo } from "../path-safety";
 import { runProcess } from "../process-runner";
-import { createFileExclusiveDurably, writeFileDurably } from "../atomic-append";
-import { LEDGER_EPOCH_START_SHA } from "./epoch";
-import { appendEvidenceEvent, appendGenesisRecord, readGenesisRecord } from "./event-log";
-import { collectDenylistSecretValues } from "./secret-env";
 import {
   cacheKey,
   captureGitVirtualTreeSnapshot,
-  declaredEnvironmentHash,
-  redactKnownEnvironmentValues,
   resolveExecutionCwd,
   resolvePackageTest,
   resolveToolchain,
@@ -35,8 +22,6 @@ import {
   type EvalBinding,
 } from "./verification-toolchain";
 import {
-  EVENT_TYPE,
-  PRODUCER,
   admittedIdentity,
   baselineResult,
   buildReport,
@@ -47,7 +32,6 @@ import {
   readAdmission,
   reusableResult,
   reviewAuthority,
-  type ExecutionPayload,
   type ExecutionReport,
   type VerificationExecutionResult,
   type VerificationReportStatus,
@@ -56,6 +40,11 @@ import {
   type VerificationInput,
   type VerificationOutcome,
 } from "./verification-ledger-view";
+import {
+  recordExecutedCheck,
+  redactExecutionReport,
+  writeRedactedExecutionReport,
+} from "./verification-execution-store";
 
 export { captureGitVirtualTreeSnapshot } from "./verification-toolchain";
 export type { GitVirtualTreeSnapshot } from "./verification-toolchain";
@@ -142,26 +131,6 @@ export function evaluateAdmittedVerification(input: VerificationInput): Verifica
   if (report.kind !== "verification_execution_report") throw new Error("review authority required");
   if (report.passed) context.assertCurrent();
   return report;
-}
-
-function subjectIdentity(context: PreparedContext, check: VerificationCheck): AdmittedReviewSubjectIdentity | EvalCatalogSubjectIdentity {
-  return {
-    authority_commit: context.snapshot.head_commit,
-    base_commit: context.snapshot.head_commit,
-    target_commit: context.snapshot.tree_hash,
-    scope_hash: context.planHash,
-    subject_hash: context.snapshot.snapshot_hash,
-    ...context.binding,
-    plan_hash: context.planHash,
-    command_hash: fingerprintVerificationCheck(check),
-    env_provider_id: context.envProviderId,
-  };
-}
-
-function ensureGenesis(context: PreparedContext): void {
-  if (readGenesisRecord(context.repoRoot)) return;
-  const worktreeId = `verification-${sha256Prefixed(canonicalize(context.binding)).slice(7, 27)}`;
-  appendGenesisRecord(context.repoRoot, LEDGER_EPOCH_START_SHA, { worktreeId });
 }
 
 interface ExecutedCheckOutcome {
@@ -257,54 +226,17 @@ function executeCheck(
       run_file: runFile,
       failure_log_file: failureLogFile,
     };
-    if (failureLogFile) {
-      const failureLogPath = resolveInsideRepo(context.repoRoot, failureLogFile);
-      if (!failureLogPath.ok || !failureLogPath.path) throw new Error(failureLogPath.error ?? "invalid failure log path");
-      const diagnostics = redactKnownEnvironmentValues(
-        [message, run.stdout, run.stderr || run.error].filter(Boolean).join("\n"),
-        context.env,
-      );
-      createFileExclusiveDurably(failureLogPath.path, Buffer.from(`${diagnostics}\n`, "utf8"));
-    }
-    const durableRecord = {
-      protocol: 1,
-      kind: "verification_execution_record",
-      execution_id: executionId,
-      cache_key: key,
+    recordExecutedCheck({
+      context,
+      check,
+      cacheKey: key,
+      executionId,
+      runFile,
+      failureLogFile,
+      message,
+      run,
       result,
-    } as const;
-    const runPath = resolveInsideRepo(context.repoRoot, runFile);
-    if (!runPath.ok || !runPath.path) throw new Error(runPath.error ?? "invalid verification run path");
-    const durableBytes = Buffer.from(`${JSON.stringify(durableRecord, null, 2)}\n`, "utf8");
-    createFileExclusiveDurably(runPath.path, durableBytes);
-    ensureGenesis(context);
-    const genesis = readGenesisRecord(context.repoRoot)!;
-    const payload: ExecutionPayload = {
-      protocol: 2,
-      ...context.binding,
-      plan_hash: context.planHash,
-      check_id: check.id,
-      check_fingerprint: fingerprintVerificationCheck(check),
-      execution_spec_hash: fingerprintVerificationCheckExecution(check),
-      inputs_hash: declaredEnvironmentHash(check, context.env),
-      toolchain_hash: context.toolchainHash,
-      snapshot_hash: context.snapshot.snapshot_hash,
-      cache_key: key,
-      execution_id: executionId,
-      run_file: runFile,
-      run_record_hash: sha256Prefixed(durableBytes),
-      passed: result.passed,
-    };
-    requestLock.assertOwned();
-    if (result.passed) context.assertCurrent();
-    appendEvidenceEvent(context.repoRoot, {
-      worktreeId: genesis.worktree_id,
-      eventType: EVENT_TYPE,
-      trustClass: "authoritative_machine",
-      producer: PRODUCER,
-      correlationRunId: executionId,
-      subjectIdentity: subjectIdentity(context, check),
-      payload: { kind: "json", value: payload as unknown as JsonValue },
+      assertLockOwned: () => requestLock.assertOwned(),
     });
     return { result, snapshotStable };
   } finally {
@@ -314,7 +246,7 @@ function executeCheck(
 
 /** The existing report writer and direct readers consume the same ledger-safe projection. */
 export function materializeVerificationExecutionReport(report: VerificationExecutionReport): VerificationExecutionReport {
-  return redactPayloadStrings(report as unknown as JsonValue, collectDenylistSecretValues()) as unknown as VerificationExecutionReport;
+  return redactExecutionReport(report);
 }
 
 export function writeVerificationExecutionReport(
@@ -322,8 +254,7 @@ export function writeVerificationExecutionReport(
   relativePath: string,
   report: VerificationOutcome,
 ): void {
-  const outputPath = isAbsolute(relativePath) ? relativePath : resolve(repoRoot, relativePath);
-  writeFileDurably(outputPath, `${JSON.stringify(materializeVerificationExecutionReport(report), null, 2)}\n`);
+  writeRedactedExecutionReport(repoRoot, relativePath, report);
 }
 
 interface ExecutionOptions {
@@ -446,9 +377,7 @@ function executePrepared(input: ExecutionOptions, prepare: () => PreparedContext
   const report = buildReport(context, planOrder, status, snapshotChanged);
   if (report.passed) context.assertCurrent();
   if (input.reportFile) {
-    const outputPath = isAbsolute(input.reportFile) ? input.reportFile : resolve(context.repoRoot, input.reportFile);
-    const materialized = redactPayloadStrings(report as unknown as JsonValue, collectDenylistSecretValues());
-    writeFileDurably(outputPath, `${JSON.stringify(materialized, null, 2)}\n`);
+    writeRedactedExecutionReport(context.repoRoot, input.reportFile, report);
   }
   return report;
 }

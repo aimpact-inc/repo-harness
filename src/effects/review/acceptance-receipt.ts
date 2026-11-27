@@ -44,13 +44,15 @@ import {
   type AcceptanceFinding,
   type AcceptancePolicy,
   type AcceptanceReceipt,
-  type AcceptanceReceiptPolicyInput,
-  type AcceptanceReceiptPolicyVerdict,
   type AcceptanceReviewResult,
-  type AcceptanceValidatorRuleId,
   type ReviewSubject,
   type UserWaiverGrant,
 } from '../../core/review/acceptance-receipt';
+import type {
+  AcceptanceReceiptPolicyInput,
+  AcceptanceReceiptPolicyVerdict,
+  AcceptanceValidatorRuleId,
+} from '../../core/review/acceptance-validator-rules';
 import { isRecord } from '../../core/evidence/is-record';
 import { parseJsonText } from '../../core/evidence/file-syntax';
 import { SHA256_PREFIXED_PATTERN } from '../../core/evidence/sha256-pattern';
@@ -87,10 +89,8 @@ export interface AcceptancePullRequestSelection {
 }
 
 export {
-  ACCEPTANCE_VALIDATOR_RULE_IDS,
   ACCEPTANCE_VERIFICATION_OBSERVATION_KIND,
   ACCEPTANCE_VERIFICATION_OBSERVATION_PROTOCOL,
-  CONSUMED_RECEIPT_KEYS,
   GENERIC_REVIEW_ROLE,
   acceptancePolicySource,
   acceptanceReviewContextDigest,
@@ -99,6 +99,10 @@ export {
   contractCarriesArchiveProjection,
   renderAcceptanceProjection,
 } from '../../core/review/acceptance-receipt';
+export {
+  ACCEPTANCE_VALIDATOR_RULE_IDS,
+  CONSUMED_RECEIPT_KEYS,
+} from '../../core/review/acceptance-validator-rules';
 
 export type {
   AcceptanceAuthor,
@@ -109,15 +113,17 @@ export type {
   AcceptancePolicyV1,
   AcceptancePolicyV2,
   AcceptanceReceipt,
-  AcceptanceReceiptPolicyInput,
-  AcceptanceReceiptPolicyVerdict,
   AcceptanceReviewResult,
-  AcceptanceValidatorRuleId,
   AcceptanceVerificationObservationV1,
   ModelRelation,
   ReviewSubject,
   UserWaiverGrant,
 } from '../../core/review/acceptance-receipt';
+export type {
+  AcceptanceReceiptPolicyInput,
+  AcceptanceReceiptPolicyVerdict,
+  AcceptanceValidatorRuleId,
+} from '../../core/review/acceptance-validator-rules';
 export type { RequiredCheckCoverageEvidenceV1 } from '../../core/publication/required-check-coverage';
 
 

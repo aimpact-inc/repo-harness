@@ -1266,6 +1266,7 @@ ${path === secondBash ? 'if [ "$1" = --version ]; then sleep 5.1; fi\n' : ''}exe
 test.each([
   "src/effects/git/runner.ts",
   "src/effects/git/async-child.ts",
+  "src/effects/evidence/verification-execution-store.ts",
   "src/effects/evidence/verification-toolchain.ts",
   "src/effects/evidence/verification-ledger-view.ts",
 ])("changing an installed runner source invalidates downstream verification (%s)", async (sourcePath) => {
