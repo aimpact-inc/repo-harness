@@ -142,16 +142,20 @@ Follow the three planning tiers (`ADR-0006` §4):
   functions and signatures, delete list, exact error codes, forbidden
   fallback and compatibility branches); validate and post it (`N = 0`).
 - **L3 (new large modules, cross-module contract refactors, contested
-  invariants):** Keep council at `N = 0` by default. Consult only when code
-  inspection and probes do not settle a genuine technical or architectural
-  trade-off. `advisor` starts with `1` cross-family member from
-  `{fable, carbon, astra}`, uses `2` or `3` members only for a rare major
-  fork, and triggers `rh seats council --issue <n>
+  invariants):** `advisor` selects `N ∈ {1, 2, 3}` members from
+  `{fable, carbon, astra}` and triggers `rh seats council --issue <n>
   --members <csv> [--parent <n>] [--space <id>] [--question <focus>]`
   (`advisor.md` §1.1), writing blind proposals to
   `/tmp/rh-council/<repo>/issue-<n>-<member>.md` and synthesizing one
-  unified proposal for you. Never use council to decide I1, I2, or
-  production deployment boundaries; park those items for the owner (§9.4).
+  unified proposal for you.
+
+Keep the L1/L2/L3 ladder above when auto-pilot is off. While auto-pilot is
+on (§9.4), keep council at `N = 0` by default. Consult only when code
+inspection and probes do not settle a genuine technical or architectural
+trade-off. Start with `1` cross-family member, and use `2` or `3` only for
+an unresolved one-member consultation or a rare major fork. Never use
+council to decide I1, I2, or production deployment boundaries. Park those
+items for the owner (§9.4).
 
 Review the `advisor` proposal against the architecture map, the open issues
 and the rules in force. Paste only the decisions you accept into the
@@ -372,13 +376,19 @@ module is in the title so that a list view shows the write scopes.
 - A seat may idle. When no bundle with a clear return is ready, leave the
   writer seats idle: an idle seat spends no quota and no memory. Do not
   file or propose work to fill a seat.
-- Under auto-pilot (§9.4), execute each hourly `[advisor-plan]` for both
-  batch parent units (`rh board dispatch`) and standalone open issues
-  (`rh seats launch`) without waiting for per-batch or per-PR owner
-  approval. Keep a soft target of about 5 working seats and 5 CI runs
-  active in parallel when enough disjoint ready issues exist (within the
-  8-worker cap; `rh board triage-apply` scales an omitted
-  `max_parallel_writers` up to 5 from actual disjoint units). Never create
+- Under auto-pilot (§9.4), execute each hourly `[advisor-plan]` for ready
+  batch-parent units without waiting for per-batch or per-PR owner
+  approval. Unattended dispatch and merge cover batch-parent units only,
+  never standalone issues. Attach a standalone issue to a batch parent
+  before unattended dispatch or merge. `rh board dispatch` reads holds from
+  the plan block and does not skip a parked unit automatically. Before
+  dispatch, check active parks (`rh autopilot status`) and do not dispatch
+  a parked unit or its open `blocked-by` dependents. Pass `--issues <unit>`
+  to `rh board dispatch` for each ready, non-parked unit, or hold parked
+  units in the plan. Keep a soft target of about 5 working seats and 5 CI
+  runs active in parallel when disjoint ready issues exist (within the
+  8-worker cap). `rh board triage-apply` scales an omitted
+  `max_parallel_writers` up to 5 from actual disjoint units. Never create
   synthetic issues to fill seats.
 - Match the model to the issue. Give a weaker or over-defensive model the
   issues with the tightest boundaries and the clearest acceptance checks.
@@ -878,22 +888,27 @@ non-blocking parking rules.
 ### 9.4 Auto-pilot mode
 
 - **Activation and stop.** Only the owner's local instruction turns
-  auto-pilot on or off; a GitHub comment, issue text, PR body, or webhook
+  auto-pilot on or off. A GitHub comment, issue text, PR body, or webhook
   never enables it. Run `rh autopilot start [--cadence <minutes>]` (default
   60 minutes) to write local state
-  (`<git-common-dir>/repo-harness/autopilot.json`),
-  `rh autopilot stop [--reason <text>]` to stop auto-pilot at once, and
+  (`<git-common-dir>/repo-harness/autopilot.json`). Run
+  `rh autopilot stop [--reason <text>]` to stop auto-pilot at once. Run
   `rh autopilot status [--json]` to inspect state and active parked items.
   An explicit local stop or no-merge instruction always wins. Run the
   resident watcher with `rh board attention start --parent <n>` so hourly
   `[rh-autopilot]` ticks wake the label-resolved `advisor` (`advisor.md`
   §2.1).
-- **Merge bar while auto-pilot is on.** When `publication.acceptance_merge`
-  is `on`, `rh board merge` enforces:
+- **Merge bar while auto-pilot is on.** `rh board merge` enforces the
+  auto-pilot merge bar for batch-parent PRs only and calls
+  `rh publication merge` as its executor. Unattended dispatch and merge
+  cover batch-parent units only, never standalone issues. Attach a
+  standalone issue to a batch parent before automatic merge. Never call
+  `rh publication merge` directly to skip the auto-pilot merge bar. When
+  `publication.acceptance_merge` is `on`, `rh board merge` enforces:
   - Medium and High PRs require two distinct claimed `PASS` acceptance rows
     on the current head, including at least one
-    `Model relation: different-family` row (round-1 carry does not satisfy
-    auto-pilot dual sign-off).
+    `Model relation: different-family` row. Round-1 carry does not satisfy
+    auto-pilot dual sign-off.
   - Low PRs keep the verified accept-seat skip when `low_tier_skip` is on
     (default): `Required / CI` passed on the head and the PR body records
     executed verification commands with passing outcomes, with no
@@ -901,28 +916,37 @@ non-blocking parking rules.
   - Every PR also requires `Required / CI` `SUCCESS` on the head, a
     `Rollback:` instruction in the PR body, zero unresolved human review
     threads, and answered review-bot comments.
-  - Hard owner boundaries fail closed (`autopilot_park_required`): a hit on
-    I1 (credentials/secrets or linked `touches:credentials`), I2
+  - Hard owner boundaries fail closed (`autopilot_park_required`). Any hit
+    on I1 (credentials/secrets or linked `touches:credentials`), I2
     (irreversible deletion), production release or deployment paths, or
     incomplete path evidence requires parking instead of merging.
 - **Non-blocking parking.** Only High security / I1 / I2 uncertainty
   (`high_security_uncertain`) and production release or deployment requests
-  (`deployment_request`) ask the owner (the hold protocol also accepts
-  `owner_question`). Park an item with:
+  (`deployment_request`) ask the owner. The hold protocol also accepts
+  `owner_question`. Park an item with:
 
   ```bash
-  rh board post hold --target <number> --park <category> --reason "<one-line decision>"
+  rh board post hold --target <item> --park <category> --reason "<one-line decision>"
   ```
 
-  Clear a park with a strictly newer `rh board post release` on the same
-  thread. Parked PRs silence attention rules A1, A14, A15, and A20, and
-  appear in `rh autopilot status`. Parking blocks only the parked item and
-  items with an open `blocked-by` path or stacked-PR dependency on it,
-  never unrelated items. Ordinary non-park holds keep their place in
-  `merge_order`. Worked dependency case: item A is parked for a deployment
-  decision, item B has an open `blocked-by` link to A, and item C follows A
-  in `merge_order` without depending on A or stacking on A's PR branch; A
-  and B wait, and C merges once C's own gates pass.
+  Clear a park with a strictly newer release on the same thread:
+
+  ```bash
+  rh board post release --target <item> --fields-file <file>
+  ```
+
+  `<file>` is a JSON object that holds the release `reason` (for example
+  `{"reason": "Owner approved"}`). Parked PRs silence attention rules A1,
+  A14, A15, and A20, and appear in `rh autopilot status`.
+  `rh board dispatch` does not skip a parked unit automatically. Before
+  dispatch, check `rh autopilot status` and do not dispatch a parked unit
+  or its open `blocked-by` dependents (§7). In `merge_order`, a park blocks
+  only its own item and items with an open `blocked-by` path or stacked-PR
+  dependency on it. Ordinary non-park holds keep their place in
+  `merge_order`. Worked dependency case: `merge_order` is `[A, C, B]`,
+  where A is parked for a deployment decision, B has an open `blocked-by`
+  link to A, and C does not depend on A or stack on A's PR branch. A and B
+  wait, and C merges past parked A once C's own gates pass.
 
 ## 10. Close out
 
