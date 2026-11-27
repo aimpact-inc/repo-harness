@@ -1,17 +1,18 @@
-import { assertObservationPath, observationReadFileSync as readFileSync } from '../readonly-observation';
+import { observationReadFileSync as readFileSync } from '../readonly-observation';
 import { byteCompare } from '../../core/evidence/byte-compare';
-import { createHash } from 'crypto';
-import { canonicalize } from '../../core/evidence/canonical-json';
-import { sha256Prefixed } from '../../core/evidence/sha256';
-import { lstatSync, readlinkSync } from 'fs';
 import { join } from 'path';
-import { gitExecFileSync, gitSpawnSync } from '../git/runner';
+import { gitSpawnSync } from '../git/runner';
 import { POLICY_PATH, decodeWorkflowPolicy, isPolicyObject, policyValue } from '../../core/workflow/policy-schema';
-
-// Raised from 4 MiB: a diff that overflows this cap can no longer be observed,
-// so instead of collapsing distinct contents to one fixed hash we mark the
-// fingerprint degraded and fail closed (status: unknown).
-const PATCH_HASH_MAX_BUFFER = 64 * 1024 * 1024;
+import {
+  PATCH_HASH_MAX_BUFFER,
+  gitRun,
+  gitRunBuffer,
+  hashJson,
+  isOperationalReviewPath,
+  normalizedFinalContent,
+  parseNameStatusZ,
+  type FingerprintCtx,
+} from './diff-git-observation';
 
 export const REVIEW_SUBJECT_SCOPE = 'normalized-final-content';
 
@@ -67,66 +68,8 @@ export function resolvePolicyReviewBase(repoRoot: string): PolicyReviewBaseResol
   }
 }
 
-// Accumulates whether any git observation failed during a single fingerprint
-// computation. A degraded computation must fail closed (status: unknown) so the
-// Done gate never accepts a review against a diff it could not fully read.
-interface FingerprintCtx {
-  degraded: boolean;
-}
-
-interface GitTextResult {
-  readonly ok: boolean;
-  readonly text: string;
-}
-
-interface GitBufferResult {
-  readonly ok: boolean;
-  readonly buf: Buffer;
-}
-
 export function uniqueSorted(values: readonly string[]): string[] {
   return Array.from(new Set(values.filter(Boolean))).sort(byteCompare);
-}
-
-// Returns ok:false on any git failure (non-zero exit, maxBuffer overflow, git
-// missing) so callers can distinguish a legitimately empty result from an
-// unobservable one. The previous helper returned '' for both, which let command
-// failures masquerade as clean state.
-// --literal-pathspecs: every path handed back to git here was discovered from
-// git's own `-z` output, so it must be matched verbatim. Without this flag a
-// filename that looks like pathspec magic (a leading `:`, e.g. `:(icase)x`) is
-// re-interpreted as a pattern, silently matching a different file or nothing and
-// dropping its content from the fingerprint.
-function gitRun(repoRoot: string, args: readonly string[], maxBuffer = PATCH_HASH_MAX_BUFFER): GitTextResult {
-  try {
-    const text = gitExecFileSync(['-C', repoRoot, '--literal-pathspecs', ...args], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      maxBuffer,
-    });
-    return { ok: true, text };
-  } catch {
-    return { ok: false, text: '' };
-  }
-}
-
-// Byte-exact variant for NUL-delimited (`-z`) output so non-ASCII, quoted, or
-// whitespace-bearing pathnames survive verbatim instead of being mangled by
-// line/space splitting.
-function gitRunBuffer(repoRoot: string, args: readonly string[], maxBuffer = PATCH_HASH_MAX_BUFFER): GitBufferResult {
-  try {
-    const out = gitExecFileSync(['-C', repoRoot, '--literal-pathspecs', ...args], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      maxBuffer,
-    });
-    return { ok: true, buf: Buffer.isBuffer(out) ? out : Buffer.from(String(out)) };
-  } catch {
-    return { ok: false, buf: Buffer.alloc(0) };
-  }
-}
-
-function hashJson(value: unknown): string {
-  return sha256Prefixed(canonicalize(value));
 }
 
 // Split a NUL-delimited git buffer into verbatim utf-8 tokens. When ctx is
@@ -180,30 +123,6 @@ export function parseStatusZ(tokens: readonly string[]): { all: string[]; untrac
   return { all: uniqueSorted(all), untracked: uniqueSorted(untracked) };
 }
 
-// Parse `git diff --name-status --find-renames -z`. Format is `<status>\0<path>`
-// per entry; rename/copy entries are `<status>\0<old>\0<new>`.
-function parseNameStatusZ(tokens: readonly string[]): string[] {
-  const paths: string[] = [];
-  let index = 0;
-  while (index < tokens.length) {
-    const status = tokens[index];
-    index += 1;
-    if (!status) continue;
-    if (status[0] === 'R' || status[0] === 'C') {
-      const oldPath = tokens[index];
-      const newPath = tokens[index + 1];
-      if (oldPath) paths.push(oldPath);
-      if (newPath) paths.push(newPath);
-      index += 2;
-    } else {
-      const path = tokens[index];
-      if (path) paths.push(path);
-      index += 1;
-    }
-  }
-  return uniqueSorted(paths);
-}
-
 // Canonical source for "workflow surface" -- ceremony/administrative paths
 // that stay editable without a local plan artifact and never inflate the risk
 // floor's medium-scope, cross-capability, or strict-token counters (Phase C2,
@@ -230,26 +149,6 @@ export function isImplementationSurfacePath(path: string): boolean {
   return !isWorkflowSurfacePath(path);
 }
 
-function isOperationalReviewPath(path: string): boolean {
-  return (
-    /^tasks\/(?:contracts|reviews|notes|archive)\//.test(path) ||
-    path === '.ai/harness/active-worktree' ||
-    path === '.ai/harness/events.jsonl' ||
-    path.startsWith('.ai/harness/capability-context/') ||
-    path.startsWith('.ai/harness/architecture-projection/') ||
-    path.startsWith('.ai/harness/checks/') ||
-    path.startsWith('.ai/harness/evidence/') ||
-    path.startsWith('.ai/harness/failures/') ||
-    path.startsWith('.ai/harness/planning/') ||
-    path.startsWith('.ai/harness/runs/') ||
-    path.startsWith('.ai/harness/state/') ||
-    path === 'evals/harness/reports/profile-comparison.json' ||
-    path === 'evals/harness/reports/profile-comparison.md' ||
-    path === 'evals/harness/reports/profile-comparison.sha256.json' ||
-    path === '.claude/.active-plan'
-  );
-}
-
 function unknownReviewSubject(
   targetRef: string,
   targetRev: string,
@@ -270,55 +169,6 @@ function unknownReviewSubject(
     review_subject_sha256: 'unknown',
     reason,
   });
-}
-
-function normalizedFinalContent(
-  repoRoot: string,
-  paths: readonly string[],
-  ctx: FingerprintCtx,
-): Array<Record<string, unknown>> {
-  const entries: Array<Record<string, unknown>> = [];
-  for (const path of paths) {
-    const absolute = join(repoRoot, path);
-    assertObservationPath(absolute);
-    try {
-      const stat = lstatSync(absolute);
-      if (stat.isSymbolicLink()) {
-        entries.push({
-          path,
-          type: 'symlink',
-          mode: '120000',
-          target_hex: readlinkSync(absolute, { encoding: 'buffer' }).toString('hex'),
-        });
-      } else if (stat.isFile()) {
-        entries.push({
-          path,
-          type: 'file',
-          mode: (stat.mode & 0o111) !== 0 ? '100755' : '100644',
-          sha256: createHash('sha256').update(readFileSync(absolute)).digest('hex'),
-        });
-      } else if (stat.isDirectory()) {
-        const stage = gitRun(repoRoot, ['ls-files', '--stage', '--', path]);
-        const match = stage.ok ? stage.text.match(/^160000 ([0-9a-f]{40,64}) [0-3]\t/) : null;
-        if (match) entries.push({ path, type: 'gitlink', mode: '160000', oid: match[1] });
-        else {
-          ctx.degraded = true;
-          entries.push({ path, type: 'unsupported' });
-        }
-      } else {
-        ctx.degraded = true;
-        entries.push({ path, type: 'unsupported' });
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        entries.push({ path, type: 'deleted' });
-      } else {
-        ctx.degraded = true;
-        entries.push({ path, type: 'unreadable' });
-      }
-    }
-  }
-  return entries;
 }
 
 export function buildReviewSubject(
