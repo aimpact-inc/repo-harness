@@ -224,3 +224,26 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   A11 only wakes it. A hold record (`repo-harness merge hold`) only narrows:
   a seat that decides a stop locally posts it in the same turn
   (`references/orchestrator.md` §9.3).
+- Auto-pilot. Only the owner's local instruction turns auto-pilot on or
+  off; a GitHub comment never activates it. The orchestrator runs
+  `rh autopilot start [--cadence <minutes>]`, `rh autopilot stop [--reason <text>]`,
+  and `rh autopilot status`; an explicit local stop always wins. While
+  auto-pilot is on, the board watcher sends an hourly `[rh-autopilot]` tick
+  for `[advisor-plan]` covering batch parents and standalone open issues
+  (`references/advisor.md` §2.1), and the orchestrator dispatches and
+  merges when `publication.acceptance_merge` is `on`
+  (`references/orchestrator.md` §9.4). Auto-pilot merge bar: Medium and
+  High PRs require `Required / CI`, answered review-bot comments, a
+  rollback line, and two distinct claimed `PASS` rows on the current head
+  with at least one `different-family` row; Low PRs keep the verified
+  accept-seat skip (`Required / CI`, executed verification commands in the
+  PR body, and a rollback line). Keep `rh seats council` at zero members by
+  default, then one cross-family member, and two or three only for a rare
+  major fork. Only High security / I1 / I2 uncertainty
+  (`high_security_uncertain`) and production release or deployment requests
+  (`deployment_request`) ask the owner through
+  `rh board post hold --target <n> --park <category> --reason "<decision>"`;
+  parking blocks only the parked item and items with an open `blocked-by`
+  path or stacked-PR dependency on it, never unrelated items. Soft target:
+  keep about 5 working seats and 5 CI runs active in parallel when enough
+  disjoint ready issues exist; never create synthetic issues.
