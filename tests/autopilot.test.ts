@@ -694,6 +694,91 @@ test('unknown quota skips due tick without sending or stamping last_advisor_tick
   expect(ticks[0]!.detail).toContain('claude: reading older than 30 min');
 });
 
+test('unknown quota latches for the rest of the board window even when quota recovers before window end, then sends in the next window', async () => {
+  const repo = createTempGitRepo('rh-autopilot-quota-latch-');
+  const home = tmpWorkspace('rh-autopilot-quota-latch-home-');
+  cleanupPaths.push(home);
+  const logPath = attentionLogPath(1186405141, 3581, { REPO_HARNESS_HOME: home });
+  const sent: Array<{ readonly terminal: string; readonly text: string }> = [];
+  const statePath = autopilotStatePath(repo);
+  let boardReads = 0;
+  let quotaReads = 0;
+
+  let clock = Date.parse('2026-11-27T10:00:00.000Z');
+  startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 1, now: new Date(clock) });
+  clock += 60_000; // 10:01: first due time
+
+  let stale = true;
+  const ticker = attentionAutopilotTicker({
+    repository_id: 1186405141,
+    parent: 3581,
+    host: fakeAttentionHost(sent),
+    ports: {
+      readState: () => readAutopilotStateAtPath(statePath),
+      recordTick: now => recordAutopilotAdvisorTick({ repo_root: repo, now }),
+      readQuota: () => {
+        quotaReads += 1;
+        return stale ? staleClaudeQuotaReport(clock) : healthyQuotaReport(clock);
+      },
+      seatTerminals: () => ({ status: 'observed', terminals: [fakeAdvisorTerminal('t62', 'idle')] }),
+      isAdvisorInReset: () => false,
+    },
+  });
+
+  // Window 1 (10:01 -> 11:01): quota is unknown at 10:01, becomes healthy at 10:02 while the sleep stub
+  // advances the clock across every 30s review tick in the same board window. Nothing sends until window 2.
+  await runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    review_collect: () => ({ orchestrators: [], lines: [] }),
+    autopilot_tick: ticker,
+    collect: () => {
+      boardReads += 1;
+      return minimalBoard(new Date(clock));
+    },
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async ms => {
+      clock += ms;
+      if (clock >= Date.parse('2026-11-27T10:02:00.000Z')) stale = false;
+    },
+  });
+  expect(clock).toBe(Date.parse('2026-11-27T11:01:00.000Z'));
+  expect(stale).toBe(false);
+  expect(boardReads).toBe(1);
+  expect(quotaReads).toBe(1);
+  expect(sent).toEqual([]);
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBeNull();
+
+  // Window 2 (11:01): fresh board read clears the latch and sends once.
+  await runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    autopilot_tick: ticker,
+    collect: () => {
+      boardReads += 1;
+      return minimalBoard(new Date(clock));
+    },
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async () => {},
+  });
+  expect(boardReads).toBe(2);
+  expect(quotaReads).toBe(2);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.terminal).toBe('t62');
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBe('2026-11-27T11:01:00.000Z');
+
+  const records = readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const ticks = records.filter(record => record.kind === 'autopilot_tick');
+  expect(ticks.map(record => [record.outcome, record.reason])).toEqual([
+    ['skipped', 'quota_unknown'],
+    ['sent', null],
+  ]);
+});
+
 test('already-due deadline passed during review work ticks before sleeping', async () => {
   const repo = createTempGitRepo('rh-autopilot-overdue-');
   const home = tmpWorkspace('rh-autopilot-overdue-home-');

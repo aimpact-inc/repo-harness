@@ -541,7 +541,7 @@ export function planAutopilotAdvisorTick(input: {
   const deferMs = Math.min(AUTOPILOT_BUSY_RETRY_MS, input.state.cadence_minutes * 60_000);
   const quotaIssue = autopilotQuotaProblem(input.quota);
   if (quotaIssue !== null) {
-    return { action: 'skip', reason: quotaIssue.reason, terminal: null, detail: quotaIssue.detail, next_due_ms: deferMs };
+    return { action: 'skip', reason: quotaIssue.reason, terminal: null, detail: quotaIssue.detail, next_due_ms: null };
   }
   return planAdvisorSeatDelivery({ ...input, defer_ms: deferMs });
 }

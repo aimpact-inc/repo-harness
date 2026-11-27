@@ -233,6 +233,31 @@ function readAutopilotTickState(
   }
 }
 
+function isQuotaAuthorityFailure(result: AttentionAutopilotTickResultV1): boolean {
+  return result.outcome === 'skipped' && (result.reason === 'quota_unknown' || result.reason === 'quota_unavailable');
+}
+
+function checkAutopilotSchedule(
+  state: AutopilotStateV1,
+  nowMs: number,
+  midWindow: boolean,
+  deferred: { readonly scheduleKey: string; readonly retryAtMs: number } | null,
+): { readonly ready: true; readonly scheduleKey: string }
+  | { readonly ready: false; readonly clearDeferred: boolean; readonly result: AttentionAutopilotTickResultV1 } {
+  const dueAtMs = nextAutopilotAdvisorTickAtMs(state);
+  if (dueAtMs === null) {
+    return { ready: false, clearDeferred: true, result: { outcome: 'skipped', terminal: null, reason: 'disabled', detail: 'auto-pilot is off', next_due_ms: null } };
+  }
+  const scheduleKey = `${state.enabled}:${state.activated_at ?? ''}:${state.cadence_minutes}:${state.last_advisor_tick_at ?? ''}`;
+  if (midWindow && deferred !== null && deferred.scheduleKey === scheduleKey && nowMs < deferred.retryAtMs) {
+    return { ready: false, clearDeferred: false, result: { outcome: 'skipped', terminal: null, reason: 'not_due', detail: null, next_due_ms: deferred.retryAtMs - nowMs } };
+  }
+  if (nowMs < dueAtMs) {
+    return { ready: false, clearDeferred: true, result: { outcome: 'skipped', terminal: null, reason: 'not_due', detail: null, next_due_ms: dueAtMs - nowMs } };
+  }
+  return { ready: true, scheduleKey };
+}
+
 /**
  * Dynamic label-resolved hourly advisor ticker (#3574). Reads local autopilot state on every check,
  * gates due sends on observed board and non-unknown quota authorities, resolves the live advisor by
@@ -246,31 +271,34 @@ export function attentionAutopilotTicker(input: {
   readonly ports: AttentionAutopilotPortsV1;
 }): (now: Date, context?: AttentionAutopilotTickContextV1) => Promise<AttentionAutopilotTickResultV1> {
   let deferred: { readonly scheduleKey: string; readonly retryAtMs: number } | null = null;
-  const scheduleKeyOf = (state: AutopilotStateV1): string =>
-    `${state.enabled}:${state.activated_at ?? ''}:${state.cadence_minutes}:${state.last_advisor_tick_at ?? ''}`;
+  let quotaFailedReason: 'quota_unknown' | 'quota_unavailable' | null = null;
 
   return async (now, context) => {
     const board: AutopilotBoardAuthorityV1 = context?.board ?? { status: 'observed' };
     const midWindow = context?.mid_window === true;
-    if (!midWindow) deferred = null;
+    if (!midWindow) {
+      deferred = null;
+      quotaFailedReason = null;
+    } else if (quotaFailedReason !== null) {
+      return {
+        outcome: 'skipped',
+        terminal: null,
+        reason: quotaFailedReason,
+        detail: 'quota authority failed earlier in this board window',
+        next_due_ms: null,
+      };
+    }
 
     const loaded = readAutopilotTickState(input.ports.readState);
     if (!loaded.ok) return loaded.result;
     const { state } = loaded.read;
-    const dueAtMs = nextAutopilotAdvisorTickAtMs(state);
-    if (dueAtMs === null) {
-      deferred = null;
-      return { outcome: 'skipped', terminal: null, reason: 'disabled', detail: 'auto-pilot is off', next_due_ms: null };
-    }
     const nowMs = now.getTime();
-    const scheduleKey = scheduleKeyOf(state);
-    if (midWindow && deferred !== null && deferred.scheduleKey === scheduleKey && nowMs < deferred.retryAtMs) {
-      return { outcome: 'skipped', terminal: null, reason: 'not_due', detail: null, next_due_ms: deferred.retryAtMs - nowMs };
+    const schedule = checkAutopilotSchedule(state, nowMs, midWindow, deferred);
+    if (!schedule.ready) {
+      if (schedule.clearDeferred) deferred = null;
+      return schedule.result;
     }
-    if (nowMs < dueAtMs) {
-      deferred = null;
-      return { outcome: 'skipped', terminal: null, reason: 'not_due', detail: null, next_due_ms: dueAtMs - nowMs };
-    }
+    const { scheduleKey } = schedule;
     deferred = null;
     if (board.status === 'unavailable') {
       return { outcome: 'skipped', terminal: null, reason: 'board_unavailable', detail: board.reason, next_due_ms: null };
@@ -279,8 +307,8 @@ export function attentionAutopilotTicker(input: {
     const quota = await readAutopilotQuotaAuthority(input.ports.readQuota);
     const quotaIssue = autopilotQuotaProblem(quota);
     if (quotaIssue !== null) {
-      deferred = { scheduleKey, retryAtMs: nowMs + deferMs };
-      return { outcome: 'skipped', terminal: null, reason: quotaIssue.reason, detail: quotaIssue.detail, next_due_ms: deferMs };
+      quotaFailedReason = quotaIssue.reason;
+      return { outcome: 'skipped', terminal: null, reason: quotaIssue.reason, detail: quotaIssue.detail, next_due_ms: null };
     }
     const plan = planAutopilotAdvisorTick({
       state,
@@ -439,15 +467,18 @@ function createAutopilotWindowLoop(
 ): AutopilotWindowLoop | undefined {
   if (!deliver || tick === undefined) return undefined;
   let nextCheckAt: number | null = null;
+  let windowBlocked = false;
   return {
     nextCheckAt: () => nextCheckAt,
     tick: async (board, midWindow) => {
+      if (windowBlocked) return;
       const startedAt = now();
       const result = await tick(startedAt, { board, mid_window: midWindow });
       if (result.outcome !== 'skipped' || (result.reason !== 'disabled' && result.reason !== 'not_due')) {
         log({ kind: 'autopilot_tick', outcome: result.outcome, terminal: result.terminal, reason: result.reason, detail: result.detail });
       }
-      if (board.status === 'unavailable') {
+      if (board.status === 'unavailable' || isQuotaAuthorityFailure(result)) {
+        windowBlocked = true;
         nextCheckAt = null;
         return;
       }
