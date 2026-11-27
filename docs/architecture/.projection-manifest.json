@@ -769,13 +769,13 @@
     "projection_target.diagram.runtime-topology":
       {"type":"diagram-runtime-topology","scope":{"kind":"diagram","id":"runtime-topology"},"path":"docs/architecture/diagrams/runtime-topology.mmd","ownership":"generated","format":"mermaid","outputDigest":"sha256:f311c261cd11f00f966e85f701aaf77b1fd287453d9e66b3b66052c6827a55f8"},
     "projection_target.entity.capability-organization-board":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.board","entityKind":"capability"},"path":"docs/architecture/modules/organization/board.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:d8ccc245e9901b6bdb6371ceeea7e50f4afe5f66cc9e9c73525fe49ee5fad7f9"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.board","entityKind":"capability"},"path":"docs/architecture/modules/organization/board.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:cc174a823ceff1c4f82614bce0cb9587ed458ee5e99ff1d492c385676f32f3b0"},
     "projection_target.entity.capability-organization-publication":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.publication","entityKind":"capability"},"path":"docs/architecture/modules/organization/publication.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:f410bf1b1f83d12c0761f0e5f8ed5223f2cad8e02ea1811b132788fe5e0a4373"},
     "projection_target.entity.capability-organization-task-fleet":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.organization.task-fleet","entityKind":"capability"},"path":"docs/architecture/modules/organization/task-fleet.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:c85f78f93ff8d206a1d8410e74ad8eb9ad332e060a976b7220182b5bc235381a"},
     "projection_target.entity.capability-public-surface-action-commands":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.public-surface.action-commands","entityKind":"capability"},"path":"docs/architecture/modules/public-surface/action-commands.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:cd006683223819e1d2ee3feb331df1a4415bc967161cdd774b64f7dc3598308d"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.public-surface.action-commands","entityKind":"capability"},"path":"docs/architecture/modules/public-surface/action-commands.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:47225f6db8b2720d4ef595d64fb76e58411e2504c776cf6c67e41d98c5d94e1e"},
     "projection_target.entity.capability-public-surface-adoption":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.public-surface.adoption","entityKind":"capability"},"path":"docs/architecture/modules/public-surface/adoption.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:ef0463bca9830093857dd4e620d2c078644f8968fd4797e905c5fe24676897b7"},
     "projection_target.entity.capability-public-surface-root-router":
