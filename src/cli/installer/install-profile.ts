@@ -74,6 +74,7 @@ import { piExecutable } from '../../effects/pi-executable';
 import skillSurfaceManifest from '../../../assets/skill-commands/manifest.json';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { pluginRepair } from './architecture-selection';
+import type { KeptPlugin } from './kept-plugin';
 import { RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
 import {
   keepMovedRepositoryLedgers, keepOlderParentCopy, lstatExists, movedLedgersKept, readOlderParentCopy,
@@ -154,14 +155,6 @@ export interface SkippedPlugin {
   readonly id: PluginId;
   readonly reason: string;
   /** The command that adds the plugin after the host program is installed. */
-  readonly command: string;
-}
-
-/** A recorded host plugin of the `all` selection whose host program or target is now absent. */
-export interface KeptPlugin {
-  readonly id: PluginId;
-  readonly reason: string;
-  /** The explicit selection that removes the plugin. */
   readonly command: string;
 }
 
@@ -1296,10 +1289,6 @@ export function defaultPluginSelection(target: InstallTarget, env: NodeJS.Proces
 export function skippedPluginLine(entry: SkippedPlugin): string {
   const after = entry.command === UPDATE_COMMAND ? 'install the host program, then run' : 'run';
   return `skipped ${entry.id}: ${entry.reason}; to add it later, ${after}: ${entry.command}`;
-}
-
-export function keptPluginLine(entry: KeptPlugin): string {
-  return `kept ${entry.id}: ${entry.reason}; update keeps the recorded plugin; to remove it, run: ${entry.command}`;
 }
 
 export function notAddedPluginLine(id: PluginId): string {
