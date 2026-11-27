@@ -1,5 +1,5 @@
 # runtime-harness/mcp-sidecar 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:bd10aea039dc205167d22ee374cf05512bcc75ebab28cdc33b64ae9ec153e382" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:e92882cd3b433d528cf4d6cf15de181f35324cb317dda677066a65f2c080ab07" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.mcp-sidecar`(kind `capability`)
 > **Matched Prefixes**:`src/cli/mcp/**`
@@ -54,7 +54,7 @@ flowchart LR
 
 - 規模量級:`20–50` 個文件 / `2000–5000` 行
 - 匹配前綴:`src/cli/mcp/**`
-- 排除前綴:`src/cli/mcp/general-repo-access.ts`、`src/cli/mcp/general-repo-access/**`
+- 排除前綴:`src/cli/mcp/general-repo-access.ts`、`src/cli/mcp/general-repo-access/**`、`src/cli/mcp/reader-tools.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界

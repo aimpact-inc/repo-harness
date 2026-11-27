@@ -1,6 +1,6 @@
 # organization/publication 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-publication" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:3fe0c9aa88ef5851c4f7901061c7329cb788441edf76877b9d3270f54631ce69" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-publication" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:eeb2ffe338776a00b0eb0d2db8a02a5da16b6c65e7f370252825e204c1e7df64" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.organization.publication`(kind `capability`)
 > **Matched Prefixes**:`src/core/publication/**`、`src/effects/publication/**`、`src/cli/commands/publication.ts`、`scripts/release-owner-steps.sh`
@@ -36,6 +36,10 @@ flowchart LR
 | 宣告入口 | 錨點 | 職責 |
 | --- | --- | --- |
 | `entrypoint.publication.command` | `src/cli/commands/publication.ts#buildPublicationCommand` | `sink.publication.readiness` → `src/effects/publication/merge-readiness.ts#collectPullRequestMergeReadiness` |
+| `entrypoint.publication.feedback-store` | `src/effects/publication/feedback-store.ts#writeFeedbackEvent` | `sink.publication.feedback-event-validation` → `src/core/publication/feedback.ts#validateFeedbackEvent` |
+| `entrypoint.publication.feedback-store` | `src/effects/publication/feedback-store.ts#readFeedbackEvent` | `sink.publication.feedback-event-read` → `src/effects/publication/feedback-store.ts#readFeedbackEventIn` |
+| `entrypoint.publication.app-hook-config` | `src/effects/publication/app-hook-config.ts#publishAppHookConfig` | `sink.publication.app-hook-config-validation` → `src/core/publication/publication-writes.ts#checkAppHookConfig` |
+| `entrypoint.publication.merge-executor` | `src/effects/publication/merge-executor.ts#executePublicationMerge` | `sink.publication.merge-preparation` → `src/effects/publication/merge-executor.ts#prepareMerge` |
 
 組件入口:
 

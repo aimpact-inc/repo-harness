@@ -1,6 +1,6 @@
 # runtime-harness/global-runtime-reconciliation 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4ec7d03c52cead89738d926eb647996cc80674fa051c131941a7823c91398758" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-global-runtime-reconciliation" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:fa98cddaee3478d229012dea2c1a8fac64d7b567521e3afebb5a5e3b50311fa3" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.global-runtime-reconciliation`(kind `capability`)
 > **Matched Prefixes**:`package.json`、`bun.lock`、`scripts/check-managed-runtime.ts`、`scripts/sync-codex-installed-copies.sh`、`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`src/effects/upgrade/**`、`src/effects/runtime/node-candidates.ts`、`src/effects/runtime/protected-helper-platform.ts`、`src/effects/skill-tree-integrity.ts`、`src/effects/configuration/**`、`src/core/release/**`、`src/effects/release/**`、`scripts/check-npm-release.sh`、`scripts/check-release-published.sh`、`scripts/check-tarball-install-smoke.sh`、`scripts/check-release-upgrade-rehearsal.sh`、`scripts/check-pi-package-smoke.ts`、`scripts/runtime-evidence-receipt.ts`、`install.sh`、`install.ps1`、`tsconfig.json`、`src/effects/runtime/node-runtime.ts`
@@ -60,6 +60,8 @@ flowchart LR
 | `entrypoint.global-runtime-reconciliation.update` | `src/cli/commands/global-runtime.ts#runGlobalRuntimeSetupInTransaction` | `sink.global-runtime-reconciliation.readback` → `src/cli/commands/global-runtime.ts#reconcileManagedRuntime`、`sink.global-runtime-reconciliation.architecture-configuration` → `src/cli/commands/global-runtime.ts#configureArchitectureProjection`、`sink.global-runtime-reconciliation.pi-package` → `src/cli/installer/pi-package.ts#installPiPackage` |
 | `entrypoint.global-runtime-reconciliation.update` | `src/cli/commands/global-runtime.ts#installHostAdapters` | `sink.global-runtime-reconciliation.host-adapters` → `src/cli/commands/install.ts#runInstall` |
 | `entrypoint.global-runtime-reconciliation.candidate-readback` | `src/cli/commands/global-runtime.ts#verifyInstalledManagedRuntime` | `sink.global-runtime-reconciliation.candidate-readback` → `src/cli/commands/global-runtime.ts#reconcileManagedRuntime` |
+| `entrypoint.global-runtime-reconciliation.node-runtime` | `src/effects/runtime/node-runtime.ts#selectCompatibleNode` | `sink.global-runtime-reconciliation.node-runtime-executable` → `src/effects/runtime/node-runtime.ts#isExecutableRuntime`、`sink.global-runtime-reconciliation.node-runtime-range` → `src/effects/runtime/node-runtime.ts#satisfies` |
+| `entrypoint.global-runtime-reconciliation.node-candidates` | `src/effects/runtime/node-candidates.ts#trustedNodeCandidates` | `sink.global-runtime-reconciliation.node-candidates-scan` → `src/effects/runtime/node-candidates.ts#childDirectories` |
 
 組件入口:
 
