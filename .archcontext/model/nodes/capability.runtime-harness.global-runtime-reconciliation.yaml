@@ -71,6 +71,25 @@ source:
             - id: sink.global-runtime-reconciliation.candidate-readback
               path: src/cli/commands/global-runtime.ts
               symbol: reconcileManagedRuntime
+    - id: entrypoint.global-runtime-reconciliation.node-runtime
+      path: src/effects/runtime/node-runtime.ts
+      symbols:
+        - name: selectCompatibleNode
+          sinks:
+            - id: sink.global-runtime-reconciliation.node-runtime-executable
+              path: src/effects/runtime/node-runtime.ts
+              symbol: isExecutableRuntime
+            - id: sink.global-runtime-reconciliation.node-runtime-range
+              path: src/effects/runtime/node-runtime.ts
+              symbol: satisfies
+    - id: entrypoint.global-runtime-reconciliation.node-candidates
+      path: src/effects/runtime/node-candidates.ts
+      symbols:
+        - name: trustedNodeCandidates
+          sinks:
+            - id: sink.global-runtime-reconciliation.node-candidates-scan
+              path: src/effects/runtime/node-candidates.ts
+              symbol: childDirectories
 extensions:
   harnessTier: core
   contractFiles:

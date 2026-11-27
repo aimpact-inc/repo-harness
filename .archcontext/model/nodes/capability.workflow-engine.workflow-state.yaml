@@ -55,6 +55,14 @@ source:
             - id: sink.workflow-state.git-common-dir
               path: src/effects/git/common-directory.ts
               symbol: resolveGitCommonDirectory
+    - id: entrypoint.workflow-state.policy-file
+      path: src/effects/state/policy-file.ts
+      symbols:
+        - name: readWorkflowPolicyFile
+          sinks:
+            - id: sink.workflow-state.policy-decode
+              path: src/core/workflow/policy-schema.ts
+              symbol: decodeWorkflowPolicy
 extensions:
   harnessTier: core
   contractFiles:
