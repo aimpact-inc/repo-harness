@@ -7,6 +7,7 @@ import { OPERATOR_WORKTREES_CLEANUP_EXECUTE_ROUTE, OPERATOR_WORKTREES_CLEANUP_PL
 import {
   OPERATOR_WORKTREES_CLEANUP_INVESTIGATION_ROUTE, OPERATOR_WORKTREES_CLEANUP_INVESTIGATION_STATUS_ROUTE, readCleanupInvestigationStatus, worktreeCleanupInvestigationWriteRoute,
 } from './worktree-cleanup-investigation';
+export { runCleanupInvestigationJob, type CleanupReviewHost } from './worktree-cleanup-investigation';
 import { decodeWorktrees, unavailableWorktrees, type WorktreesSnapshot } from '../../core/public-projections/worktrees';
 import { decodeDevActivitySnapshot, unavailableDevActivitySnapshot } from '../../core/dev-activity/decode';
 import { architecturePullRequestsSource } from '../../core/dev-activity/architecture';
@@ -60,6 +61,7 @@ export { architectureStatus, OperatorServerError, OPERATOR_SERVICE_NAME, OPERATO
 import { createOperatorWriteToken, handleOperatorWrite, operatorWriteTokenCookie, type OperatorWriteRoute } from './write-channel';
 import { AGENTS_CONFIGURATION_FAILURES, OPERATOR_SETTINGS_AGENTS_PATH, OPERATOR_SETTINGS_AGENTS_ROUTE, agentsSettingsWriteRoute, readAgentsSettings } from './agents-settings-route';
 import { OPERATOR_REPORT_LANGUAGE_PATH, OPERATOR_REPORT_LANGUAGE_ROUTE, OPERATOR_DOCUMENTATION_LANGUAGE_ROUTE, requireLanguageSettings, readDocumentationLanguage, reportingLanguageWriteRoute, documentationLanguageWriteRoute, type OperatorLanguageSettingsAdapter } from './language-settings-route';
+export type { OperatorLanguageSettingsAdapter } from './language-settings-route';
 import { OperatorWriteRefusal } from './write-run';
 import { OPERATOR_SETTINGS_SEATS_PATH, OPERATOR_SETTINGS_SEATS_ROUTE, SEATS_CONFIGURATION_FAILURES, readSeatsSettings, seatsSettingsWriteRoute } from './seats-settings-route';
 import { SeatsConfigurationError, readSeatsConfiguration } from '../board/seats-configuration';

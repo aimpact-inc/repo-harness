@@ -5,7 +5,9 @@ import { type Readable, type Writable } from 'node:stream';
 import { CodexRuntimeDecoder } from '../../core/operator/runtime-capture-decoders';
 import { RUNTIME_CAPTURE_PROTOCOL, runtimeCaptureId, type NativeRuntimeProvider, type RuntimeCaptureSnapshot } from '../../core/operator/runtime-capture';
 import { captureRuntimePty, prepareRuntimePty } from './runtime-capture-pty';
+export { RUNTIME_CAPTURE_PYTHON_UNAVAILABLE } from './runtime-capture-pty';
 import { RuntimeCaptureWriter, runtimeCaptureUid } from './runtime-capture-writer';
+export { RUNTIME_CAPTURE_OWNERSHIP_UNSUPPORTED } from './runtime-capture-writer';
 
 export interface RuntimeCaptureOptions {
   provider: NativeRuntimeProvider;

@@ -91,6 +91,46 @@ source:
             - id: sink.operator.architecture-request
               path: src/core/operator/architecture.ts
               symbol: parseArchitectureRequest
+    - id: entrypoint.operator.architecture-read
+      path: src/effects/operator/architecture.ts
+      symbols:
+        - name: readArchitecture
+          sinks:
+            - id: sink.operator.architecture-read-decode
+              path: src/core/operator/architecture.ts
+              symbol: decodeArchitectureModuleIndex
+    - id: entrypoint.operator.runtime-capture
+      path: src/effects/operator/runtime-capture.ts
+      symbols:
+        - name: runRuntimeCapture
+          sinks:
+            - id: sink.operator.runtime-capture-pty
+              path: src/effects/operator/runtime-capture-pty.ts
+              symbol: prepareRuntimePty
+    - id: entrypoint.operator.diagram-readback
+      path: src/effects/operator/diagram-readback.ts
+      symbols:
+        - name: readbackDiagram
+          sinks:
+            - id: sink.operator.diagram-readback-probe
+              path: src/effects/operator/diagram-render.ts
+              symbol: probeRenderCapability
+    - id: entrypoint.operator.worktree-cleanup
+      path: src/effects/operator/worktree-cleanup.ts
+      symbols:
+        - name: runWorktreeCleanup
+          sinks:
+            - id: sink.operator.worktree-cleanup-remove
+              path: src/effects/state/coordination-worktree-topology.ts
+              symbol: removeGreenWorktrees
+    - id: entrypoint.operator.write-run
+      path: src/effects/operator/write-run.ts
+      symbols:
+        - name: runOperatorWrite
+          sinks:
+            - id: sink.operator.write-run-state-dir
+              path: src/effects/operator/write-audit.ts
+              symbol: prepareOperatorStateDir
 extensions:
   behaviorSpecs:
     - id: boss-command-send

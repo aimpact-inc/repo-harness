@@ -1,7 +1,6 @@
 import { Command } from 'commander';
 import { OPERATOR_DEFAULT_HOST, OPERATOR_DEFAULT_MAX_CONCURRENCY, OPERATOR_DEFAULT_PORT, OPERATOR_DEFAULT_TIMEOUT_MS } from '../../core/review/operator-console-port';
-import type { CleanupReviewHost } from '../../effects/operator/worktree-cleanup-investigation';
-import type { OperatorCaptureRawOptions, OperatorServeRawOptions } from './operator-actions';
+import type { CleanupReviewHost, OperatorCaptureRawOptions, OperatorServeRawOptions } from './operator-actions';
 
 const actions = () => import('./operator-actions');
 
