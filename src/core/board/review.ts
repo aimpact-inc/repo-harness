@@ -9,6 +9,7 @@ import {
   acceptanceRowSeat,
   carriedPasses,
   gatekeeperReviewEvidence,
+  reviewRule,
   REVIEW_START_HEADER,
   REVIEW_START_STATUS_HEADER,
 } from './review-rules';
@@ -192,8 +193,9 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     if (pr.required_check.status !== 'success') return skip('ci_not_green', requiredCheckDetail(pr.required_check));
     if (pr.acceptance.status === 'accepted') return skip('accepted', `an acceptance covers ${pr.head_sha}`);
     if (pr.acceptance.status === 'unknown') return skip('acceptance_unknown', pr.acceptance.reason);
-    // An unknown tier is High: a pull request that no tier label covers still gets a review.
-    const tier = pr.tier ?? 'high';
+    // Dual sign-off uses both seats. Unknown tiers also take the High route.
+    const rule = reviewRule(pr, pr.tier, board.autopilot);
+    const tier = rule === 'dual' ? 'high' : pr.tier ?? 'high';
     if (tier === 'low') return skip('accepted', 'a Low pull request takes no review seat');
     if (tier === 'medium' && pr.writer_family === null) return skip('writer_family_unknown', 'no writer claim of the head branch has a Model line with a known family, so no seat is sure to be the other family');
     const page = input.comments.get(pr.number);
@@ -207,7 +209,7 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     // different-family review (`gkFamily !== null && gkFamily !== pr.writer_family`), and falls back to `reviewer` when gatekeeper
     // shares the writer's family or has no launchable route while `reviewer` is a known other family.
     const relayOpen = pr.gatekeeper_review === 'pass';
-    const carried = tier === 'high' ? carriedPasses({ head_sha: pr.head_sha, comments: page }) : [];
+    const carried = rule === 'high' ? carriedPasses({ head_sha: pr.head_sha, comments: page }) : [];
     const carriedFamilies = carried.map(row => (row.model === null ? null : modelFamily(row.model))).filter((family): family is string => family !== null);
     // When a High head carries an unattributed legacy Round-1 PASS (`pr.gatekeeper_review === 'none'` and `pr.second_review === 'pending'`),
     // match its model family against the configured seats so only the seat that failed re-runs.
@@ -240,7 +242,7 @@ export function planReview(input: ReviewInputV1): readonly ReviewDecisionV1[] {
     if (gatekeeperGap !== null) return skip('review_family_unavailable', `${gatekeeperGap}; ${routeWithoutModel(input.gatekeeper)}`);
     if (seats.some(entry => entry.seat === 'reviewer')) {
       const families = tier === 'high' && relayOpen
-        ? gatekeeperReviewEvidence({ comments: page, head_sha: pr.head_sha }).passFamilies
+        ? gatekeeperReviewEvidence({ comments: page, head_sha: pr.head_sha }, rule === 'high').passFamilies
         : carriedGatekeeperOnly
           ? carriedFamilies
           : [gkFamily];

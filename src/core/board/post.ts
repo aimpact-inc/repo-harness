@@ -1,3 +1,4 @@
+import { AUTOPILOT_PARK_CATEGORIES, isAutopilotParkCategory, type AutopilotParkCategory } from './autopilot';
 import { planFromComments } from './board';
 import { decodePlanBlock, decodePlanBlockValue, PLAN_COMMENT_HEADER, renderPlanComment, type PlanBlockV3, type PlanCommentFieldsV1 } from './plan-block';
 import {
@@ -86,7 +87,10 @@ const commentUrl = (value: unknown): string | null => (typeof value === 'string'
 /** Every field of each kind, keyed as `templates.md` names them. `plan` adds `block`, the plan block object. */
 const KINDS: Readonly<Record<BoardPostKind, Readonly<Record<string, FieldSpec>>>> = {
   plan: { coordinator: { required: true, refuse: commentUrl }, baseline: { required: true, refuse: baseline }, supersedes: { required: false, refuse: commentUrl }, block: { required: true } },
-  hold: { issues: { required: false, refuse: issueNumberList }, reason: { required: true } },
+  hold: {
+    issues: { required: false, refuse: issueNumberList }, reason: { required: true },
+    park: { required: false, refuse: value => isAutopilotParkCategory(value) ? null : `expected one of ${AUTOPILOT_PARK_CATEGORIES.join(', ')}` },
+  },
   release: { reason: { required: true } },
   disposition: {
     record: { required: true, refuse: commentUrl },
@@ -169,10 +173,12 @@ export function decodePostFields(kindName: string, value: unknown): BoardPostFie
         coordinator: text(value, 'coordinator', specs.coordinator!), baseline: text(value, 'baseline', specs.baseline!),
         supersedes: optional<string>(value, 'supersedes', specs.supersedes!), block: planBlock(value),
       }) };
-    case 'hold':
-      return { kind, fields: Object.freeze({
-        issues: optional<readonly number[]>(value, 'issues', specs.issues!), reason: text(value, 'reason', specs.reason!),
-      }) };
+    case 'hold': {
+      const issues = optional<readonly number[]>(value, 'issues', specs.issues!);
+      const park = optional<AutopilotParkCategory>(value, 'park', specs.park!);
+      if (park !== null && issues !== null) throw new BoardPostFieldsError('issues', 'park one item by its target number');
+      return { kind, fields: Object.freeze({ issues, park, reason: text(value, 'reason', specs.reason!) }) };
+    }
     case 'release':
       return { kind, fields: Object.freeze({ reason: text(value, 'reason', specs.reason!) }) };
     case 'disposition':
@@ -223,8 +229,9 @@ export function checkPostBody(post: BoardPostFieldsV1, body: string): void {
     case 'hold': {
       const hold = readMergeHold(page([posted(body, '2026-01-01T00:00:00Z')]), post.fields.issues !== null);
       if (hold.status !== 'held' || hold.holds.length !== 1) return disagree('the hold');
-      const read = hold.holds[0]!.issues;
-      if (post.fields.issues !== null && (read === null || read.join(',') !== post.fields.issues.join(','))) return disagree('the `Issues:` line');
+      const { issues, park } = hold.holds[0]!;
+      if (post.fields.issues !== null && (issues === null || issues.join(',') !== post.fields.issues.join(','))) return disagree('the `Issues:` line');
+      if ((park?.category ?? null) !== (post.fields.park ?? null) || (park !== undefined && park.reason !== post.fields.reason)) return disagree('the park');
       return;
     }
     case 'release': {

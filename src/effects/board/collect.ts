@@ -5,6 +5,8 @@ import {
   type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatLivenessV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
+import { isAutopilotEnabled } from '../../core/board/autopilot';
+import { readAutopilotStateIfGitRepo } from './autopilot-store';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { isA22TaskSeat, STALLED_WORKING_MS } from '../../core/board/attention';
 import { isAllowedEditPath, readReviewI3Paths, workflowEditAllowed } from '../../core/board/hazards';
@@ -325,8 +327,8 @@ function mergeBase(input: BoardCollectInput, repository: string, read: BoardPull
  * files that the edit allowlist clears, from their YAML at the merge base and the head commit. The base tip can hold changes that the
  * pull request does not make, so it is not the old side. A failed read clears no file.
  */
-function tierEvidence(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1, i3: readonly string[] | null): BoardPullRequestTierEvidenceV1 {
-  const renames = i3 !== null && i3.length > 0;
+function tierEvidence(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1, i3: readonly string[] | null, autopilotEnabled: boolean): BoardPullRequestTierEvidenceV1 {
+  const renames = autopilotEnabled || (i3 !== null && i3.length > 0);
   if (read.files === null || (!renames && !read.files.some(isAllowedEditPath))) return { rename_sources: [], cleared_paths: [] };
   const files = pullRequestFiles(input, repository, read);
   const candidates = (files ?? []).filter(file => file.modified && isAllowedEditPath(file.path));
@@ -582,6 +584,8 @@ export function collectBoard(input: BoardCollectInput): BoardV1 {
 
 /** One board read through `sources`. Only the attention watcher keeps a store across reads. */
 export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSources): BoardV1 {
+  const autopilot = readAutopilotStateIfGitRepo(input.repo_root)?.state ?? null;
+  const autopilotEnabled = autopilot !== null && isAutopilotEnabled(autopilot);
   const { parent, observed_at: observedAt } = readParent(input);
   const repository = parent.repository.name_with_owner;
   const [owner, name] = repository.split('/') as [string, string];
@@ -604,13 +608,14 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
   const policy = defaultBranchPolicy(input, repository, parent.repository.default_branch);
   const i3 = i3Paths(policy);
   const evidence = new Map(linked.filter(read => read.state === 'open')
-    .map(read => [read.number, tierEvidence(input, repository, read, i3)] as const));
+    .map(read => [read.number, tierEvidence(input, repository, read, i3, autopilotEnabled)] as const));
   const seats = execution(input, parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
     new Set(linked.map(read => String(read.number))), observedAt);
   return projectBoard({
     observed_at: observedAt,
     parent,
     acceptance_merge: acceptanceMerge(policy),
+    autopilot,
     review_evidence: { i3_paths: i3, pull_requests: evidence },
     pull_requests: reads,
     readiness,

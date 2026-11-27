@@ -14,7 +14,9 @@ import { collectPullRequestMergeReadiness } from '../src/effects/publication/mer
 import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatScreenHash, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
 import { createKeyedSources, KEYED_SOURCE_MAX_AGE_MS } from '../src/effects/board/keyed-sources';
 import { runBoardMerge } from '../src/effects/board/merge';
-import { boardMergeDecisions } from '../src/core/board/merge';
+import { boardMergeDecisions, renderMergeHoldComment } from '../src/core/board/merge';
+import { AUTOPILOT_LOCAL_AUTHORITY } from '../src/core/board/autopilot';
+import { startAutopilot } from '../src/effects/board/autopilot-store';
 import { runBoardCloseout, stopCodegraphServers } from '../src/effects/board/closeout';
 import type { RunArchctxProcess } from '../src/core/architecture/contracts';
 import { githubRemoteRepository, parseRecordFindings, parseRefs } from '../src/core/board/source';
@@ -95,6 +97,7 @@ interface Replay {
   readonly now?: Date;
   /** The open pull requests whose readiness is ready; the default is #1491. */
   readonly ready?: readonly number[];
+  readonly autopilot?: { readonly low_tier_skip: boolean };
 }
 
 function issueNode(data: Json, number: number): Json {
@@ -124,6 +127,11 @@ function replay(options: Replay = {}): BoardV1 {
 
 function replayInput(options: Replay): BoardCollectInput {
   const root = tmpWorkspace('board'); roots.push(root);
+  if (options.autopilot !== undefined) {
+    initGitRepo(root);
+    const { path, state } = startAutopilot({ repo_root: root, source: AUTOPILOT_LOCAL_AUTHORITY, now: REPLAY_NOW });
+    if (!options.autopilot.low_tier_skip) writeFileSync(path, JSON.stringify({ ...state, low_tier_skip: false }));
+  }
   mkdirSync(join(root, 'bin'));
   writeFileSync(join(root, 'bin/hc'), HC); chmodSync(join(root, 'bin/hc'), 0o755);
   const parent = JSON.parse(fixture('parent-1474.graphql.json')); options.parent?.(parent.data);
@@ -901,6 +909,91 @@ test('board merge: an accepted, green, ready PR first in plan order is eligible,
   const dry = runBoardMerge({ ...replayInput(mergeReplay()), pr: 1491, dry_run: true, merge });
   const refused = runBoardMerge({ ...replayInput(mergeReplay()), pr: 1494, dry_run: false, merge });
   expect([dry.target, dry.exit_code, refused.target, refused.exit_code, calls.length]).toEqual([1491, 0, null, 4, 1]);
+});
+
+const AUTOPILOT_ON = { autopilot: { low_tier_skip: true } };
+const PARK = renderMergeHoldComment({ issues: null, park: 'owner_question', reason: 'Approve the next step?' });
+
+function secondPass(data: Json): void {
+  const { pr1491 } = data.repository;
+  const receipt: ReviewPublishReceipt = {
+    protocol: 3, kind: 'repo-harness-review-publish-receipt', confirmed_fixed: [], round: 1,
+    subject_sha: pr1491.headRefOid, risk_tier: 'high', reviewer: { harness: 'claude', actual_model: null },
+    verdict: 'PASS', model_relation: 'same-family', summary: 'Reviewed.', findings: [],
+  };
+  const claimAt = '2026-11-02T21:03:00Z';
+  const claim = comment(renderAcceptanceClaim(receipt), claimAt);
+  pr1491.comments.nodes.push(claim, comment(renderAcceptanceRecord(receipt, claim.url), '2026-11-02T21:04:00Z'));
+}
+
+test.each([
+  { dependency: false, enabled: false, result: 'merge_order' },
+  { dependency: false, enabled: true, result: 'eligible' },
+  { dependency: true, enabled: true, result: 'merge_order' },
+])('parked earlier unit: dependency=$dependency autopilot=$enabled yields $result', ({ dependency, enabled, result }) => {
+  const edit = {
+    order: [1479, 1475],
+    parent: (data: Json) => {
+      issueNode(data, 1479).comments.nodes.push(comment(PARK, '2026-11-02T21:00:00Z'));
+      if (dependency) issueNode(data, 1475).blockedBy.nodes.push({ number: 1479, state: 'OPEN' });
+    },
+    pulls: secondPass,
+  };
+  const board = replay(mergeReplay(edit, enabled ? AUTOPILOT_ON : {}));
+  const decisions = boardMergeDecisions(board);
+  expect(decisions.find(entry => entry.pr === 1491)).toMatchObject(result === 'eligible' ? { eligible: true } : { eligible: false, reason: result });
+});
+
+test('auto-pilot requires two distinct current-head claims for a Medium merge', () => {
+  expect(mergeReason()).toBe('eligible');
+  expect(mergeReason({}, AUTOPILOT_ON)).toBe('not_accepted');
+  expect(mergeReason({ pulls: secondPass }, AUTOPILOT_ON)).toBe('eligible');
+});
+
+test('auto-pilot Low skip requires verification in the PR body and the active skip setting', () => {
+  const run = (verification: boolean, skip: boolean) => mergeReason({
+    order: [1479, 1475],
+    parent: (data) => { issueNode(data, 1479).labels.nodes.push({ name: 'tier:low' }); },
+    pulls: (data) => {
+      const { pr1494 } = data.repository;
+      asSmallFix(pr1494);
+      pr1494.isDraft = false;
+      pr1494.comments.nodes = [];
+      pr1494.commits.nodes[0].commit.statusCheckRollup.contexts.nodes.push({ name: 'Required / CI', status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: '2026-11-02T21:30:00Z', detailsUrl: null, startedAt: null, checkSuite: { workflowRun: null } });
+      pr1494.body = 'Closes #1479\n\nRollback: Revert the squash commit.'
+        + (verification ? '\n\n## Verification\n- `bun run check:type` passed.' : '');
+    },
+  }, { ready: [1494], autopilot: { low_tier_skip: skip } }, 1494);
+  expect([run(false, true), run(true, false), run(true, true)]).toEqual(['not_accepted', 'not_accepted', 'eligible']);
+});
+
+test.each([
+  ['src/core/security/credentials.ts', 'high_security_uncertain'],
+  ['src/effects/board/closeout.ts', 'high_security_uncertain'],
+  ['src/core/release/publish.ts', 'deployment_request'],
+])('auto-pilot requires parking for %s even after dual sign-off', (previousPath, category) => {
+  const board = replay(mergeReplay({ pulls: secondPass }, { ...AUTOPILOT_ON,
+    renamed: path => path.startsWith('.archcontext/model/') ? previousPath : undefined,
+  }));
+  expect(board.pull_requests.find(pr => pr.number === 1491)?.acceptance).toMatchObject({ status: 'accepted', via: 'record' });
+  expect(boardMergeDecisions(board).find(entry => entry.pr === 1491)).toMatchObject({
+    eligible: false, reason: 'autopilot_park_required', detail: expect.stringContaining(`[${category}]`),
+  });
+});
+
+test.each(['A1', 'A14', 'A15', 'A20'] as const)('a comment hold silences %s on the linked pull request', (rule) => {
+  const board = replay(mergeReplay({}, { now: new Date('2026-11-05T02:00:00Z') }));
+  const at = '2026-11-02T21:00:00Z';
+  const patch: Partial<BoardPullRequestV1> = rule === 'A14' ? { required_check: { status: 'failure', completed_at: at, contexts: [] } }
+    : rule === 'A15' ? { review_fail: { url: 'https://github.com/review', recorded_at: at } }
+    : rule === 'A20' ? { required_check: { status: 'pending', contexts: [] } } : {};
+  const observed = { ...board, pull_requests: board.pull_requests.map(pr => pr.number === 1491 ? { ...pr, ...patch } : pr) };
+  const notices = (snapshot: BoardV1) => evaluateBoardAttention(snapshot).findings.filter(finding => finding.rule === rule && finding.pull_requests.includes(1491));
+  expect(notices(observed)).toHaveLength(1);
+  const held: BoardV1 = { ...observed, items: observed.items.map(item => item.number === 1475 ? {
+    ...item, merge_hold: { status: 'held', holds: [{ comment_url: 'https://github.com/hold', issues: null }] },
+  } : item) };
+  expect(notices(held)).toEqual([]);
 });
 
 test('board read: the pull request read asks in groups, so a parent whose pull requests print more than one 1 MiB gh response reaches the board complete', () => {

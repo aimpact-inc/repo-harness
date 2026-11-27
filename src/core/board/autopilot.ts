@@ -35,7 +35,8 @@ export type AutopilotErrorCode =
   | 'autopilot_invalid_state'
   | 'autopilot_invalid_option'
   | 'autopilot_non_local_activation_refused'
-  | 'autopilot_store_failed';
+  | 'autopilot_store_failed'
+  | 'autopilot_parked_read_failed';
 
 export class AutopilotError extends Error {
   constructor(readonly code: AutopilotErrorCode, message: string) {
@@ -60,9 +61,24 @@ export interface AutopilotStateV1 {
   readonly last_advisor_tick_at: string | null;
 }
 
-export type AutopilotParkCategory = 'high_security_uncertain' | 'deployment_request' | 'owner_question';
+export const AUTOPILOT_PARK_CATEGORIES = [
+  'high_security_uncertain',
+  'deployment_request',
+  'owner_question',
+] as const;
 
-/** Parked item entry rendered by `rh autopilot status`; populated once #3575 lands. */
+export type AutopilotParkCategory = typeof AUTOPILOT_PARK_CATEGORIES[number];
+
+export function isAutopilotParkCategory(value: unknown): value is AutopilotParkCategory {
+  return typeof value === 'string' && (AUTOPILOT_PARK_CATEGORIES as readonly string[]).includes(value);
+}
+
+/** Merge-gate projection of local auto-pilot state carried on `BoardV1` only while enabled. */
+export interface AutopilotMergeGateV1 {
+  readonly low_tier_skip: boolean;
+}
+
+/** Parked item entry rendered by `rh autopilot status`. */
 export interface AutopilotParkedItemV1 {
   readonly kind: 'issue' | 'pull_request';
   readonly number: number;

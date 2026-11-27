@@ -1,5 +1,5 @@
 import { planIssues, planOrderIssues, planOrderUnits } from './plan-block';
-import { boardMergeDecisions, planSkipReason } from './merge';
+import { boardMergeDecisions, planSkipReason, prHasCommentHold } from './merge';
 import type { BoardItemV1, BoardPullRequestV1, BoardTerminalV1, BoardV1 } from './board';
 import { moduleOf } from './cluster';
 import { hcStatusClass, liveSeats, seatItem, seatPullRequest } from './desk';
@@ -138,8 +138,9 @@ function openPullRequests(board: BoardV1): BoardPullRequestV1[] {
   return board.pull_requests.filter(pr => pr.state === 'open');
 }
 
-/** A pull request with an item that the plan block holds. The hold is a decision, so the merge rules skip it. */
+/** Holds on the parent, an issue, or the pull request silence notices for that pull request. */
 function held(board: BoardV1, pr: BoardPullRequestV1): boolean {
+  if (prHasCommentHold(board, pr)) return true;
   if (board.plan.status !== 'observed') return false;
   const holds = new Set(board.plan.block.holds.map(hold => hold.issue));
   return itemsOf(board, pr).some(number => holds.has(number));
@@ -498,7 +499,7 @@ function a19(context: Context): void {
   }
 }
 
-/** Open pull requests that the plan does not hold. */
+/** Open pull requests without a plan or comment hold. */
 function unheld(board: BoardV1): BoardPullRequestV1[] {
   return openPullRequests(board).filter(pr => !held(board, pr));
 }
