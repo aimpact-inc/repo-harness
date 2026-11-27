@@ -8,9 +8,10 @@ This repo keeps deployment contract surfaces under `deploy/` and private runtime
 state under ignored `_ops/`.
 
 Release prep is one PR. Put the CHANGELOG section, the version bumps and the
-release checklist in that PR. The changelog check treats every `## [x.y.z]`
-heading on the base as released, even without a tag. A section merged earlier
-cannot be edited in the release prep PR.
+release checklist in that PR. The changelog check treats a `## [x.y.z]` heading
+on the base as released, even without a tag, except the newest heading while no
+`v<x.y.z>` tag holds it. A section merged earlier cannot be edited in the release
+prep PR.
 
 Each PR writes its entry in `docs/changelog.d/<issue>.<category>.md`. Release
 prep runs `bun scripts/changelog-fragments.ts assemble --version <x.y.z> --date <YYYY-MM-DD>`
