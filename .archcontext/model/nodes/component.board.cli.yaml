@@ -14,4 +14,7 @@ source:
     - "src/cli/commands/autopilot.ts"
     - "src/cli/commands/board.ts"
     - "src/cli/commands/quota.ts"
+    - "src/cli/commands/seats-labels.ts"
+    - "src/cli/commands/seats-launch.ts"
+    - "src/cli/commands/seats-runtime.ts"
     - "src/cli/commands/seats.ts"
