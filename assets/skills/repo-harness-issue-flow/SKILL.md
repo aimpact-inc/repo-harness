@@ -224,3 +224,32 @@ map ─▶ split ─▶ gap review ─▶ publish ─▶ dispatch ─▶ worker 
   A11 only wakes it. A hold record (`repo-harness merge hold`) only narrows:
   a seat that decides a stop locally posts it in the same turn
   (`references/orchestrator.md` §9.3).
+- Auto-pilot. Only the owner's local instruction turns auto-pilot on or
+  off. A GitHub comment never activates it. The orchestrator runs
+  `rh autopilot start [--cadence <minutes>]`, `rh autopilot stop [--reason <text>]`,
+  and `rh autopilot status`. An explicit local stop always wins. While
+  auto-pilot is on, the board watcher sends an hourly `[rh-autopilot]` tick
+  for `[advisor-plan]` that inspects batch parents and standalone open
+  issues (`references/advisor.md` §2.1). Unattended dispatch and merge
+  cover batch-parent units only, never standalone issues
+  (`references/orchestrator.md` §9.4). When `publication.acceptance_merge`
+  is `on`, `rh board merge` enforces the auto-pilot merge bar for
+  batch-parent PRs and calls `rh publication merge` as its executor. The
+  orchestrator never calls `rh publication merge` directly to skip that
+  bar. Under that bar, Medium and High PRs require `Required / CI`,
+  answered review-bot comments, a rollback line, and two distinct claimed
+  current-head `PASS` rows including at least one `different-family` row.
+  Low PRs keep the verified accept-seat skip (`Required / CI`, executed
+  verification commands in the PR body, and a rollback line). While
+  auto-pilot is on, keep `rh seats council` at zero members by default,
+  start with one cross-family member when needed, and use two or three only
+  for a rare major fork. Only High security / I1 / I2 uncertainty
+  (`high_security_uncertain`) and production release or deployment requests
+  (`deployment_request`) ask the owner through
+  `rh board post hold --target <item> --park <category> --reason "<decision>"`.
+  `rh board dispatch` does not skip a parked unit, so the orchestrator
+  does not dispatch a parked unit or its open `blocked-by` dependents. In
+  `merge_order`, a park blocks only its own item and its open `blocked-by`
+  or stacked-PR dependents. Soft target: keep about 5 working seats and
+  5 CI runs active in parallel when disjoint ready issues exist. Never
+  create synthetic issues.

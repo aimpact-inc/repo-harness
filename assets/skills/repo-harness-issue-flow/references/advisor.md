@@ -48,6 +48,8 @@ Each selected member opens a read-only `council` pane in the `council` tab and w
 - `N = 2`: `fable,carbon` when `agy_gemini` is healthy; `fable,astra` when `agy_gemini` is near its saving floor (`routing.agy_saving_below_remaining`, default 25%).
 - `N = 3`: `fable,carbon,astra` only for major architectural splits or I1/I2 redesigns.
 
+- **Auto-pilot council restraint.** Keep the L1/L2/L3 ladder above when auto-pilot is off. While auto-pilot is on, keep council at `N = 0` by default. Start with one cross-family member when code inspection and probes do not settle a genuine technical or architectural trade-off. Use `N = 2` only for an unresolved one-member consultation or a multi-module contract fork. Reserve `N = 3` for a rare major architectural fork. Never use council to decide I1, I2, or production deployment boundaries. Park those items for the owner (`orchestrator.md` §9.4). Implementation after council still requires CI plus dual sign-off under auto-pilot.
+
 - **Space resolution.** When `--space` is omitted, `seats council` resolves `herdr.space` from your calling terminal's labels (and fails closed if neither `--space` nor `herdr.space` is present).
 - **Read the council files, not the scrollback.** Read each `/tmp/rh-council/<repo>/issue-<n>-<member>.md` file with `Read` or `hc file read <path>`. Do not take proposals from `hc read` scrollback: long answers truncate in alternate-screen TUIs.
 - **Keep the authority.** Every `council` member is read-only and ephemeral. Synthesize the blind `/tmp/rh-council/` proposals into one unified proposal for the orchestrator (§3). Never forward raw council files to the orchestrator or to a worker; workers never read `/tmp/rh-council/`.
@@ -154,6 +156,49 @@ owner's words. Its entries carry the priority of the finding (`orchestrator.md`
 of this section for that parent in the same turn. A P2 or P3 entry is a lead
 for the next scheduled review. The watcher sends a finding once, until its rule
 or its subjects change; `rh board attention --parent <n>` gives all open findings.
+
+### 2.1 Auto-pilot hourly `[advisor-plan]`
+
+When local auto-pilot is on (`rh autopilot status`), the resident board
+watcher sends an hourly `[rh-autopilot]` tick (default cadence 60 minutes)
+to the live `advisor` seat resolved by `repo-harness.repository=<id>` and
+`repo-harness.seat=advisor` labels. Never use a hardcoded terminal address.
+The watcher defers a due tick when the advisor is busy, unknown, or in seat
+reset, or when board or quota authority is unavailable or unknown.
+
+1. Read open batch parents, standalone open issues, open PRs, CI and
+   review state, `rh quota`, read-only `rh arch refactor recommendations --json`,
+   and active parked items (`rh autopilot status`).
+2. Write the plan to
+   `/tmp/repo-harness-advisor/plans/<repository-id>-<YYYYMMDD-HHMM>.md`
+   with four sections:
+   - `Ready to dispatch`: issue number, tier, route, file-conflict check,
+     and batch parent vs standalone status. Unattended dispatch and merge
+     cover batch-parent units only, so note standalone issues that need
+     attachment to a batch parent first.
+   - `Ready to review / merge`: batch-parent PR number, CI status, and dual
+     sign-off status. Medium and High PRs need two distinct claimed
+     current-head `PASS` rows including at least one `different-family`
+     row. Low PRs keep the verified accept-seat skip.
+   - `Council candidates`: omit by default (`N = 0`). List an item only for
+     a genuine technical or architectural trade-off that code inspection
+     and probes do not settle. Start with `1` cross-family member, and name
+     `2` or `3` only for an unresolved one-member consultation or a rare
+     major fork, with a narrow `--question`.
+   - `Parked (Needs Owner)`: only High security / I1 / I2 uncertainty
+     (`high_security_uncertain`) and production release or deployment
+     requests (`deployment_request`), each with its exact one-line decision.
+3. Send `[rh-notice] advisor-plan #<parent> <plan path>` to the live
+   `orchestrator` resolved by `repo-harness.repository=<id>` and
+   `repo-harness.seat=orchestrator` labels.
+
+Soft target: keep about 5 working seats and 5 CI runs active in parallel
+when disjoint ready issues exist. Never create or propose synthetic issues
+to fill seats. `rh board dispatch` does not skip a parked unit
+automatically, so leave parked units and their open `blocked-by` dependents
+out of `Ready to dispatch`. In `merge_order`, a park blocks only its own
+item and its open `blocked-by` or stacked-PR dependents (`orchestrator.md`
+§9.4).
 
 ## 3. Proposals and joint decisions
 
