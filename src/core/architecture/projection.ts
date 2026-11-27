@@ -31,8 +31,8 @@ import {
 } from './archctx-command-policy';
 import {
   ARCHCTX_SCHEMAS,
-  asJsonRecord,
   decodeArchctxSchema,
+  record,
   validateNativeContextPayload,
 } from './projection-schemas';
 
@@ -136,12 +136,12 @@ export function classifyArchitectureFreshness(
 
 /** docs drift has no published JSON schema. Validate the fields this reader consumes. */
 export function decodeArchitectureHandEdits(value: unknown): Array<{ path: string; reasonCode: string }> {
-  const report = asJsonRecord(value, 'archctx docs drift');
+  const report = record(value, 'archctx docs drift');
   if (report.schemaVersion !== 'archcontext.docs-drift/v1') throw new Error('archctx docs drift schema mismatch');
-  const drift = asJsonRecord(report.drift, 'archctx docs drift.drift');
+  const drift = record(report.drift, 'archctx docs drift.drift');
   if (!Array.isArray(drift.diffs)) throw new Error('archctx docs drift omitted diffs');
   return drift.diffs.map(value => {
-    const diff = asJsonRecord(value, 'archctx docs drift diff');
+    const diff = record(value, 'archctx docs drift diff');
     if (typeof diff.path !== 'string' || !diff.path || typeof diff.reasonCode !== 'string') throw new Error('archctx docs drift diff is invalid');
     return { path: diff.path, reasonCode: diff.reasonCode };
   }).filter(diff => diff.reasonCode === 'projection-generated-region-manually-edited'
@@ -189,8 +189,8 @@ export function decodeNativeContextExport(value: unknown, source: NativeContextS
 }
 
 export function readArchitectureProjectionPolicy(value: unknown): ArchitectureProjectionPolicy {
-  const root = asJsonRecord(value, 'policy');
-  const architecture = root.architecture === undefined ? {} : asJsonRecord(root.architecture, 'policy.architecture');
+  const root = record(value, 'policy');
+  const architecture = root.architecture === undefined ? {} : record(root.architecture, 'policy.architecture');
   const provider = architecture.projection_provider ?? 'disabled';
   const applyMode = architecture.projection_apply ?? 'disabled';
   const requiredVersion = ARCHCTX_REQUIRED_VERSION;
@@ -207,8 +207,8 @@ export function readArchitectureProjectionPolicy(value: unknown): ArchitecturePr
 
 /** The exact package pin is the whole compatibility contract: one archctx version owns one wire protocol. */
 export function assertArchctxVersion(value: unknown, requiredVersion: string = ARCHCTX_REQUIRED_VERSION): void {
-  const input = asJsonRecord(value, 'archctx capabilities');
-  const pkg = asJsonRecord(input.package, 'archctx capabilities.package');
+  const input = record(value, 'archctx capabilities');
+  const pkg = record(input.package, 'archctx capabilities.package');
   if (input.schemaVersion !== ARCHCTX_CAPABILITIES_SCHEMA_VERSION || pkg.name !== 'archctx' || pkg.version !== requiredVersion) {
     throw new Error(`archctx package mismatch: expected archctx@${requiredVersion}, got ${String(pkg.name)}@${String(pkg.version)}`);
   }
