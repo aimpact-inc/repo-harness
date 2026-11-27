@@ -3,7 +3,11 @@ import { readFileSync } from 'fs';
 import { basename } from 'path';
 import { fileURLToPath } from 'url';
 import { AdvisorSeatError, advisorSeatSendFailure, readAdvisorSeat, sendToAdvisorSeat } from '../../core/board/advisor-seat';
-import { AttentionWatchError, attentionLogPath, attentionReviewCollector, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
+import { AutopilotError } from '../../core/board/autopilot';
+import { autopilotStatePath, isAdvisorSeatInReset, readAutopilotStateAtPath, recordAutopilotAdvisorTick } from '../../effects/board/autopilot-store';
+import { readQuotaReport } from '../../effects/board/quota';
+import { readSeatsConfiguration } from '../../effects/board/seats-configuration';
+import { AttentionWatchError, attentionAutopilotTicker, attentionLogPath, attentionReviewCollector, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
 import { evaluateBoardAttention, renderAttentionText } from '../../core/board/attention';
 import type { AttentionHostPortsV1, AttentionSentV1 } from '../../core/board/attention-delivery';
 import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
@@ -409,7 +413,7 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.stdout.write(options.json === true ? `${JSON.stringify(result)}\n` : triageApplyText(result));
       } catch (error) {
         if (!(error instanceof TriageApplyValidationError || error instanceof BoardPostFieldsError || error instanceof BoardPostRoundtripError
-          || error instanceof BoardPostSupersedesError || error instanceof BoardCollectError)) throw error;
+          || error instanceof BoardPostSupersedesError || error instanceof BoardCollectError || error instanceof AutopilotError)) throw error;
         const code = error instanceof BoardCollectError ? null : error.code;
         process.stderr.write(`${JSON.stringify({ ok: false, error: code ?? error.name, message: code === null ? error.message : `${code}: ${error.message}` })}\n`);
         process.exitCode = error instanceof TriageApplyValidationError || error instanceof BoardPostFieldsError || error instanceof BoardPostSupersedesError ? 2 : 1;
@@ -604,11 +608,30 @@ async function watchAttention(options: AttentionOptions, host: BoardHostPortsV1,
       publish: (seat, prNumber, read) => publishSeatReceipt({ repoRoot, seat, prNumber }, read),
       errorCode: error => error instanceof ReviewPublishError ? error.code : null,
     });
+    let cachedAutopilotPath: string | null = null;
+    const autopilotTick = options.deliver === true
+      ? attentionAutopilotTicker({
+        repository_id: repositoryId,
+        parent,
+        host: attentionHost,
+        ports: {
+          readState: () => readAutopilotStateAtPath(cachedAutopilotPath ??= autopilotStatePath(repoRoot)),
+          recordTick: now => recordAutopilotAdvisorTick({ repo_root: repoRoot, now }),
+          readQuota: async () => {
+            const { seats } = readSeatsConfiguration(process.env);
+            return await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used);
+          },
+          seatTerminals: repoId => host.seatTerminals(repoId),
+          isAdvisorInReset: isAdvisorSeatInReset,
+        },
+      })
+      : undefined;
     // The watcher keeps one keyed source store for its process lifetime; its review run reads its own board through a fresh one.
     const sources = createKeyedSources();
     const input = {
       parent, deliver: options.deliver === true, review, log_path: attentionLogPath(repositoryId, parent),
       review_collect: reviewCollect,
+      autopilot_tick: autopilotTick,
       collect: () => collectBoardThrough({ repo_root: repoRoot, parent, host }, sources), host: attentionHost,
     };
     // The sent slots live in this process only: a new watcher sends each open finding once.

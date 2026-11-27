@@ -1,16 +1,19 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import type { AutopilotStateV1 } from '../../core/board/autopilot';
 import { checkPlanSupersedes, checkPostBody } from '../../core/board/post';
 import { withSeatLine } from '../../core/board/seat-line';
-import type { BoardCommentPageV1 } from '../../core/board/source';
+import { githubRemoteRepository, type BoardCommentPageV1 } from '../../core/board/source';
 import {
   computeLabelDelta,
+  decodeTriageManifest,
   planTriageApply,
   TriageApplyValidationError,
-  type TriageApplyPlanV1,
   type TriageOperation,
 } from '../../core/board/triage-apply';
 import { isRecord } from '../../core/evidence/is-record';
+import { gitSpawnSync } from '../git/runner';
+import { readAutopilotStateIfGitRepo } from './autopilot-store';
 import { BoardCollectError, readGhJson, type GhCallResult, type GhInput } from './collect';
 
 const GH_TIMEOUT_MS = 30_000;
@@ -194,14 +197,72 @@ export function gitHubTriageApplyPorts(
   };
 }
 
+const REMOTE_URL_KEY = /^remote\.(.+)\.url$/u;
+const REMOTE_URL_QUERY = ['config', '--local', '--null', '--get-regexp', '^remote\\..*\\.url$'] as const;
+
+/**
+ * Local checkout GitHub repository (`owner/name`, lowercased) from git remotes, or null when
+ * unavailable or ambiguous. `origin` wins; otherwise one distinct GitHub remote decides. Raw remote
+ * URLs never leave this function (I1).
+ */
+export function readCheckoutGitHubRepository(repoRoot: string): string | null {
+  const result = gitSpawnSync(['-C', repoRoot, ...REMOTE_URL_QUERY], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error !== undefined || (result.status !== 0 && result.status !== 1)) return null;
+  if (result.status === 1 && result.stdout === '') return null;
+  const parsed = new Map<string, string>();
+  for (const record of result.stdout.split('\0')) {
+    const split = record.indexOf('\n');
+    const name = split < 0 ? null : REMOTE_URL_KEY.exec(record.slice(0, split))?.[1];
+    if (name === undefined || name === null) continue;
+    const github = githubRemoteRepository(record.slice(split + 1));
+    if (github !== null) parsed.set(name, github);
+  }
+  const origin = parsed.get('origin');
+  if (origin !== undefined) return origin;
+  const distinct = new Set(parsed.values());
+  return distinct.size === 1 ? [...distinct][0]! : null;
+}
+
+function resolveTriageAutopilot(input: {
+  readonly repo_root: string;
+  readonly manifest_repository: string;
+  readonly explicit_max_parallel: number | undefined;
+  readonly autopilot?: AutopilotStateV1 | null;
+  readonly checkout_repository?: string | null;
+}): AutopilotStateV1 | null {
+  if (input.explicit_max_parallel !== undefined) return null;
+  const checkoutRepo = input.checkout_repository !== undefined
+    ? input.checkout_repository
+    : readCheckoutGitHubRepository(input.repo_root);
+  if (checkoutRepo === null || checkoutRepo.toLowerCase() !== input.manifest_repository.toLowerCase()) {
+    return null;
+  }
+  return input.autopilot !== undefined
+    ? input.autopilot
+    : readAutopilotStateIfGitRepo(input.repo_root)?.state ?? null;
+}
+
 export function runTriageApply(input: {
   readonly repo_root: string;
   readonly manifest: unknown;
   readonly dry_run: boolean;
   readonly ports?: TriageApplyPorts;
   readonly env?: NodeJS.ProcessEnv;
+  readonly autopilot?: AutopilotStateV1 | null;
+  readonly checkout_repository?: string | null;
 }): TriageApplyResultV1 {
-  const plan = planTriageApply(input.manifest);
+  const manifest = decodeTriageManifest(input.manifest);
+  const autopilot = resolveTriageAutopilot({
+    repo_root: input.repo_root,
+    manifest_repository: manifest.repository,
+    explicit_max_parallel: manifest.max_parallel_writers,
+    autopilot: input.autopilot,
+    checkout_repository: input.checkout_repository,
+  });
+  const plan = planTriageApply(input.manifest, { autopilot });
   const env = input.env ?? process.env;
   const rendered = withSeatLine(plan.rendered_plan, env);
   checkPostBody({ kind: 'plan', fields: plan.post_fields }, rendered);

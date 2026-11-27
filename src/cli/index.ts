@@ -34,6 +34,7 @@ import { buildRunCommand } from './commands/run';
 import { buildVerifyCommand } from './commands/verify';
 import { buildStateCommand } from './commands/state';
 import { buildPublicationCommand } from './commands/publication';
+import { buildAutopilotCommand } from './commands/autopilot';
 import { buildBoardCommand } from './commands/board';
 import { attentionWatchDoctorCheck } from '../effects/board/attention-watch';
 import { readLocalRepositoryId } from '../effects/board/collect';
@@ -553,6 +554,7 @@ export function buildProgram(): Command {
   program.addCommand(buildVerifyCommand());
   program.addCommand(buildStateCommand());
   program.addCommand(buildPublicationCommand());
+  program.addCommand(buildAutopilotCommand());
   program.addCommand(buildBoardCommand(boardHostPorts(), attentionHostPorts()));
   program.addCommand(buildFleetCommand());
   program.addCommand(buildBotsCommand());

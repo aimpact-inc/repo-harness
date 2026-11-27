@@ -18,12 +18,14 @@
     "Own the status line route that writes the Claude capture file; the route is core and has no plugin gate.",
     "Own the seat launch of rh seats argv and the public contracts of the seats and agents sections of the global configuration.",
     "Own the only writer of the seats section; the operator console save calls it.",
-    "Own quota-aware seat routing for five task classes, the Claude reserve and frontend wait rule, low-quota explorer settings, and the shared hyper model projection for human quota lines and seat launch argv. The exhausted Claude advisor is the only runtime fallback."
+    "Own quota-aware seat routing for five task classes, the Claude reserve and frontend wait rule, low-quota explorer settings, and the shared hyper model projection for human quota lines and seat launch argv. The exhausted Claude advisor is the only runtime fallback.",
+    "Own the local per-repository auto-pilot control state (<git-common-dir>/repo-harness/autopilot.json), rh autopilot start|stop|status, triage writer-target scaling under auto-pilot, and the dynamic label-resolved hourly advisor tick in the resident attention watcher."
   ],
   "source": {
     "include": [
       "src/core/board/**",
       "src/effects/board/**",
+      "src/cli/commands/autopilot.ts",
       "src/cli/commands/board.ts",
       "src/cli/commands/quota.ts",
       "src/cli/commands/seats.ts"
