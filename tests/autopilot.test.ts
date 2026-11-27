@@ -502,8 +502,8 @@ test('CLI rh autopilot start|stop|status handles cadence, stop reason, JSON/text
   const ports: AutopilotCommandPorts = { cwd: () => repo, now: () => clock, readParked: repo_root => readParkedItems({ repo_root, gh_runner: args => {
     const path = args.at(-1);
     if (path === 'repos/{owner}/{repo}/issues?state=open&per_page=100') return { status: 0, stdout: JSON.stringify([openItems]) };
-    if (path === 'repos/{owner}/{repo}/issues/3590/comments?per_page=100') return { status: 0, stdout: JSON.stringify([[hold]]) };
-    if (path === 'repos/{owner}/{repo}/issues/3591/comments?per_page=100') return { status: 0, stdout: JSON.stringify([[hold], [release]]) };
+    if (/^repos\/\{owner\}\/\{repo\}\/issues\/3590\/comments\?per_page=\d+&page=1$/u.test(path ?? '')) return { status: 0, stdout: JSON.stringify([hold]) };
+    if (/^repos\/\{owner\}\/\{repo\}\/issues\/3591\/comments\?per_page=\d+&page=1$/u.test(path ?? '')) return { status: 0, stdout: JSON.stringify([hold, release]) };
     throw new Error(`unexpected gh query: ${path}`);
   } }) };
 

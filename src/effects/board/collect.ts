@@ -14,7 +14,7 @@ import { blockerKey, mergeHoldNeedsFullThread, reachableOpenBlockers, readParked
 import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
 import {
   BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeExternalBlocker, decodeIssueComments, decodeParentRead,
-  decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardCommentPageV1, type BoardParentReadV1, type BoardPullRequestReadV1,
+  decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardCommentPageV1, type BoardCommentV1, type BoardParentReadV1, type BoardPullRequestReadV1,
 } from '../../core/board/source';
 import { normalizeCapabilityPath } from '../../core/capabilities/registry';
 import { HC_MIN_VERSION } from '../../core/terminal/herdr-pin';
@@ -161,10 +161,19 @@ export function readGhJson(input: GhInput, args: readonly string[]): unknown {
   return ghJson(args, runGh(input, args));
 }
 
-/** The issues endpoint reads comments of both issue and pull request threads. */
+// A page of 20 comment bodies fits under the gh stdout limit even with JSON escaping.
+const ISSUE_COMMENT_PAGE_SIZE = 20;
+
+/** The issues endpoint reads both issue and PR threads in oldest-first order. */
 export function readIssueComments(input: GhInput, repository: string, number: number): BoardCommentPageV1 {
-  const subject = `repos/${repository}/issues/${number}/comments?per_page=100`;
-  return decodeIssueComments(readGhJson(input, ['api', '--hostname', 'github.com', '--paginate', '--slurp', subject]), subject);
+  const subject = `repos/${repository}/issues/${number}/comments`;
+  const comments: BoardCommentV1[] = [];
+  for (let page = 1; ; page += 1) {
+    const endpoint = `${subject}?per_page=${ISSUE_COMMENT_PAGE_SIZE}&page=${page}`;
+    const batch = decodeIssueComments(readGhJson(input, ['api', '--hostname', 'github.com', endpoint]), endpoint);
+    comments.push(...batch);
+    if (batch.length < ISSUE_COMMENT_PAGE_SIZE) return { truncated: false, comments };
+  }
 }
 
 /** One gh call that prints text; the board review and the board dispatch post their comments with it. A failed call is a `BoardCollectError`. */

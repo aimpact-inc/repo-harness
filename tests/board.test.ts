@@ -1048,13 +1048,14 @@ test('round 1 completes truncated holds for both merge order and attention', () 
   }, { ...AUTOPILOT_ON, now: new Date('2026-11-05T02:00:00Z'), ready: [1491, 1494] }));
   const seen: number[] = [];
   const gh_runner: BoardCollectInput['gh_runner'] = args => {
-    const match = /\/issues\/(1479|1494)\/comments\?/u.exec(args.at(-1) ?? '');
+    const match = /\/issues\/(1479|1494)\/comments\?per_page=(\d+)&page=(\d+)$/u.exec(args.at(-1) ?? '');
     if (match === null) return input.gh_runner!(args);
-    const number = Number(match[1]);
-    seen.push(number);
-    const thread = [...earlier, number === 1479 ? park : hold].map(({ url, createdAt, authorAssociation, body }) =>
-      ({ html_url: url, created_at: createdAt, author_association: authorAssociation, body }));
-    return { status: 0, stdout: JSON.stringify([thread]) };
+    const [, subject, pageSize, pageNumber] = match;
+    const number = Number(subject), size = Number(pageSize), page = Number(pageNumber);
+    if (page === 1) seen.push(number);
+    const thread = [...earlier, number === 1479 ? park : hold].slice((page - 1) * size, page * size)
+      .map(({ url, createdAt, authorAssociation, body }) => ({ html_url: url, created_at: createdAt, author_association: authorAssociation, body }));
+    return { status: 0, stdout: JSON.stringify(thread) };
   };
   const board = collectBoard({ ...input, gh_runner });
   expect(seen.sort()).toEqual([1479, 1494]);
@@ -1063,6 +1064,53 @@ test('round 1 completes truncated holds for both merge order and attention', () 
   const failed: BoardV1 = { ...board, pull_requests: board.pull_requests.map(pr => pr.number === 1494
     ? { ...pr, required_check: { status: 'failure', completed_at: at, contexts: [] } } : pr) };
   expect(evaluateBoardAttention(failed).findings.some(finding => finding.rule === 'A14' && finding.pull_requests.includes(1494))).toBe(false);
+});
+
+test('round 3 a large hold history uses bounded requests and leaves the unrelated PR eligible', () => {
+  const hold = comment('repo-harness merge hold\nReason: owner decision', '2026-11-02T21:00:00Z');
+  const input = replayInput(mergeReplay({ parent: data => {
+    issueNode(data, 1479).comments = { pageInfo: { hasPreviousPage: true }, nodes: [hold] };
+  } }));
+  const longLog = 'x'.repeat(60_000);
+  const history = Array.from({ length: 300 }, (_, index) => comment(longLog, new Date(Date.parse(hold.createdAt) - (300 - index) * 1000).toISOString()));
+  history.push(hold);
+  const sizes: number[] = [];
+  const pages: number[] = [];
+  const gh_runner: BoardCollectInput['gh_runner'] = args => {
+    const endpoint = args.at(-1) ?? '';
+    if (!endpoint.includes('/issues/1479/comments?')) return input.gh_runner!(args);
+    if (args.includes('--paginate')) {
+      return { status: null, stdout: '', error: Object.assign(new Error('spawnSync gh ENOBUFS'), { code: 'ENOBUFS' }) };
+    }
+    const options = new URLSearchParams(endpoint.split('?')[1]);
+    const size = Number(options.get('per_page'));
+    const page = Number(options.get('page'));
+    expect(size).toBeGreaterThan(0);
+    expect(page).toBe(pages.length + 1);
+    pages.push(page);
+    const stdout = JSON.stringify(history.slice((page - 1) * size, page * size).map(({ url, createdAt, authorAssociation, body }) =>
+      ({ html_url: url, created_at: createdAt, author_association: authorAssociation, body })));
+    sizes.push(Buffer.byteLength(stdout));
+    return { status: 0, stdout };
+  };
+  const result = runBoardMerge({ ...input, gh_runner, pr: 1491, dry_run: true });
+  expect(sizes.length).toBeGreaterThan(1);
+  expect(Math.max(...sizes)).toBeLessThan(GH_MAX_BUFFER_BYTES);
+  expect(sizes.reduce((total, size) => total + size, 0)).toBeGreaterThan(GH_MAX_BUFFER_BYTES);
+  expect(result.target).toBe(1491);
+});
+
+test('round 3 auto-pilot off keeps the standard tier for parking-only paths', () => {
+  const paths = ['src/effects/evidence/secret-env.ts', 'src/effects/operator/worktree-cleanup-removal.ts', 'scripts/release-owner-steps.sh'];
+  for (const path of paths) {
+    const board = replay(mergeReplay({ pulls: data => {
+      const { pr1491 } = data.repository;
+      pr1491.changedFiles = 1;
+      pr1491.files = { totalCount: 1, nodes: [{ path, additions: 1, deletions: 1 }] };
+    } }, { owners: results => { results.push({ path, matched: false, ambiguous: false, owningCapabilityId: null }); } }));
+    expect(board.pull_requests.find(pr => pr.number === 1491)).toMatchObject({ tier: 'medium', acceptance: { status: 'accepted', via: 'record' } });
+    expect(boardMergeDecisions(board).find(entry => entry.pr === 1491)).toEqual({ pr: 1491, eligible: true });
+  }
 });
 
 test('round 1 a parent park applies as a batch hold when auto-pilot is off', () => {

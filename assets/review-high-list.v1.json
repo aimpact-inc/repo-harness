@@ -5,19 +5,19 @@
       "id": "secrets",
       "text": "Reads, moves or exposes credentials, tokens or secrets.",
       "path_visible": true,
-      "paths": ["src/core/security/**", "src/effects/evidence/secret-env.ts"]
+      "paths": ["src/core/security/**"]
     },
     {
       "id": "deletion",
       "text": "Changes a path that deletes files, worktrees, branches or seats.",
       "path_visible": true,
-      "paths": ["src/effects/board/closeout.ts", "src/effects/operator/worktree-cleanup-removal.ts", "src/cli/installer/uninstall.ts", "scripts/ship-worktrees.sh", "scripts/worktree-merge-lib.sh"]
+      "paths": ["src/effects/board/closeout.ts", "src/cli/installer/uninstall.ts", "scripts/ship-worktrees.sh", "scripts/worktree-merge-lib.sh"]
     },
     {
       "id": "release",
       "text": "Changes release, publish or deploy, including `deploy/sql/`.",
       "path_visible": true,
-      "paths": ["deploy/sql/**", "src/core/release/**", "src/effects/release/**", "scripts/check-npm-release.sh", "scripts/check-release-published.sh", "scripts/release-owner-steps.sh"]
+      "paths": ["deploy/sql/**", "src/core/release/**", "src/effects/release/**", "scripts/check-npm-release.sh", "scripts/check-release-published.sh"]
     }
   ]
 }

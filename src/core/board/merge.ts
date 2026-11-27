@@ -293,7 +293,13 @@ export function prMergeNotes(body: string): { readonly rollback: boolean; readon
   return { rollback, verification };
 }
 
-/** The board's explicit owner boundaries use both sides of renames and the existing credential label and High list. */
+const AUTOPILOT_OWNER_PATHS = new Map([
+  ['src/effects/evidence/secret-env.ts', 'secrets'],
+  ['src/effects/operator/worktree-cleanup-removal.ts', 'deletion'],
+  ['scripts/release-owner-steps.sh', 'release'],
+]);
+
+/** Auto-pilot parking reads both sides of renames and applies its owner paths alongside the shared High list. */
 export function autopilotParkRequirement(
   paths: readonly string[] | null,
   touchesCredentials: boolean,
@@ -301,6 +307,10 @@ export function autopilotParkRequirement(
   if (touchesCredentials) return { category: 'high_security_uncertain', reason: 'Decide the I1 scope for this credential item.' };
   if (paths === null) return { category: 'high_security_uncertain', reason: 'Confirm the changed paths and their owner boundary.' };
   const hits = pathHighHits(paths);
+  for (const path of paths) {
+    const signal = AUTOPILOT_OWNER_PATHS.get(path);
+    if (signal !== undefined) hits.push({ path, signal });
+  }
   const security = hits.filter(hit => hit.signal === 'secrets' || hit.signal === 'deletion');
   if (security.length > 0) {
     const affected = security.map(hit => `${hit.path} (${hit.signal})`).join(', ');

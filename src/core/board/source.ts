@@ -13,7 +13,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown';
 import { isRecord } from '../evidence/is-record';
 import { GITHUB_NAME_PATTERN, GITHUB_OWNER_PATTERN, GITHUB_REPOSITORY } from './github-repository';
 
-import { BoardSourceError, type BoardCommentPageV1 } from './protocol-comments';
+import { BoardSourceError, type BoardCommentPageV1, type BoardCommentV1 } from './protocol-comments';
 
 export * from './protocol-comments';
 
@@ -221,16 +221,16 @@ export function decodeExternalBlocker(data: unknown, repository: string, number:
   };
 }
 
-/** The complete REST comment read shared by hold collection, park status and board posts. */
-export function decodeIssueComments(pages: unknown, label: string): BoardCommentPageV1 {
-  if (!Array.isArray(pages) || pages.length === 0 || !pages.every(Array.isArray)) fail(`${label} has no comment page list`);
-  return { truncated: false, comments: pages.flat().map((entry, at) => {
+/** One REST comment page shared by hold collection, park status and board posts. */
+export function decodeIssueComments(page: unknown, label: string): readonly BoardCommentV1[] {
+  if (!Array.isArray(page)) fail(`${label} has no comment list`);
+  return page.map((entry, at) => {
     const comment = obj(entry, `${label} comment ${at}`);
     return {
       url: str(comment.html_url, `${label} comment URL`), created_at: time(comment.created_at, `${label} comment time`),
       author_association: str(comment.author_association, `${label} comment author association`), body: str(comment.body, `${label} comment body`),
     };
-  }) };
+  });
 }
 
 function subIssueRead(entry: unknown, label: string, repository: string): BoardSubIssueReadV1 {
