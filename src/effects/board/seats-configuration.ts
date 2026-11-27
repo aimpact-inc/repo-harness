@@ -119,7 +119,7 @@ function decodeSeatOverridesSection(value: unknown): SeatOverridesV1 {
 
 function decodeEffectiveSeatsDocument(config: Record<string, unknown>) {
   try { return decodeEffectiveSeats(config); } catch (error) {
-    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) {
+    if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError || error instanceof SeatOverrideValidationError) {
       throw new SeatsConfigurationError(error.code, error.message);
     }
     throw new SeatsConfigurationError('config_invalid', effectiveSeatsInvalidMessage(error));
@@ -143,11 +143,15 @@ export function readSeatsConfiguration(env: NodeJS.ProcessEnv = process.env): Se
   };
 }
 
-/** The model id is the user's (#3250): the request decoder owns its shape, and the seat's `models` in the ranges only recommends. */
-function checkEffort(subject: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
+/** The model id and effort are user text (#3250, #3641): name the field and allowed values, never echo the submitted value. */
+function checkEffort(field: string, model: SeatModelV1, runtimeId: SeatRuntime): void {
   const runtime = RUNTIME_RANGES[runtimeId];
   if (model.effort !== null && (!runtime.effort || !EFFORT_LEVELS.includes(model.effort))) {
-    throw new SeatsConfigurationError('seat_effort_invalid', `The ${subject} cannot use effort ${model.effort} on ${runtimeId}.`);
+    const allowed = runtime.effort ? EFFORT_LEVELS.join(', ') : 'none';
+    throw new SeatsConfigurationError(
+      'seat_effort_invalid',
+      `The effort at ${field} is not valid for ${runtimeId}. Allowed values: ${allowed}.`,
+    );
   }
 }
 
@@ -155,7 +159,7 @@ export function checkSeatRoutingModels(routing: SeatRoutingV1): void {
   if (routing.low_quota_explorer.model === null) {
     throw new SeatsConfigurationError('seat_model_invalid', 'The routing.low_quota_explorer model is required.');
   }
-  checkEffort('routing.low_quota_explorer', routing.low_quota_explorer, 'claude');
+  checkEffort('seats.routing.low_quota_explorer.effort', routing.low_quota_explorer, 'claude');
 }
 
 function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly string[]): void {
@@ -164,7 +168,7 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (!enabledRuntimes.includes(seatHostId(seat.runtime))) {
     throw new SeatsConfigurationError('seat_runtime_not_enabled', `Fix the ${id} seat before saving. Its runtime ${seat.runtime} is disabled under Hosts.`);
   }
-  checkEffort(`${id} seat`, seat, seat.runtime);
+  checkEffort(`seats.${id}.effort`, seat, seat.runtime);
   const tool = seat.tools.find(item => !range.tools.includes(item));
   if (tool !== undefined) throw new SeatsConfigurationError('seat_tool_not_allowed', `The ${id} seat cannot have the ${tool} tool group.`);
   const role = seat.fleet.find(name => !runtime.fleet || !seatTakesFleet(seat) || !range.fleet.includes(name));
@@ -450,12 +454,23 @@ export async function applySeatsSettings(
     }, { expectedRevision: request.expected_revision });
     return { config_revision: result.revision, changed_keys: result.value };
   } catch (error) {
-    if (error instanceof GlobalConfigurationError) throw new SeatsConfigurationError(error.code, error.message);
+    if (error instanceof GlobalConfigurationError || error instanceof SeatOverrideValidationError) {
+      throw new SeatsConfigurationError(error.code, error.message);
+    }
     throw error;
   }
 }
 
 function validateOverrideRouteInput(request: SeatOverrideSetRequestV1): string {
+  if (!(SEAT_IDS as readonly string[]).includes(request.seat)) {
+    throw new SeatsConfigurationError('config_invalid', 'The seat_overrides seat is not valid.');
+  }
+  if (!(SEAT_RUNTIMES as readonly string[]).includes(request.runtime)) {
+    throw new SeatsConfigurationError(
+      'seat_runtime_not_allowed',
+      `The runtime at seat_overrides.${request.seat}.runtime is not valid. Allowed values: ${SEAT_RUNTIMES.join(', ')}.`,
+    );
+  }
   if (request.owner_approved !== true) {
     throw new SeatsConfigurationError('owner_approval_required', 'Explicit owner approval is required to authorize a seat route override.');
   }
@@ -475,9 +490,12 @@ function validateOverrideRouteInput(request: SeatOverrideSetRequestV1): string {
   if (isRetiredSeatModel(request.model)) {
     throw new SeatsConfigurationError('seat_model_retired', `The model at seat_overrides.${request.seat}.model is retired. Choose another model.`);
   }
-  checkEffort(`${request.seat} seat override`, { model: request.model, effort: request.effort }, request.runtime);
+  checkEffort(`seat_overrides.${request.seat}.effort`, { model: request.model, effort: request.effort }, request.runtime);
   if (request.runtime === 'agy' && request.model !== null && !agyEffortValid(request.model, request.effort)) {
-    throw new SeatsConfigurationError('seat_effort_invalid', `The effort at seat_overrides.${request.seat}.effort is not valid for agy.`);
+    throw new SeatsConfigurationError(
+      'seat_effort_invalid',
+      `The effort at seat_overrides.${request.seat}.effort is not valid for agy. Allowed values: ${EFFORT_LEVELS.join(', ')}.`,
+    );
   }
   return instruction;
 }
@@ -542,6 +560,9 @@ export function revokeSeatOverride(
   request: SeatOverrideRevokeRequestV1,
   env: NodeJS.ProcessEnv = process.env,
 ): SeatOverrideResultV1 {
+  if (!(SEAT_IDS as readonly string[]).includes(request.seat)) {
+    throw new SeatsConfigurationError('config_invalid', 'The seat_overrides seat is not valid.');
+  }
   if (request.owner_approved !== true) {
     throw new SeatsConfigurationError('owner_approval_required', 'Explicit owner approval is required to revoke a seat route override.');
   }

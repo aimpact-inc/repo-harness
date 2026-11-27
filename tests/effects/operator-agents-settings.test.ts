@@ -1540,6 +1540,114 @@ describe('seat settings routes', () => {
     expect(() => readSeatsConfiguration(env)).toThrow('seat_overrides');
   });
 
+  test('rejected override values never appear in error bodies or the operator audit log (I1, #3641)', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const { revision } = (await seats(harness)).config;
+    const sendSet = (body: Record<string, unknown>) => fetch(`${harness.server.url}/api/v1/settings/seats/overrides`, {
+      method: 'POST',
+      headers: { Origin: harness.server.url, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json', Cookie: harness.cookie },
+      body: JSON.stringify({ request_id: randomUUID(), expected_revision: revision, ...body }),
+    });
+    const base = { seat: 'worker-opus', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Owner approved', owner_approved: true };
+    const hexEffortToken = 'deadbeefdeadbeefdeadbeefdeadbeef';
+    const rawEffortToken = 'sk-secret-effort-token!';
+    const rawModelToken = 'sk-secret-model-token';
+    const rawInstructionToken = 'sk-secret-line1\nline2';
+
+    const effortHexRes = await sendSet({ ...base, effort: hexEffortToken });
+    const effortHexText = await effortHexRes.text();
+    expect(effortHexRes.status).toBe(422);
+    expect(JSON.parse(effortHexText).error).toMatchObject({
+      code: 'seat_effort_invalid',
+      message: 'The effort at seat_overrides.worker-opus.effort is not valid for codex. Allowed values: low, medium, high, xhigh, max.',
+    });
+
+    const effortRawRes = await sendSet({ ...base, effort: rawEffortToken });
+    const effortRawText = await effortRawRes.text();
+    expect([effortRawRes.status, JSON.parse(effortRawText).error.code]).toEqual([422, 'seat_effort_invalid']);
+
+    const modelRes = await sendSet({ ...base, runtime: 'pi', model: rawModelToken });
+    const modelText = await modelRes.text();
+    expect([modelRes.status, JSON.parse(modelText).error.code]).toEqual([422, 'seat_model_invalid']);
+
+    const instructionRes = await sendSet({ ...base, instruction: rawInstructionToken });
+    const instructionText = await instructionRes.text();
+    expect([instructionRes.status, JSON.parse(instructionText).error.code]).toEqual([422, 'seat_override_instruction_invalid']);
+
+    const auditText = readFileSync(operatorAuditPath({ REPO_HARNESS_HOME: harness.harnessHome }), 'utf8');
+    const combined = [effortHexText, effortRawText, modelText, instructionText, auditText].join('\n');
+    for (const secret of [hexEffortToken, rawEffortToken, rawModelToken, 'sk-secret-line1']) {
+      expect(combined).not.toContain(secret);
+    }
+    expect(sha256(harness.configPath)).toBe(revision);
+  });
+
+  test('owner seat overrides never widen base tool or fleet grants and fail closed when agy requires missing tools (#3641)', async () => {
+    const baseSeats = {
+      ...DEFAULT_SEATS_CONFIG,
+      'worker-opus': {
+        ...DEFAULT_SEATS_CONFIG['worker-opus'],
+        advisor_model: 'opus',
+        tools: ['edit', 'net', 'read'] as const,
+        fleet: ['explorer'] as const,
+      },
+      worker: {
+        ...DEFAULT_SEATS_CONFIG.worker,
+        tools: ['edit', 'net', 'read', 'shell'] as const,
+        fleet: ['explorer'] as const,
+      },
+    };
+    const harness = await startHarness({
+      agents: { ...PANE_AGENTS, enabled: ['antigravity', ...PANE_AGENTS.enabled] },
+      seats: baseSeats,
+    });
+    const env = { HOME: harness.home };
+    const sendSet = (expectedRevision: string, body: Record<string, unknown>) => fetch(`${harness.server.url}/api/v1/settings/seats/overrides`, {
+      method: 'POST',
+      headers: { Origin: harness.server.url, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json', Cookie: harness.cookie },
+      body: JSON.stringify({ request_id: randomUUID(), expected_revision: expectedRevision, owner_approved: true, ...body }),
+    });
+
+    // Agy override on a seat lacking required shell is refused and writes nothing.
+    const rev0 = (await seats(harness)).config.revision;
+    const refusedAgy = await sendSet(rev0, {
+      seat: 'worker-opus', runtime: 'agy', model: 'gemini-4-neon-high', effort: null, instruction: 'Try agy without shell',
+    });
+    expect([refusedAgy.status, (await refusedAgy.json()).error.code]).toEqual([422, 'seat_tool_not_allowed']);
+    expect(sha256(harness.configPath)).toBe(rev0);
+
+    // Codex override on a seat without shell preserves exact base tools and fleet without adding shell.
+    const codexRes = await sendSet(rev0, {
+      seat: 'worker-opus', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Use codex without adding shell',
+    });
+    expect(codexRes.status).toBe(200);
+    const rev1 = (await codexRes.json()).config_revision as string;
+    const afterCodex = readSeatsConfiguration(env).seats['worker-opus'];
+    expect(afterCodex.tools).toEqual(['edit', 'net', 'read']);
+    expect(afterCodex.fleet).toEqual(['explorer']);
+    expect(afterCodex.advisor_model).toBeNull();
+
+    // Agy override on a seat covering agy requirements narrows fleet to [] and adds no missing tool (gh stays off).
+    const agyRes = await sendSet(rev1, {
+      seat: 'worker', runtime: 'agy', model: 'gemini-4-neon-high', effort: null, instruction: 'Use agy on worker without gh',
+    });
+    expect(agyRes.status).toBe(200);
+    const rev2 = (await agyRes.json()).config_revision as string;
+    const afterAgy = readSeatsConfiguration(env).seats.worker;
+    expect(afterAgy.tools).toEqual(['edit', 'net', 'read', 'shell']);
+    expect(afterAgy.fleet).toEqual([]);
+    expect(afterAgy.advisor_model).toBeNull();
+
+    // Base settings edit removing a tool required by an active agy override is refused cleanly.
+    const { revision: _r, ...baseSection } = (await seats(harness)).config;
+    const dropShell = await post(harness, {
+      expected_revision: rev2,
+      seats: { ...baseSection, worker: { ...baseSection.worker, tools: ['edit', 'net', 'read'] } },
+    }, 'seats');
+    expect([dropShell.status, (await dropShell.json()).error.code]).toEqual([422, 'seat_tool_not_allowed']);
+    expect(sha256(harness.configPath)).toBe(rev2);
+  });
+
   test('a stale revision and a reused request_id with another body get 409', async () => {
     const harness = await startHarness({ agents: PANE_AGENTS });
     const { revision, ...section } = (await seats(harness)).config;

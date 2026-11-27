@@ -4,7 +4,6 @@
 import { isRecord } from '../evidence/is-record';
 import {
   AGY_ADVISOR_ALLOWED_SEAT_TOOLS,
-  AGY_READONLY_SEAT_TOOLS,
   AGY_WORKER_SEAT_TOOLS,
   AgySeatSettingsError,
   SEAT_IDS,
@@ -28,6 +27,7 @@ import {
 export const SEAT_OVERRIDES_PROTOCOL = 1 as const;
 export const SEAT_OVERRIDES_KIND = 'operator_seat_overrides' as const;
 export const SEAT_OVERRIDE_INSTRUCTION_MAX_LENGTH = 280;
+const EFFORT_LEVEL_NAMES = 'low, medium, high, xhigh, max';
 
 const TOKEN = /^[a-z0-9][a-z0-9.-]{0,63}$/u;
 const REVISION = /^(?:absent|sha256:[0-9a-f]{64})$/u;
@@ -81,7 +81,8 @@ export type SeatOverrideValidationCode =
   | 'seat_runtime_not_allowed'
   | 'seat_model_invalid'
   | 'seat_model_retired'
-  | 'seat_effort_invalid';
+  | 'seat_effort_invalid'
+  | 'seat_tool_not_allowed';
 
 /** Structured validation failure for override write requests. Never includes submitted free-text values. */
 export class SeatOverrideValidationError extends Error {
@@ -109,6 +110,7 @@ export function seatOverridesInvalidMessage(error: unknown): string {
 }
 
 export function effectiveSeatsInvalidMessage(error: unknown): string {
+  if (error instanceof SeatOverrideValidationError) return error.message;
   return error instanceof SeatOverridesDecodeError ? seatOverridesInvalidMessage(error) : seatsConfigInvalidMessage(error);
 }
 
@@ -203,7 +205,7 @@ export function decodeSeatOverrides(value: unknown, code = 'seat_overrides_inval
   if (!isRecord(value)) invalid(code);
   const overrides: Partial<Record<SeatId, SeatRouteOverrideV1>> = {};
   for (const key of Object.keys(value)) {
-    if (!isSeatId(key)) invalid(code, `seat_overrides.${key}`);
+    if (!isSeatId(key)) invalid(code, 'seat_overrides');
     overrides[key] = decodeSeatOverrideEntry(key, value[key], code);
   }
   return Object.freeze(overrides);
@@ -279,14 +281,14 @@ export function decodeSeatOverrideSetRequest(fields: Readonly<Record<string, unk
     throw new SeatOverrideValidationError(
       'seat_effort_invalid',
       `seat_overrides.${seat}.effort`,
-      `The effort at seat_overrides.${seat}.effort is not valid for ${runtime}.`,
+      `The effort at seat_overrides.${seat}.effort is not valid for ${runtime}. Allowed values: ${EFFORT_LEVEL_NAMES}.`,
     );
   }
   if (runtime === 'agy' && typeof record.model === 'string' && !agyEffortValid(record.model, record.effort)) {
     throw new SeatOverrideValidationError(
       'seat_effort_invalid',
       `seat_overrides.${seat}.effort`,
-      `The effort at seat_overrides.${seat}.effort is not valid for agy.`,
+      `The effort at seat_overrides.${seat}.effort is not valid for agy. Allowed values: ${EFFORT_LEVEL_NAMES}.`,
     );
   }
   return Object.freeze({
@@ -345,38 +347,33 @@ export function decodeSeatOverrideResult(value: unknown): SeatOverrideResultV1 {
   });
 }
 
-function withTools(tools: readonly SeatTool[], required: readonly SeatTool[]): readonly SeatTool[] {
-  const merged = new Set<SeatTool>(tools);
-  for (const tool of required) merged.add(tool);
-  return Object.freeze([...merged].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)));
+function agyAllowedToolsForSeat(id: SeatId): readonly SeatTool[] {
+  if (id === 'advisor') return AGY_ADVISOR_ALLOWED_SEAT_TOOLS;
+  if (isWorkerSeat(id)) return AGY_WORKER_SEAT_TOOLS;
+  return agySeatTools(id);
 }
 
 /**
- * Derive agy-valid tools for an overridden seat without silently granting `edit`, `gh`, `mcp`, or `schedule`
- * beyond what the base seat already holds.
+ * Narrow base seat tools to the target agy seat cap without ever adding a tool
+ * that the base seat lacks. Fails closed with `seat_tool_not_allowed` when the
+ * narrowed grants do not cover the capabilities that agy requires for the seat.
  */
 function agyOverrideTools(id: SeatId, baseTools: readonly SeatTool[]): readonly SeatTool[] {
-  if (id === 'advisor') {
-    const narrowed = baseTools.filter(tool => (AGY_ADVISOR_ALLOWED_SEAT_TOOLS as readonly SeatTool[]).includes(tool));
-    return isAgyToolsValid(id, narrowed) ? narrowed : withTools(narrowed, AGY_READONLY_SEAT_TOOLS);
+  const allowed = agyAllowedToolsForSeat(id);
+  const narrowed = Object.freeze(baseTools.filter(tool => allowed.includes(tool)));
+  if (!isAgyToolsValid(id, narrowed) || (isWorkerSeat(id) && !narrowed.includes('edit'))) {
+    throw new SeatOverrideValidationError(
+      'seat_tool_not_allowed',
+      `seat_overrides.${id}.runtime`,
+      `The ${id} seat base tool grants do not cover the tools required to run on agy. Update the seat tools in Settings before authorizing an agy override.`,
+    );
   }
-  if (isWorkerSeat(id)) {
-    const narrowed = baseTools.filter(tool => (AGY_WORKER_SEAT_TOOLS as readonly SeatTool[]).includes(tool));
-    if (isAgyToolsValid(id, narrowed)) return narrowed;
-    const required: readonly SeatTool[] = baseTools.includes('edit')
-      ? ['edit', 'net', 'read', 'shell']
-      : AGY_READONLY_SEAT_TOOLS;
-    return withTools(narrowed, required);
-  }
-  return agySeatTools(id, baseTools);
+  return narrowed;
 }
 
 /** Overlay one owner-authorized route override onto a configured base seat without widening tool or fleet grants. */
 export function applySeatOverrideToConfig(id: SeatId, base: SeatConfigV1, override: SeatRouteOverrideV1): SeatConfigV1 {
-  let tools: readonly SeatTool[];
-  if (override.runtime === 'agy') tools = agyOverrideTools(id, base.tools);
-  else if (override.runtime === 'codex') tools = withTools(base.tools, ['shell']);
-  else tools = base.tools;
+  const tools = override.runtime === 'agy' ? agyOverrideTools(id, base.tools) : base.tools;
   return Object.freeze({
     runtime: override.runtime,
     model: override.model,
