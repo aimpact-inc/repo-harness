@@ -384,8 +384,14 @@ module is in the title so that a list view shows the write scopes.
   the plan block and does not skip a parked unit automatically. Before
   dispatch, check active parks (`rh autopilot status`) and do not dispatch
   a parked unit or its open `blocked-by` dependents. Pass `--issues <unit>`
-  to `rh board dispatch` for each ready, non-parked unit, or hold parked
-  units in the plan. Keep a soft target of about 5 working seats and 5 CI
+  to `rh board dispatch` only for ready, non-parked multi-issue units (two
+  or more distinct issue numbers). Single-issue units use bulk
+  `rh board dispatch` with temporary plan holds on the parked units to
+  exclude them. Plan holds added only for dispatch are temporary because a
+  plan hold disables the auto-pilot park bypass in `merge_order`. Right
+  after dispatch, post a superseding plan (`rh board post plan`) that
+  removes only those temporary dispatch holds and keeps the typed park
+  comments in place. Keep a soft target of about 5 working seats and 5 CI
   runs active in parallel when disjoint ready issues exist (within the
   8-worker cap). `rh board triage-apply` scales an omitted
   `max_parallel_writers` up to 5 from actual disjoint units. Never create
