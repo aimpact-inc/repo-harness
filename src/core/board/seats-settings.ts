@@ -5,6 +5,7 @@
 // the GET body carries them as `ranges`, and the browser renders only that.
 import { DEFAULT_EXHAUSTED_AT_OR_ABOVE_USED, EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from './quota';
 import type { SeatPoolCacheV1 } from './seat-pool';
+import { SeatsConfigMigrationRequiredError } from './seats-settings-migration';
 
 export const WORKER_SEAT_IDS = ['worker', 'worker-deep', 'worker-opus', 'worker-neon', 'worker-neon-deep', 'worker-light'] as const;
 export type WorkerSeatId = typeof WORKER_SEAT_IDS[number];
@@ -307,8 +308,6 @@ export function defaultSeatsConfig(preset: 'magpie' | 'native' = 'magpie'): Seat
 export const DEFAULT_SEATS_CONFIG: SeatsConfigV1 = defaultSeatsConfig('magpie');
 export const NATIVE_SEATS_PRESET: SeatsConfigV1 = defaultSeatsConfig('native');
 
-export const SEATS_CONFIG_UPDATE_ACTION = 'rh update';
-
 /** The routing keys that came after the first stored sections (#2630, #2633, #2769, #3366): `rh update` adds each with its default. */
 export const INTRODUCED_ROUTING_DEFAULTS = Object.freeze({
   codex_credit_mode: DEFAULT_SEATS_CONFIG.routing.codex_credit_mode,
@@ -318,14 +317,6 @@ export const INTRODUCED_ROUTING_DEFAULTS = Object.freeze({
   exhausted_at_or_above_used: DEFAULT_SEATS_CONFIG.routing.exhausted_at_or_above_used,
   unavailable_pi_providers: DEFAULT_SEATS_CONFIG.routing.unavailable_pi_providers,
 }) satisfies Partial<SeatRoutingV1>;
-
-export class SeatsConfigMigrationRequiredError extends Error {
-  readonly code = 'seats_config_migration_required';
-  readonly next_action = SEATS_CONFIG_UPDATE_ACTION;
-  constructor() {
-    super(`The stored seats section needs a one-shot migration. Run ${SEATS_CONFIG_UPDATE_ACTION}.`);
-  }
-}
 
 /** One pane runtime as the seat form may offer it. */
 export interface SeatRuntimeRangeV1 {

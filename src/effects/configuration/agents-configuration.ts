@@ -8,12 +8,12 @@ import {
 import {
   SEAT_IDS,
   SEAT_RUNTIMES,
-  SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
   seatsConfigInvalidMessage,
   seatHostId,
   type SeatsConfigV1,
 } from '../../core/board/seats-settings';
+import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { isDocsHostRuntimeId } from '../../core/operator/docs-host-runtimes';
 import { isReviewRuntimeId, REVIEW_RUNTIME_IDS } from '../../core/review/review-runtimes';
 import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from './global-configuration';

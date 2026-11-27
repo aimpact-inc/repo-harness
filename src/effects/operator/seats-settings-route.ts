@@ -2,12 +2,12 @@ import type { JsonValue } from '../../core/evidence/types';
 import {
   AgySeatSettingsError,
   DEFAULT_SEATS_CONFIG,
-  SEATS_CONFIG_UPDATE_ACTION,
   decodeSeatsSettings,
   decodeSeatsSettingsRequest,
   decodeSeatsSettingsResult,
   type SeatsSettingsV1,
 } from '../../core/board/seats-settings';
+import { SEATS_CONFIG_UPDATE_ACTION } from '../../core/board/seats-settings-migration';
 import {
   SeatsConfigurationError,
   agyCatalogModels,
