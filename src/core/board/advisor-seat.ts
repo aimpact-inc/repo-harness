@@ -1,7 +1,8 @@
 import type { BoardHostPortsV1, BoardSeatTerminalReadV1 } from './board';
 import { hcStatusClass, type HcStatusClass } from './desk';
-import { hasUnredactedSecret, KEY_BEGIN, KEY_END, replaceSecrets } from '../security/secret-patterns';
+import { hasUnredactedSecret } from '../security/secret-patterns';
 import { HC_LOCAL_ADDRESS } from '../terminal/hc-address';
+import { privateKeyLines, redactAdvisorLine } from './advisor-seat-redaction';
 
 /**
  * The advisor seat of one board (#1756, D11): the only console channel that
@@ -294,52 +295,6 @@ export function decodeAdvisorSeatTranscript(value: unknown): AdvisorSeatTranscri
   };
 }
 
-// A marker walks only its own header, so the search stays linear on a line of any length.
-const BEGIN_MARKER = new RegExp(KEY_BEGIN, 'gu');
-const END_MARKER = new RegExp(KEY_END, 'gu');
-
-/** The positions of the first and the last marker on one line; -1 when the line has none. */
-function markers(line: string, marker: RegExp): { readonly first: number; readonly last: number } {
-  let first = -1, last = -1;
-  for (const match of line.matchAll(marker)) {
-    if (first < 0) first = match.index;
-    last = match.index;
-  }
-  return { first, last };
-}
-
-/**
- * One linear pass that marks every line of a private key block: BEGIN through
- * END, BEGIN to the last line when no END follows, and the first line to END
- * when no BEGIN precedes it, because the window or the hc read cut the block.
- * An open block keeps its earliest BEGIN, so a second BEGIN never releases the
- * lines before it.
- */
-function privateKeyLines(lines: readonly string[]): readonly boolean[] {
-  const marked = lines.map(() => false);
-  const mark = (from: number, to: number) => { for (let at = from; at <= to; at += 1) marked[at] = true; };
-  let open: number | null = null;
-  lines.forEach((line, at) => {
-    const begin = markers(line, BEGIN_MARKER), end = markers(line, END_MARKER);
-    if (end.last >= 0) {
-      // An END closes the open block; with none open, an END before every BEGIN of its line closes a block that began above the window.
-      mark(open ?? (begin.first < 0 || end.first < begin.first ? 0 : at), at);
-      open = null;
-    }
-    // A BEGIN after the last END of its line leaves a block open.
-    if (begin.last > end.last) open ??= at;
-  });
-  if (open !== null) mark(open, lines.length - 1);
-  return marked;
-}
-
-/** One line outside a key block: the shared token rules, then a secret left over or a line over the limit withholds it. */
-function redactAdvisorLine(line: string): string {
-  if (line.length > ADVISOR_TRANSCRIPT_LINE_MAX_CHARS) return ADVISOR_TRANSCRIPT_LINE_WITHHELD;
-  const redacted = replaceSecrets(line);
-  return redacted.length > ADVISOR_TRANSCRIPT_LINE_MAX_CHARS || hasUnredactedSecret(redacted) ? ADVISOR_TRANSCRIPT_LINE_WITHHELD : redacted;
-}
-
 /**
  * The read-back lines of one hc read: the last ADVISOR_TRANSCRIPT_LINES lines,
  * every private key block withheld, then each other line redacted. The whole
@@ -348,7 +303,7 @@ function redactAdvisorLine(line: string): string {
 export function advisorTranscriptLines(text: string): readonly string[] {
   const lines = text.split('\n').slice(-ADVISOR_TRANSCRIPT_LINES);
   const keys = privateKeyLines(lines);
-  return Object.freeze(lines.map((line, at) => keys[at] ? ADVISOR_TRANSCRIPT_LINE_WITHHELD : redactAdvisorLine(line)));
+  return Object.freeze(lines.map((line, at) => keys[at] ? ADVISOR_TRANSCRIPT_LINE_WITHHELD : redactAdvisorLine(line, ADVISOR_TRANSCRIPT_LINE_MAX_CHARS, ADVISOR_TRANSCRIPT_LINE_WITHHELD)));
 }
 
 /** The longest seat status message that leaves the server. */
