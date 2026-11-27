@@ -1006,13 +1006,15 @@ describe('package-local ArchContext projection provider', () => {
 
   test('bounds a real provider process tree whose descendant keeps captured pipes open', async () => {
     const f = fixture();
-    // Three separate budgets. The fixture prints a start signal after the runtime is usable, and
-    // the provider clock starts there, so a slow first Windows executable spawn cannot consume the
-    // timeout that exercises process-tree cleanup. Runtime selection and provider startup stay
-    // inside the provider call, so the provider still reaches its descendant before the timeout
-    // fires; selection has its own test.
-    const startupAllowanceMs = 6_000;
-    const providerBudgetMs = 2_000;
+    // Three separate budgets, one per phase. The fixture resolves the Node runtime as its start
+    // signal, and the provider reuses that resolution: the product reuses a resolved runtime only
+    // when the caller keeps more than 5 s of its deadline (archctx-provider.ts, callerLimitsProbe),
+    // and it probes the runtime inside the caller deadline below that window. Both budgets stay
+    // above the window, so the provider clock covers the process-tree phase only and a slow
+    // Windows runtime probe cannot spend it (#3603). Selection has its own test.
+    const runtimeReuseWindowMs = 5_000;
+    const startupAllowanceMs = runtimeReuseWindowMs + 1_000;
+    const providerBudgetMs = runtimeReuseWindowMs + 1_000;
     const exitProbeAllowanceMs = 2_000;
     const firstProbeMs = Math.floor(exitProbeAllowanceMs * 0.6);
     const fallbackProbeMs = Math.floor(exitProbeAllowanceMs * 0.9);
@@ -1037,9 +1039,9 @@ describe('package-local ArchContext projection provider', () => {
       `import { archctxCapabilities, resolveCompatibleNodeRuntime } from ${JSON.stringify(providerModule)};`,
       `import { processExists } from ${JSON.stringify(terminationModule)};`,
       `const providerEnv = { ...process.env, REPO_HARNESS_NODE_BIN: ${JSON.stringify(node)}, ARCHCTX_DESCENDANT_PID_PATH: ${JSON.stringify(descendantPidPath)} };`,
-      // Fixture startup: the first spawn of the Node executable is slow on a loaded Windows runner.
-      // Resolve it under its own budget; this line is the start signal for the provider clock.
-      `resolveCompatibleNodeRuntime(providerEnv, () => [], { deadlineMs: Date.now() + ${startupAllowanceMs} });`,
+      // Fixture startup: resolve the runtime under its own budget. This line is the start signal for
+      // the provider clock, and the default candidate source lets the provider reuse the result.
+      `resolveCompatibleNodeRuntime(providerEnv, undefined, { deadlineMs: Date.now() + ${startupAllowanceMs} });`,
       `console.log('runtime_ready');`,
       `const started = Date.now();`,
       `let failure = '';`,
@@ -1080,7 +1082,9 @@ describe('package-local ArchContext projection provider', () => {
       `}`,
       '',
     ].join('\n'));
-    const result = await runFixtureScript(f, script, startupAllowanceMs + providerBudgetMs + exitProbeAllowanceMs);
+    // The outer bound only stops a hung fixture; it holds the inner maxima plus one provider budget
+    // for the supervisor spawn and its termination confirmation, so slow spawns do not trip it.
+    const result = await runFixtureScript(f, script, startupAllowanceMs + (2 * providerBudgetMs) + exitProbeAllowanceMs);
     expect(result.timedOut).toBe(false);
     if (result.status !== 0) throw new Error(`provider timeout fixture failed: ${result.stderr || result.stdout}`);
     expect(result.status).toBe(0);
