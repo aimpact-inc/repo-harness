@@ -1077,6 +1077,123 @@ describe('agents page seats section', () => {
     expect(setPosts[5]!.request_id).toBe(setPosts[4]!.request_id);
     expect(document.querySelector('[data-seat-override-dialog]')).toBeNull();
   });
+
+  test('Enter in the free-route or instruction input sends no override request; only explicit Confirm sends owner_approved', async () => {
+    const setPosts: SeatOverrideSetPost[] = [];
+    const stores = settingsStores(NOW, 'busy', {
+      'worker-opus': {
+        runtime: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z',
+        instruction: 'Prior owner instruction',
+      },
+    });
+    await mount({
+      ...props(server(settings(), [])),
+      readAgentsSettings: stores.agents.read,
+      readSeatsSettings: stores.seats.read,
+      readSeatOverrides: stores.seatOverrides.read,
+      writeSeatOverride: async (body) => { setPosts.push(body); return stores.seatOverrides.write(body); },
+      revokeSeatOverride: stores.seatOverrides.revoke,
+    });
+
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-override-change="worker-opus"]')!);
+    const dialog = document.querySelector<HTMLElement>('[data-seat-override-dialog="worker-opus"]')!;
+    const confirm = dialog.querySelector<HTMLButtonElement>('[data-override-confirm]')!;
+    const modelInput = dialog.querySelector<HTMLInputElement>('[data-override-model-input]')!;
+    const instructionInput = dialog.querySelector<HTMLInputElement>('[data-override-instruction]')!;
+    const form = dialog.querySelector<HTMLFormElement>('form')!;
+    expect(confirm.getAttribute('type')).toBe('button');
+
+    const pressEnter = async (target: HTMLInputElement) => {
+      await act(async () => {
+        target.focus();
+        target.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event);
+        target.dispatchEvent(new window.KeyboardEvent('keypress', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event);
+        target.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      await settle();
+    };
+
+    // Edit route while prior instruction is populated and press Enter in free-route input, instruction input, and submit form.
+    await setNumber('[data-seat-override-dialog="worker-opus"] [data-override-model-input]', 'haiku');
+    await pressEnter(modelInput);
+    await pressEnter(instructionInput);
+    await act(async () => {
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    await settle();
+    expect(setPosts).toHaveLength(0);
+    expect(document.querySelector('[data-seat-override-dialog="worker-opus"]')).not.toBeNull();
+
+    // Explicit activation of Confirm override sends owner_approved: true.
+    await click(confirm);
+    expect(setPosts).toHaveLength(1);
+    expect(setPosts[0]).toMatchObject({ seat: 'worker-opus', runtime: 'claude', model: 'haiku', owner_approved: true });
+    expect(document.querySelector('[data-seat-override-dialog="worker-opus"]')).toBeNull();
+  });
+
+  test('when stored base changes under a dirty Seats draft, route rows and Revoke dialog show the latest stored base', async () => {
+    const stores = settingsStores(NOW, 'busy', {
+      'worker-opus': {
+        runtime: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z',
+        instruction: 'Use Sonnet for this run',
+      },
+    });
+    const initialRead = await stores.seats.read();
+    if (initialRead.state !== 'ok') throw new Error('fixture read failed');
+    let currentSeats = initialRead.settings;
+    let currentOverrides = {
+      protocol: 1 as const,
+      kind: 'operator_seat_overrides' as const,
+      config_revision: initialRead.settings.config.revision,
+      overrides: {
+        'worker-opus': {
+          runtime: 'claude' as const,
+          model: 'sonnet',
+          effort: 'high',
+          authorized_at: '2026-11-27T15:30:00.000Z',
+          instruction: 'Use Sonnet for this run',
+        },
+      },
+    };
+    await mount({
+      ...props(server(settings(), [])),
+      readAgentsSettings: stores.agents.read,
+      readSeatsSettings: async () => ({ state: 'ok', settings: currentSeats }),
+      readSeatOverrides: async () => ({ state: 'ok', settings: currentOverrides }),
+      writeSeatOverride: stores.seatOverrides.write,
+      revokeSeatOverride: stores.seatOverrides.revoke,
+    });
+
+    // Make an unrelated Seats draft edit so form.base remains frozen at the old revision.
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-card="advisor"] [aria-label="Allow explorer"]')!);
+
+    // Another window updates worker-opus base model to haiku and advisor base model to sonnet.
+    currentSeats = {
+      ...currentSeats,
+      config: {
+        ...currentSeats.config,
+        revision: REVISION_B,
+        'worker-opus': { ...currentSeats.config['worker-opus'], model: 'haiku' },
+        advisor: { ...currentSeats.config.advisor, model: 'sonnet' },
+      },
+    };
+    currentOverrides = { ...currentOverrides, config_revision: REVISION_B };
+    await click(buttonWithText('Refresh'));
+
+    // Non-overridden route row reflects the latest stored base while the Seats draft stays dirty.
+    expect(document.querySelector('[data-seat-route-row="advisor"] [data-seat-route-model]')?.textContent).toBe('sonnet');
+    expect(document.querySelector('[data-save-result="changed-elsewhere"]')).not.toBeNull();
+
+    // Revoke preview shows the actual stored base destination (haiku), not the stale dirty-form base (opus).
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-override-revoke="worker-opus"]')!);
+    expect(document.querySelector('[data-override-revoke-preview]')?.textContent).toBe('claude · sonnet · high → claude · haiku · high');
+  });
 });
 
 describe('settings page', () => {

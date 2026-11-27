@@ -587,8 +587,7 @@ function SeatOverrideDialog({ seat, base, current, settings, expectedRevision, o
     }
   };
 
-  const handleSubmit = async (event: { preventDefault(): void }) => {
-    event.preventDefault();
+  const handleConfirm = async () => {
     if (submitting || instruction.trim().length === 0) return;
     setSubmitting(true);
     setFailure(null);
@@ -623,9 +622,9 @@ function SeatOverrideDialog({ seat, base, current, settings, expectedRevision, o
         aria-modal="true"
         aria-labelledby="seat-override-dialog-title"
         data-seat-override-dialog={seat}
-        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-kumo-default shadow-2xl"
+        className="relative z-10 flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-kumo-default shadow-2xl"
       >
-        <div className="flex items-center justify-between gap-3 border-b border-kumo-hairline px-4 py-3 sm:px-5">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-kumo-hairline px-4 py-3 sm:px-5">
           <h3 id="seat-override-dialog-title" className="text-base font-semibold text-kumo-strong">
             {t('seats.override.dialogTitle', { seat: `${t(`seats.${seat}.short`)} (${seat})` })}
           </h3>
@@ -633,76 +632,78 @@ function SeatOverrideDialog({ seat, base, current, settings, expectedRevision, o
             <XIcon size={14} aria-hidden="true" />
           </button>
         </div>
-        <form onSubmit={handleSubmit} className="flex flex-col">
-          <Field label={t('seats.field.runtime')}>
-            <div className="flex min-w-0 flex-col gap-2">
-              <Segmented label={t('seats.field.runtime')} disabled={submitting} value={runtime}
-                options={runtimeChoices.map(entry => ({ value: entry.id, label: t(`seats.runtime.${entry.id}`) }))}
-                onPick={pickRuntime} />
-              {fieldError === 'runtime' && failure && <OverrideFailureInline failure={failure} field="runtime" onReload={handleReload} t={t} />}
-            </div>
-          </Field>
+        <form onSubmit={event => event.preventDefault()} className="flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <Field label={t('seats.field.runtime')}>
+              <div className="flex min-w-0 flex-col gap-2">
+                <Segmented label={t('seats.field.runtime')} disabled={submitting} value={runtime}
+                  options={runtimeChoices.map(entry => ({ value: entry.id, label: t(`seats.runtime.${entry.id}`) }))}
+                  onPick={pickRuntime} />
+                {fieldError === 'runtime' && failure && <OverrideFailureInline failure={failure} field="runtime" onReload={handleReload} t={t} />}
+              </div>
+            </Field>
 
-          <Field label={t('seats.field.model')}>
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
-              {modelChoices.length > 0 && (
-                <Segmented label={t('seats.field.model')} disabled={submitting} value={model} options={modelChoices} onPick={pickModel} />
-              )}
-              <input
-                type="text"
-                value={model}
-                disabled={submitting}
-                aria-label={t('seats.override.routeInput')}
-                placeholder={runtime === 'pi' ? t('seats.override.routePlaceholderPi') : t('seats.override.routePlaceholder')}
-                spellCheck={false}
-                data-override-model-input
-                className={cn(MODEL_INPUT, 'w-full')}
-                onChange={event => pickModel(event.target.value)}
-              />
-              {fieldError === 'model' && failure && <OverrideFailureInline failure={failure} field="model" onReload={handleReload} t={t} />}
-            </div>
-          </Field>
+            <Field label={t('seats.field.model')}>
+              <div className="flex min-w-0 flex-1 flex-col gap-2">
+                {modelChoices.length > 0 && (
+                  <Segmented label={t('seats.field.model')} disabled={submitting} value={model} options={modelChoices} onPick={pickModel} />
+                )}
+                <input
+                  type="text"
+                  value={model}
+                  disabled={submitting}
+                  aria-label={t('seats.override.routeInput')}
+                  placeholder={runtime === 'pi' ? t('seats.override.routePlaceholderPi') : t('seats.override.routePlaceholder')}
+                  spellCheck={false}
+                  data-override-model-input
+                  className={cn(MODEL_INPUT, 'w-full')}
+                  onChange={event => pickModel(event.target.value)}
+                />
+                {fieldError === 'model' && failure && <OverrideFailureInline failure={failure} field="model" onReload={handleReload} t={t} />}
+              </div>
+            </Field>
 
-          <Field label={t('seats.field.effort')}>
-            <div className="flex min-w-0 flex-col gap-2">
-              <Segmented label={t('seats.field.effort')} disabled={submitting} value={effort} options={effortChoices}
-                onPick={next => { setFailure(null); setEffort(next); }} />
-              {fieldError === 'effort' && failure && <OverrideFailureInline failure={failure} field="effort" onReload={handleReload} t={t} />}
-            </div>
-          </Field>
+            <Field label={t('seats.field.effort')}>
+              <div className="flex min-w-0 flex-col gap-2">
+                <Segmented label={t('seats.field.effort')} disabled={submitting} value={effort} options={effortChoices}
+                  onPick={next => { setFailure(null); setEffort(next); }} />
+                {fieldError === 'effort' && failure && <OverrideFailureInline failure={failure} field="effort" onReload={handleReload} t={t} />}
+              </div>
+            </Field>
 
-          <Field label={t('seats.override.route')}>
-            <span className="font-mono text-xs text-kumo-strong [overflow-wrap:anywhere]" data-override-route-preview>
-              {seat} → {routeSummary({ runtime, model: trimmedModel, effort }, t)}
-            </span>
-          </Field>
+            <Field label={t('seats.override.route')}>
+              <span className="font-mono text-xs text-kumo-strong [overflow-wrap:anywhere]" data-override-route-preview>
+                {seat} → {routeSummary({ runtime, model: trimmedModel, effort }, t)}
+              </span>
+            </Field>
 
-          <Field label={t('seats.override.instruction')}>
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
-              <input
-                type="text"
-                value={instruction}
-                maxLength={SEAT_OVERRIDE_INSTRUCTION_MAX_LENGTH}
-                disabled={submitting}
-                aria-label={t('seats.override.instruction')}
-                placeholder={t('seats.override.instructionPlaceholder')}
-                data-override-instruction
-                className={cn(MODEL_INPUT, 'w-full font-sans')}
-                onChange={event => { setFailure(null); setInstruction(event.target.value); }}
-              />
-              {fieldError === 'instruction' && failure && <OverrideFailureInline failure={failure} field="instruction" onReload={handleReload} t={t} />}
-            </div>
-          </Field>
+            <Field label={t('seats.override.instruction')}>
+              <div className="flex min-w-0 flex-1 flex-col gap-2">
+                <input
+                  type="text"
+                  value={instruction}
+                  maxLength={SEAT_OVERRIDE_INSTRUCTION_MAX_LENGTH}
+                  disabled={submitting}
+                  aria-label={t('seats.override.instruction')}
+                  placeholder={t('seats.override.instructionPlaceholder')}
+                  data-override-instruction
+                  className={cn(MODEL_INPUT, 'w-full font-sans')}
+                  onChange={event => { setFailure(null); setInstruction(event.target.value); }}
+                />
+                {fieldError === 'instruction' && failure && <OverrideFailureInline failure={failure} field="instruction" onReload={handleReload} t={t} />}
+              </div>
+            </Field>
 
-          {dialogError !== null && (
-            <div className="border-t border-kumo-hairline px-4 py-3 sm:px-5">
-              <OverrideFailureInline failure={dialogError} onReload={handleReload} t={t} />
-            </div>
-          )}
+            {dialogError !== null && (
+              <div className="border-t border-kumo-hairline px-4 py-3 sm:px-5">
+                <OverrideFailureInline failure={dialogError} onReload={handleReload} t={t} />
+              </div>
+            )}
+          </div>
 
-          <div className="flex items-center justify-end gap-2 border-t border-kumo-hairline px-4 py-3 sm:px-5">
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-kumo-hairline px-4 py-3 sm:px-5">
             <Button type="button" variant="ghost" disabled={submitting} onClick={onClose}>{t('seats.override.cancel')}</Button>
-            <Button type="submit" variant="primary" disabled={submitting || instruction.trim().length === 0} data-override-confirm>
+            <Button type="button" variant="primary" disabled={submitting || instruction.trim().length === 0} onClick={handleConfirm} data-override-confirm>
               {submitting ? t('seats.override.submitting') : t('seats.override.confirm')}
             </Button>
           </div>
@@ -753,9 +754,9 @@ function SeatOverrideRevokeDialog({ seat, base, current, expectedRevision, overr
         aria-modal="true"
         aria-labelledby="seat-override-revoke-title"
         data-seat-override-revoke-dialog={seat}
-        className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-kumo-default shadow-2xl"
+        className="relative z-10 flex max-h-[calc(100vh-2rem)] w-full max-w-md flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-kumo-default shadow-2xl"
       >
-        <div className="flex items-center justify-between gap-3 border-b border-kumo-hairline px-4 py-3 sm:px-5">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-kumo-hairline px-4 py-3 sm:px-5">
           <h3 id="seat-override-revoke-title" className="text-base font-semibold text-kumo-strong">
             {t('seats.override.revokeTitle', { seat: `${t(`seats.${seat}.short`)} (${seat})` })}
           </h3>
@@ -763,13 +764,13 @@ function SeatOverrideRevokeDialog({ seat, base, current, expectedRevision, overr
             <XIcon size={14} aria-hidden="true" />
           </button>
         </div>
-        <div className="flex flex-col gap-3 px-4 py-4 sm:px-5">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4 sm:px-5">
           <p className="font-mono text-xs text-kumo-strong [overflow-wrap:anywhere]" data-override-revoke-preview>
             {routeSummary(current, t)} → {routeSummary(base, t)}
           </p>
           {failure !== null && <OverrideFailureInline failure={failure} onReload={() => { setFailure(null); overrides.reload(); }} t={t} />}
         </div>
-        <div className="flex items-center justify-end gap-2 border-t border-kumo-hairline px-4 py-3 sm:px-5">
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-kumo-hairline px-4 py-3 sm:px-5">
           <Button type="button" variant="ghost" disabled={submitting} onClick={onClose}>{t('seats.override.cancel')}</Button>
           <Button type="button" variant="primary" disabled={submitting} onClick={handleRevoke} data-override-revoke-confirm>
             {submitting ? t('seats.override.revoking') : t('seats.override.revokeConfirm')}
@@ -917,7 +918,7 @@ function SeatsBody({ form, overrides, agents, setup, quota, t }: {
   const locked = formLocked(form);
   const activeOverrides = overrides.view.kind === 'ready' ? overrides.view.response.overrides : {};
   const overrideRevision = overrides.view.kind === 'ready' ? overrides.view.response.config_revision : settings.config.revision;
-  const storedBase = base ?? settings.config;
+  const storedBase = settings.config;
   const changedElsewhere = base !== null && form.request !== null && form.save.kind !== 'saving' && settings.config.revision !== base.revision;
   const changes = base !== null && draft !== null ? seatChanges(base, draft) : 0;
   const notEnabled = draft === null ? [] : SEAT_IDS.flatMap((id) => {
