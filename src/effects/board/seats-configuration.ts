@@ -1,60 +1,32 @@
-import type { ExecutableInstallation } from '@botiverse/oar/browser';
-import { randomUUID } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Worker } from 'node:worker_threads';
 import { decodeAgentsConfig } from '../../core/board/agents-settings';
+import { agySeatAgentName, agySeatAgentTools, agySeatBrief } from '../../core/board/seat-launch';
+import { MAGPIE_EXTENSION_PATH, SEAT_POOL_STALE_MS, buildSeatPool, catalogProbeModelIds, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
+import {
+  AgySeatSettingsError, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_RUNTIMES, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS,
+  SeatsConfigMigrationRequiredError, decodeSeatsConfig, retiredSeatModelField, seatsConfigInvalidMessage, seatHostId, seatTakesFleet,
+  type AgyCatalogModel, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatModelV1, type SeatRoutingV1, type SeatRuntime,
+  type SeatsConfigV1, type SeatsRangesV1, type SeatsSettingsResultV1,
+} from '../../core/board/seats-settings';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
-import { agySeatAgentName, agySeatAgentTools, agySeatBrief } from '../../core/board/seat-launch';
-import { HostConfigError, type PathRecord } from '../../core/host-config/types';
-import {
-  AgySeatSettingsError,
-  ALLOWED_SEAT_FLEET_ROLES,
-  COUNCIL_TOOLS,
-  SEAT_IDS,
-  SEAT_RUNTIMES,
-  SEAT_SCAFFOLD_SUB_AGENTS,
-  SEAT_TOOLS,
-  FRONTEND_SEAT_IDS,
-  ROUTING_CLASSES,
-  ROUTING_KEYS,
-  WORKER_SEAT_IDS,
-  SeatsConfigMigrationRequiredError,
-  decodeSeatsConfig,
-  retiredSeatModelField,
-  seatsConfigInvalidMessage,
-  seatHostId,
-  seatModelShapeValid,
-  seatTakesFleet,
-  type AgyCatalogModel,
-  type LaunchSeatId,
-  type SeatConfigV1,
-  type SeatModelV1,
-  type SeatRoutingV1,
-  type SeatId,
-  type SeatRuntime,
-  type SeatRangeV1,
-  type SeatRuntimeRangeV1,
-  type SeatsConfigV1,
-  type SeatsRangesV1,
-  type SeatsSettingsResultV1,
-  type SeatTool,
-} from '../../core/board/seats-settings';
-import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
-import { MAGPIE_EXTENSION_PATH, SEAT_POOL_KIND, SEAT_POOL_STALE_MS, buildSeatPool, catalogProbeModelIds, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
-import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
-import { GlobalConfigurationError, globalConfigurationPath, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
-import { withExclusiveDirectoryLock } from '../locking/exclusive-directory-lock';
-import { globalRuntimeScope, withRuntimeTransactionLock } from '../locking/runtime-transaction-lock';
-import { antigravityAgentsDirHostPath, checkAntigravityPath, openHostConfigGate, ownsPathEntry } from '../host-config/gate';
-import { antigravityDirMatches, pathRecordProof } from '../host-config/path-records';
+import { HostConfigError } from '../../core/host-config/types';
+import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
+import { antigravityAgentsDirHostPath, checkAntigravityPath, openHostConfigGate } from '../host-config/gate';
 import { hostConfigPaths, hostPathKey, readLedger } from '../host-config/store';
-import { observeEntryIdentity } from '../host-config/whole-path';
-import { publishFileByRename } from '../atomic-append';
+import { globalRuntimeScope, withRuntimeTransactionLock } from '../locking/runtime-transaction-lock';
 import { runProcess } from '../process-runner';
+import { EFFORT_LEVELS } from '../terminal/task-role-profiles';
+import { AGY_AGENT_DESCRIPTIONS, agySeatAgentRecordIsCurrent, findAgySeatAgentRecord, refuseExistingAgySeatAgent, renderAgySeatAgentMarkdown } from './agy-seat-agent-records';
+import {
+  AGY_CATALOG_CHILD_ARG, AGY_CATALOG_CHILD_MS, CATALOG_RUNTIMES, SEAT_POOL_CHILD_MS, SEAT_POOL_MEMBER_MS,
+  agyEnvironment, agyProbeEnv, isAgyCatalogModel, probeSeatCatalog, projectAgyCatalog, readAgyCatalogOffThread, type AgyProbe,
+} from './seats-catalog';
+import { checkPoolDirectories, readPoolFile, seatPoolPath, storeSeatPool } from './seats-pool-store';
+import { RUNTIME_RANGES, SEAT_RANGES, changedKeys } from './seats-settings-ranges';
 
 export type SeatsConfigurationErrorCode =
   | 'busy'
@@ -77,35 +49,6 @@ export class SeatsConfigurationError extends Error {
     this.name = 'SeatsConfigurationError';
   }
 }
-
-const without = (...excluded: SeatTool[]): readonly SeatTool[] => SEAT_TOOLS.filter(tool => !excluded.includes(tool));
-
-/**
- * Per-seat scaffold sub-agent and tool grants (ADR-0006 §3).
- * The orchestrator does not edit (#1472). The advisor may edit proposals (#2032) and post GitHub comments and intake issues when `gh` is granted (#3468).
- */
-const SEAT_ACCESS: { readonly [seat in SeatId]: Omit<SeatRangeV1, 'models'> } = {
-  orchestrator: { fleet: ALLOWED_SEAT_FLEET_ROLES.orchestrator, tools: without('edit') },
-  advisor: { fleet: ALLOWED_SEAT_FLEET_ROLES.advisor, tools: SEAT_TOOLS },
-  council: { fleet: ALLOWED_SEAT_FLEET_ROLES.council, tools: COUNCIL_TOOLS },
-  worker: { fleet: ALLOWED_SEAT_FLEET_ROLES.worker, tools: SEAT_TOOLS },
-  'worker-deep': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-deep'], tools: SEAT_TOOLS },
-  'worker-opus': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-opus'], tools: SEAT_TOOLS },
-  'worker-neon': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-neon'], tools: SEAT_TOOLS },
-  'worker-neon-deep': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-neon-deep'], tools: SEAT_TOOLS },
-  'worker-light': { fleet: ALLOWED_SEAT_FLEET_ROLES['worker-light'], tools: SEAT_TOOLS },
-  gatekeeper: { fleet: ALLOWED_SEAT_FLEET_ROLES.gatekeeper, tools: ['net', 'read', 'shell'] },
-  'gatekeeper-fallback': { fleet: ALLOWED_SEAT_FLEET_ROLES['gatekeeper-fallback'], tools: ['net', 'read', 'shell'] },
-  reviewer: { fleet: ALLOWED_SEAT_FLEET_ROLES.reviewer, tools: ['net', 'read', 'shell'] },
-};
-const SEAT_RANGES = Object.fromEntries(SEAT_IDS.map(id => [id, { models: SEAT_RECOMMENDED_MODELS[id], ...SEAT_ACCESS[id] }])) as SeatsRangesV1['seats'];
-
-const RUNTIME_RANGES: Readonly<Record<SeatRuntime, Omit<SeatRuntimeRangeV1, 'id' | 'enabled'>>> = {
-  claude: { effort: true, fleet: true },
-  codex: { effort: true, fleet: true },
-  pi: { effort: true, fleet: true },
-  agy: { effort: true, fleet: false },
-};
 
 export function seatsRanges(enabledRuntimes: readonly string[], agyModels: readonly AgyCatalogModel[] | null): SeatsRangesV1 {
   return {
@@ -178,37 +121,10 @@ function checkSeat(id: SeatId, seat: SeatConfigV1, enabledRuntimes: readonly str
   if (role !== undefined) throw new SeatsConfigurationError('seat_fleet_not_allowed', `The ${id} seat on ${seat.runtime} cannot call the ${role} sub-agent.`);
 }
 
-const SEAT_POOL_MEMBER_MS = 15_000;
-// Codex installation can run both a readiness and a version check. Leave time for OAR to close its processes.
-const SEAT_POOL_CHILD_MS = 120_000;
-const AGY_CATALOG_CHILD_MS = 60_000;
-const AGY_CATALOG_CHILD_ARG = '--agy-catalog';
-const SEAT_POOL_FILE_LIMIT = 64 * 1024;
-const CATALOG_RUNTIMES = ['claude', 'codex'] as const;
-
-type AgyProbe =
-  | { readonly kind: 'available'; readonly installation: ExecutableInstallation; readonly models: readonly AgyCatalogModel[] }
-  | { readonly kind: 'not_installed' | 'unsupported' | 'signed_out' | 'catalog_unknown' | 'unknown' };
-
-function agyProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { HOME: env.HOME ?? homedir(), USERPROFILE: env.USERPROFILE, LOCALAPPDATA: env.LOCALAPPDATA, PATH: env.PATH ?? '',
-    TMPDIR: env.TMPDIR, OAR_ANTIGRAVITY_BIN: env.OAR_ANTIGRAVITY_BIN, OAR_CHILD_STDERR: 'ignore', NO_COLOR: '1', TERM: 'dumb' };
-}
-
-function agyEnvironment(env: NodeJS.ProcessEnv): Record<string, string | null> {
-  return { ...Object.fromEntries(Object.keys(process.env).map(key => [key, null])),
-    ...Object.fromEntries(Object.entries(agyProbeEnv(env)).map(([key, value]) => [key, value ?? null])) };
-}
-
 /** Resolve the installation through OAR for both standalone quota reads and the seat catalog. */
 export async function resolveAgyInstallation(env: NodeJS.ProcessEnv) {
   const { antigravityRuntime } = await import('@botiverse/oar/runtimes/antigravity');
   return antigravityRuntime.installation({ env: agyEnvironment(env) });
-}
-
-function isAgyCatalogModel(row: unknown): row is AgyCatalogModel {
-  return isRecord(row) && seatModelShapeValid('agy', row.id)
-    && (row.efforts === null || (Array.isArray(row.efforts) && row.efforts.every(effort => seatModelShapeValid('agy', effort))));
 }
 
 /** Read the native catalog in a child with a scratch cwd. Only its typed projection returns. */
@@ -235,16 +151,6 @@ export function probeAgySeat(env: NodeJS.ProcessEnv = process.env): AgyProbe {
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
-}
-
-/** The launch probe in a worker thread, so a slow catalog does not stop the operator's other routes. */
-function readAgyCatalogOffThread(env: NodeJS.ProcessEnv): Promise<AgyProbe> {
-  return new Promise((resolve) => {
-    const worker = new Worker(new URL('./agy-catalog-thread.ts', import.meta.url), { workerData: { env: { ...env } } });
-    worker.once('message', resolve);
-    worker.once('error', () => resolve({ kind: 'unknown' }));
-    worker.once('exit', () => resolve({ kind: 'unknown' }));
-  });
 }
 
 /** The effort menus that the settings page offers: the launch catalog, read only while Antigravity is on in Hosts. */
@@ -288,21 +194,7 @@ async function readAgyCatalog(): Promise<AgyProbe> {
     const catalog = await antigravityRuntime.listModels(installed, { env, timeoutMs: SEAT_POOL_MEMBER_MS });
     if (catalog.kind === 'unauthenticated') return { kind: 'signed_out' };
     if (catalog.kind !== 'ok') return { kind: 'catalog_unknown' };
-    const models = new Map<string, AgyCatalogModel>();
-    for (const { id, disabled, effortLevels = [], effortUnavailableReason } of catalog.models) {
-      if (disabled === undefined && seatModelShapeValid('agy', id)) {
-        // A null menu: agy lists the model but could not report its efforts.
-        models.set(id, { id, efforts: effortUnavailableReason === undefined ? effortLevels.filter(effort => seatModelShapeValid('agy', effort)) : null });
-      }
-    }
-    // OAR's ACP catalog exposes base IDs plus effort menus. The interactive CLI also takes suffixed IDs.
-    const nativeIds = new Set(catalog.models.map(model => model.id));
-    for (const { id, efforts } of [...models.values()]) {
-      for (const effort of efforts ?? []) {
-        const variant = `${id}-${effort}`;
-        if (!nativeIds.has(variant) && seatModelShapeValid('agy', variant)) models.set(variant, { id: variant, efforts: [effort] });
-      }
-    }
+    const models = projectAgyCatalog(catalog);
     return models.size === 0 ? { kind: 'catalog_unknown' } : { kind: 'available', installation: installed, models: [...models.values()] };
   } catch {
     return { kind: stage };
@@ -318,33 +210,6 @@ async function probeAgyPool(): Promise<SeatPoolProbe> {
     case 'catalog_unknown': return { ...emptySeatPoolProbe('agy', 'available'), sign_in: 'unknown', models: 'unknown' };
     case 'not_installed': return emptySeatPoolProbe('agy', 'not_installed');
     default: return emptySeatPoolProbe('agy', 'unknown');
-  }
-}
-
-async function probeSeatCatalog(id: typeof CATALOG_RUNTIMES[number], command: string): Promise<SeatPoolProbe> {
-  if (command === '') return emptySeatPoolProbe(id, 'not_installed');
-  let probe = emptySeatPoolProbe(id, 'unknown');
-  try {
-    const runtime = id === 'claude' ? (await import('@botiverse/oar/runtimes/claude')).claudeRuntime
-      : (await import('@botiverse/oar/runtimes/codex')).codexRuntime;
-    const { installation, authStatus, listModels } = runtime;
-    if (installation === undefined || authStatus === undefined || listModels === undefined) return probe;
-    const env = { [id === 'claude' ? 'OAR_CLAUDE_BIN' : 'OAR_CODEX_BIN']: command };
-    const installed = await installation({ env });
-    if (installed.kind === 'not_found') return emptySeatPoolProbe(id, 'not_installed');
-    if (installed.kind !== 'available') return probe;
-    probe = { ...probe, installation: 'available', sign_in: 'unknown' };
-    const { kind: signIn } = await authStatus(installed, { timeoutMs: SEAT_POOL_MEMBER_MS });
-    if (signIn !== 'logged_in') return { ...probe, sign_in: signIn };
-    probe = { ...probe, sign_in: 'logged_in', models: 'unknown' };
-    const catalog = await listModels(installed, { cwd: process.cwd(), timeoutMs: SEAT_POOL_MEMBER_MS });
-    if (catalog.kind === 'unauthenticated') return { ...probe, models: 'unauthenticated' };
-    if (catalog.kind !== 'ok') return probe;
-    const wanted = catalogProbeModelIds(id);
-    return { ...probe, models: 'ok', listed: catalog.models.filter(model => wanted.has(model.id))
-      .map(model => ({ id: model.id, disabled: model.disabled !== undefined })) };
-  } catch {
-    return probe;
   }
 }
 
@@ -384,32 +249,6 @@ export function magpieExtensionInstalled(env: NodeJS.ProcessEnv): boolean {
   }
 }
 
-function seatPoolPath(env: NodeJS.ProcessEnv): string {
-  return join(dirname(globalConfigurationPath(env)), 'seats', 'pool.json');
-}
-
-function checkPoolDirectories(path: string, create: boolean): void {
-  for (const directory of [dirname(dirname(path)), dirname(path)]) {
-    if (create) {
-      try { mkdirSync(directory, { mode: 0o700 }); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    }
-    if (!lstatSync(directory).isDirectory()) throw new Error('seat_pool_invalid_path');
-  }
-}
-
-function readPoolFile(path: string): Record<string, unknown> {
-  if (!lstatSync(path).isFile()) throw new Error('seat_pool_invalid_path');
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > SEAT_POOL_FILE_LIMIT) throw new Error('seat_pool_invalid_path');
-    const value: unknown = JSON.parse(readFileSync(fd, 'utf8'));
-    if (!isRecord(value) || value.protocol !== 1 || value.kind !== SEAT_POOL_KIND) throw new Error('seat_pool_unowned_file');
-    return value;
-  } finally { closeSync(fd); }
-}
-
 export function readSeatPoolCache(env: NodeJS.ProcessEnv = process.env, now = Date.now()): SeatPoolCacheV1 | null {
   try {
     const path = seatPoolPath(env);
@@ -420,21 +259,6 @@ export function readSeatPoolCache(env: NodeJS.ProcessEnv = process.env, now = Da
   } catch {
     return null;
   }
-}
-
-function storeSeatPool(report: SeatPoolV1): void {
-  const path = seatPoolPath(process.env);
-  checkPoolDirectories(path, true);
-  withExclusiveDirectoryLock(realpathSync(dirname(path)), 'pool.lock', () => {
-    checkPoolDirectories(path, false);
-    // The protocol marker identifies the cache across changes to the recommended table.
-    let previous: Record<string, unknown> | undefined;
-    try { previous = readPoolFile(path); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (typeof previous?.collected_at === 'string' && Date.parse(previous.collected_at) > Date.parse(report.collected_at)
-      && Date.parse(previous.collected_at) <= Date.now()) return;
-    publishFileByRename(path, Buffer.from(`${JSON.stringify(report, null, 2)}\n`), `${path}.tmp-${randomUUID()}`);
-  }, { reclaimStaleOwner: true });
 }
 
 /** The cache only serves settings. A request for the pool always observes the environment again. */
@@ -465,14 +289,6 @@ if (import.meta.main) {
   }
 }
 
-const AGY_AGENT_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  'rh-orchestrator': 'Repo-harness orchestrator',
-  'rh-advisor': 'Repo-harness advisor',
-  'rh-council': 'Repo-harness council',
-  'rh-gatekeeper-fallback': 'Repo-harness gatekeeper fallback',
-  'rh-worker': 'Repo-harness worker',
-};
-
 export interface AgySeatAgentSpec {
   readonly baseName: string;
   /** Content-addressed agent directory and frontmatter name (`rh-<role>-<digest12>`). */
@@ -481,23 +297,6 @@ export interface AgySeatAgentSpec {
   readonly content: string;
   /** Expected `sha256:<hex>` of the `agent.md` file bytes. */
   readonly fileDigest: string;
-}
-
-function renderAgySeatAgentMarkdown(name: string, description: string, tools: readonly string[], inheritMcp: boolean, body: string): string {
-  return [
-    '---',
-    `name: ${name}`,
-    `description: ${description}`,
-    'mainAgent: true',
-    `tools: [${tools.join(', ')}]`,
-    `inheritMcp: ${inheritMcp}`,
-    '---',
-    '',
-    '# System',
-    '',
-    body,
-    '',
-  ].join('\n');
 }
 
 /** Deterministic content-addressed agy agent spec (`rh-<role>-<digest12>`). */
@@ -513,83 +312,6 @@ export function agySeatAgentSpec(seat: LaunchSeatId, config: SeatConfigV1): AgyS
   const content = renderAgySeatAgentMarkdown(name, description, tools, inheritMcp, body);
   const fileDigest = sha256Prefixed(Buffer.from(content, 'utf8'));
   return { baseName, name, content, fileDigest };
-}
-
-function findAgySeatAgentRecord(
-  ledger: ReturnType<typeof readLedger>,
-  agentsDir: string,
-  fileKey: string,
-): { readonly key: string; readonly record: PathRecord } | null {
-  const direct = ledger.paths[fileKey];
-  if (direct) return { key: fileKey, record: direct };
-  for (const [key, record] of Object.entries(ledger.paths)) {
-    if (record.host === 'antigravity'
-      && key.toLowerCase() === fileKey.toLowerCase()
-      && antigravityDirMatches(agentsDir, dirname(dirname(key)))) {
-      return { key, record };
-    }
-  }
-  return null;
-}
-
-function agySeatAgentRecordIsCurrent(
-  ledger: ReturnType<typeof readLedger>,
-  record: PathRecord | undefined,
-  recordedKey: string,
-  expectedFileDigest: string,
-  agentDir: string,
-): boolean {
-  if (record === undefined
-    || record.host !== 'antigravity'
-    || record.kind !== 'created'
-    || record.committed.type !== 'file'
-    || record.committed.sha256 !== expectedFileDigest
-    || !ownsPathEntry(record, 'core', recordedKey)) {
-    return false;
-  }
-  const dirStat = lstatSync(agentDir, { throwIfNoEntry: false });
-  if (!dirStat?.isDirectory()) return false;
-  const recordedDir = dirname(recordedKey);
-  const expectedDirIdentity = ledger.directory_identities?.[recordedDir] ?? ledger.directory_identities?.[agentDir];
-  if (expectedDirIdentity === undefined || observeEntryIdentity(agentDir) !== expectedDirIdentity) return false;
-  const entries = readdirSync(agentDir, { withFileTypes: true });
-  return entries.length === 1 && entries[0]!.name === 'agent.md' && entries[0]!.isFile();
-}
-
-function refuseExistingAgySeatAgent(
-  ledger: ReturnType<typeof readLedger>,
-  record: PathRecord | undefined,
-  recordedKey: string,
-  agentDir: string,
-  expectedFileDigest: string,
-): never {
-  if (!record) {
-    throw new HostConfigError('host_config_replacement_refused', `rh has no record of it, so rh does not replace it: ${recordedKey}`);
-  }
-  if (record.owner !== 'core') {
-    throw new HostConfigError('host_config_replacement_refused', `rh records it for ${record.owner}, so rh does not replace it: ${recordedKey}`);
-  }
-  if (record.kind === 'user_managed') {
-    throw new HostConfigError('host_config_replacement_refused', `the user keeps it, so rh does not replace it: ${recordedKey}`);
-  }
-  if (record.committed.type !== 'file' || record.committed.sha256 !== expectedFileDigest) {
-    throw new HostConfigError('host_config_replacement_refused', `the recorded agy agent file differs from its expected digest, so rh does not replace it: ${recordedKey}`);
-  }
-  const proof = pathRecordProof(recordedKey, record);
-  if (proof !== 'current') {
-    const reason = proof === 'replaced'
-      ? 'it holds the bytes that rh wrote, but it is another file-system entry (a copy or a restore)'
-      : proof === 'unproved'
-        ? 'rh recorded no identity for it, so nothing proves that rh wrote it'
-        : 'it changed since rh wrote it';
-    throw new HostConfigError('host_config_replacement_refused', `${reason}, so rh does not replace it: ${recordedKey}`);
-  }
-  const recordedDir = dirname(recordedKey);
-  const expectedDirIdentity = ledger.directory_identities?.[recordedDir] ?? ledger.directory_identities?.[agentDir];
-  if (expectedDirIdentity === undefined || observeEntryIdentity(agentDir) !== expectedDirIdentity) {
-    throw new HostConfigError('host_config_replacement_refused', `the agy agent directory is another file-system entry (a copy or a restore), so rh does not replace it: ${agentDir}`);
-  }
-  throw new HostConfigError('host_config_replacement_refused', `the agy agent directory holds unexpected entries, so rh does not replace it: ${agentDir}`);
 }
 
 /**
@@ -635,23 +357,6 @@ export function writeAgySeatAgent(seat: LaunchSeatId, config: SeatConfigV1, env:
     }]);
     return spec.name;
   });
-}
-
-const FIELDS = ['runtime', 'model', 'advisor_model', 'effort', 'tools', 'fleet'] as const;
-
-function changedKeys(current: SeatsConfigV1, next: SeatsConfigV1): string[] {
-  return [...SEAT_IDS.flatMap(id => {
-    const before = current[id], after = next[id];
-    if (before === null || after === null) return before === after ? [] : [`seats.${id}`];
-    return FIELDS.filter(field => JSON.stringify(before[field]) !== JSON.stringify(after[field]))
-      .map(field => `seats.${id}.${field}`);
-  }),
-  ...ROUTING_KEYS
-    .filter(field => JSON.stringify(current.routing[field]) !== JSON.stringify(next.routing[field]))
-    .map(field => `seats.routing.${field}`),
-  ...SEAT_SCAFFOLD_SUB_AGENTS
-    .filter(role => current.pi_sub_agent_models?.[role] !== next.pi_sub_agent_models?.[role])
-    .map(role => `seats.pi_sub_agent_models.${role}`)];
 }
 
 /** Replaces the `seats` section. It writes only the configuration file; panes that run keep their launch arguments. */
