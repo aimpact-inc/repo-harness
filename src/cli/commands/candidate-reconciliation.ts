@@ -1,27 +1,8 @@
 import { CLI_NAME } from '../../core/skill-surface/cli-name';
-import { createHash, randomUUID } from 'crypto';
 import { sha256Prefixed } from '../../core/evidence/sha256';
-import { parseJsonText } from '../../core/evidence/file-syntax';
-import { isPathInside } from '../../effects/path-containment';
-import {
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  fsyncSync,
-  linkSync,
-  lstatSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readlinkSync,
-  realpathSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'fs';
+import { existsSync, readFileSync, realpathSync } from 'fs';
 import { homedir } from 'os';
-import { isAbsolute, join, relative, resolve, sep } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 
 import type { InstallTargetSpec } from './install';
 import { REPORT_LANGUAGE_FLAG_VALUES, type ReportLanguageFlag } from '../installer/global-context';
@@ -33,23 +14,17 @@ import {
   type HooksByEvent,
 } from '../installer/managed-entries';
 import { ROUTES } from '../hook/route-registry';
-import { readExclusiveDirectoryLockOwner } from '../../effects/locking/exclusive-directory-lock';
+import type { RuntimeTransactionScope } from '../../effects/locking/runtime-transaction-lock';
+import { readCandidatePackageIdentity } from './candidate-package-identity';
 import {
-  runtimeTransactionLockRelativePath,
-  runtimeTransactionRoot,
-  type RuntimeTransactionScope,
-} from '../../effects/locking/runtime-transaction-lock';
+  claimCandidateCapabilityFile,
+  writeCandidateCapabilityFile,
+} from './candidate-reconciliation-capability';
 
 /** Protocol 2 drops the request profile: the candidate reads the recorded plugin selection from the install state. */
 export const CANDIDATE_RECONCILIATION_PROTOCOL = 3;
 export const STAGED_SKILLS_HANDOFF_ENV = 'REPO_HARNESS_RUNTIME_RECONCILIATION_STAGED_SKILLS';
 export const CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL = 1;
-const CANDIDATE_CAPABILITY_NAME = '.candidate-runtime-reconciliation-capability.v1.json';
-
-interface FileIdentity {
-  readonly dev: number;
-  readonly ino: number;
-}
 
 export interface CandidateReconciliationCapability {
   readonly protocol: typeof CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL;
@@ -118,59 +93,6 @@ export interface CandidateReceiptExpectation {
   readonly require_adapter_projection?: boolean;
 }
 
-function fileIdentity(stat: { readonly dev: number; readonly ino: number }): FileIdentity {
-  return { dev: stat.dev, ino: stat.ino };
-}
-
-function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-function canonicalDirectory(path: string, label: string): string {
-  const resolved = resolve(path);
-  const stat = lstatSync(resolved);
-  if (!stat.isDirectory()) throw new Error(`${label} is not a directory: ${resolved}`);
-  return realpathSync(resolved);
-}
-
-function candidateCapabilityPath(transactionBackupRoot: string): string {
-  return join(transactionBackupRoot, CANDIDATE_CAPABILITY_NAME);
-}
-
-function parseCapability(raw: string): CandidateReconciliationCapability {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error('candidate reconciliation capability is not valid JSON');
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('candidate reconciliation capability is not an object');
-  }
-  const value = parsed as Record<string, unknown>;
-  if (
-    value.protocol !== CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL
-    || typeof value.transaction_id !== 'string' || !value.transaction_id.startsWith('sha256:')
-    || typeof value.parent_token !== 'string' || !/^[a-f0-9]{64}$/i.test(value.parent_token)
-    || !Number.isSafeInteger(value.parent_pid) || (value.parent_pid as number) < 1
-    || typeof value.lock_path !== 'string' || !isAbsolute(value.lock_path)
-    || typeof value.lock_owner_token !== 'string' || !/^[1-9]\d*-\d+-[0-9a-f-]{36}$/i.test(value.lock_owner_token)
-    || typeof value.created_at !== 'string'
-  ) {
-    throw new Error('candidate reconciliation capability has invalid shape');
-  }
-  return value as unknown as CandidateReconciliationCapability;
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
-}
-
 /**
  * Publish the one-shot capability only while the predecessor owns the global
  * runtime lock. A hard-link publication avoids replacing a concurrently
@@ -179,7 +101,6 @@ function processIsAlive(pid: number): boolean {
 export function publishCandidateReconciliationCapability(
   input: CandidateReconciliationCapabilityInput,
 ): CandidateReconciliationCapability {
-  const backupRoot = canonicalDirectory(input.transactionBackupRoot, 'candidate reconciliation transaction backup');
   const record: CandidateReconciliationCapability = {
     protocol: CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL,
     transaction_id: input.transactionId,
@@ -189,38 +110,7 @@ export function publishCandidateReconciliationCapability(
     lock_owner_token: input.lockOwnerToken,
     created_at: new Date().toISOString(),
   };
-  parseCapability(JSON.stringify(record));
-  const path = candidateCapabilityPath(backupRoot);
-  const temporary = join(backupRoot, `.${CANDIDATE_CAPABILITY_NAME}.${randomUUID()}.tmp`);
-  let fd: number | null = null;
-  try {
-    fd = openSync(
-      temporary,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    );
-    writeFileSync(fd, `${JSON.stringify(record)}\n`);
-    fsyncSync(fd);
-    const temporaryIdentity = fileIdentity(fstatSync(fd));
-    closeSync(fd);
-    fd = null;
-    // link(2) is an atomic no-replace publication fence in this directory.
-    linkSync(temporary, path);
-    const published = lstatSync(path);
-    if (!published.isFile() || !sameFileIdentity(fileIdentity(published), temporaryIdentity)) {
-      throw new Error('candidate reconciliation capability publication lost ownership');
-    }
-    unlinkSync(temporary);
-    return record;
-  } catch (error) {
-    if (fd !== null) closeSync(fd);
-    try {
-      unlinkSync(temporary);
-    } catch {
-      // The transaction rollback owns cleanup after a failed publication.
-    }
-    throw error;
-  }
+  return writeCandidateCapabilityFile(input.transactionBackupRoot, record);
 }
 
 /**
@@ -236,86 +126,15 @@ export function consumeCandidateReconciliationCapability(
     throw new Error('candidate reconciliation transaction identifier is not bound to its backup root');
   }
   if (scope.kind !== 'global') throw new Error('candidate reconciliation requires the global runtime scope');
-  const canonicalHome = canonicalDirectory(realpathSync(scope.root), 'candidate reconciliation home');
-  const canonicalScope: RuntimeTransactionScope = { kind: scope.kind, root: canonicalHome };
-  const lockRelativePath = runtimeTransactionLockRelativePath(canonicalScope);
-  const transactionRoot = canonicalDirectory(runtimeTransactionRoot(canonicalScope), 'candidate reconciliation transaction root');
-  const backupRoot = canonicalDirectory(request.transaction_backup_root, 'candidate reconciliation transaction backup');
-  if (!isPathInside(transactionRoot, backupRoot) || backupRoot === transactionRoot) {
-    throw new Error(`candidate reconciliation transaction backup is outside the active transaction root: ${backupRoot}`);
-  }
-  const path = candidateCapabilityPath(backupRoot);
-  const observed = lstatSync(path);
-  if (!observed.isFile()) throw new Error('candidate reconciliation capability is not a regular file');
-  const observedIdentity = fileIdentity(observed);
-  const capability = parseCapability(readFileSync(path, 'utf-8'));
-  if (
-    capability.transaction_id !== request.transaction_id
-    || capability.parent_token !== request.parent_token
-  ) {
-    throw new Error('candidate reconciliation capability binding mismatch');
-  }
-  if (capability.parent_pid !== process.ppid || !processIsAlive(capability.parent_pid)) {
-    throw new Error('candidate reconciliation parent process is not the live transaction owner');
-  }
-  const expectedLockPath = join(canonicalHome, lockRelativePath);
-  if (capability.lock_path !== expectedLockPath) {
-    throw new Error('candidate reconciliation capability lock path mismatch');
-  }
-  const lockOwner = readExclusiveDirectoryLockOwner(canonicalHome, lockRelativePath);
-  if (
-    lockOwner === null
-    || lockOwner.lockPath !== capability.lock_path
-    || lockOwner.pid !== capability.parent_pid
-    || lockOwner.token !== capability.lock_owner_token
-  ) {
-    throw new Error('candidate reconciliation parent does not own the active global runtime lock');
-  }
-  const consumed = join(backupRoot, `.${CANDIDATE_CAPABILITY_NAME}.consumed-${randomUUID()}`);
-  renameSync(path, consumed);
-  const claimed = lstatSync(consumed);
-  if (!claimed.isFile() || !sameFileIdentity(fileIdentity(claimed), observedIdentity)) {
-    throw new Error('candidate reconciliation capability changed before consumption');
-  }
-  return capability;
-}
-
-function packageTreeDigest(root: string): string {
-  const hash = createHash('sha256');
-  const excludedDirectories = new Set(['.ai', '.codegraph', '.git', 'node_modules', '_ops']);
-  const visit = (directory: string, prefix: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
-      if (entry.isDirectory() && excludedDirectories.has(entry.name)) continue;
-      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        hash.update(`D\0${relative}\0`);
-        visit(path, relative);
-      } else if (entry.isSymbolicLink()) {
-        hash.update(`L\0${relative}\0${readlinkSync(path)}\0`);
-      } else if (entry.isFile()) {
-        hash.update(`F\0${relative}\0`);
-        hash.update(readFileSync(path));
-        hash.update('\0');
-      }
-    }
-  };
-  visit(root, '');
-  return `sha256:${hash.digest('hex')}`;
-}
-
-function readPackageIdentity(root: string): CandidatePackageIdentity {
-  const packagePath = join(root, 'package.json');
-  const raw = readFileSync(packagePath);
-  const manifest = parseJsonText(raw.toString('utf-8'), packagePath) as { name?: unknown; version?: unknown };
-  if (manifest.name !== 'repo-harness' || typeof manifest.version !== 'string' || manifest.version.length === 0) {
-    throw new Error(`candidate package identity is invalid: ${packagePath}`);
-  }
-  return {
-    root,
-    version: manifest.version,
-    package_digest: packageTreeDigest(root),
-  };
+  return claimCandidateCapabilityFile(
+    {
+      transactionId: request.transaction_id,
+      transactionBackupRoot: request.transaction_backup_root,
+      parentToken: request.parent_token,
+      expectedProtocol: CANDIDATE_RECONCILIATION_CAPABILITY_PROTOCOL,
+    },
+    scope,
+  );
 }
 
 export function candidatePackageIdentity(packageRoot: string): CandidatePackageIdentity {
@@ -323,7 +142,7 @@ export function candidatePackageIdentity(packageRoot: string): CandidatePackageI
   if (!existsSync(join(resolved, 'package.json'))) {
     throw new Error(`candidate package is missing package.json: ${resolved}`);
   }
-  return readPackageIdentity(realpathSync(resolved));
+  return readCandidatePackageIdentity(realpathSync(resolved));
 }
 
 export function routeRegistryDigest(): string {

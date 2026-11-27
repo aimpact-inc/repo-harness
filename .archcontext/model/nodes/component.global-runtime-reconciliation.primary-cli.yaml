@@ -12,6 +12,8 @@ source:
   include:
     - src/cli/commands/global-runtime.ts
     - src/cli/commands/candidate-reconciliation.ts
+    - src/cli/commands/candidate-package-identity.ts
+    - src/cli/commands/candidate-reconciliation-capability.ts
     - src/cli/commands/upgrade.ts
     - src/cli/commands/upgrade-command.ts
     - src/cli/commands/upgrade-registered.ts
