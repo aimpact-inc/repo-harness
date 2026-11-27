@@ -1,9 +1,9 @@
 # workflow-engine/execution-primitives 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ec17b1be60f123845b13cef64829a175c45aea8bf24eafdc662c4384d20d1adc" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-execution-primitives" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4d6f35a4e0362d7e4259464ac570ade6af0df2e8f76b6a4bacd437c5aff1eeb9" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.execution-primitives`(kind `capability`)
-> **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
+> **Matched Prefixes**:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
 > **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
@@ -31,6 +31,7 @@ flowchart LR
   p1_component_execution_primitives_runtime_closeout_62192509["Runtime Closeout"]:::component
   p1_component_execution_primitives_secret_patterns_075f309a["Secret Patterns"]:::component
   p1_component_execution_primitives_session_artifact_io_f1f01a74["Immutable Session Artifact I/O"]:::component
+  p1_component_execution_primitives_shell_quote_07bf827e["POSIX Shell Quoting"]:::component
   p1_component_execution_primitives_task_message_claim_dbe6af55["Task Message Claim Primitives"]:::component
   p1_component_execution_primitives_task_session_record_e7a96008["Task Session Record"]:::component
   p1_component_execution_primitives_terminal_core_39d5e0ae["Terminal Pin and Pane Prefix"]:::component
@@ -45,8 +46,8 @@ flowchart LR
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:260815cb62ec50472f19d89a8600a5fddf6e9d192ceee42905455411689ee100`).
-- Semantic nodes: `19`; declared relations: `5`.
+- Proof: `proven` (`sha256:21bb07c3b352f5d67847a3a3e563f743da2c697d3e83e2ad5bd5f752e46b05dc`).
+- Semantic nodes: `20`; declared relations: `5`.
 
 ### 1.2 模組職責表
 
@@ -64,7 +65,7 @@ flowchart LR
 ### 1.3 規模信號
 
 - 規模量級:`20–50` 個文件 / `2000–5000` 行
-- 匹配前綴:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/core/shell-quote.ts`、`src/effects/path-containment.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
+- 匹配前綴:`src/effects/process-runner.ts`、`src/effects/process-supervisor.ts`、`src/effects/process-group-launcher.ts`、`src/effects/process-group-termination.ts`、`src/effects/process-group-registry.ts`、`src/effects/expensive-run-lock.ts`、`src/effects/readonly-observation.ts`、`src/effects/atomic-append.ts`、`src/effects/locking/**`、`src/effects/git/**`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界
@@ -145,6 +146,8 @@ flowchart LR
   - 無。
 - `component.execution-primitives.session-artifact-io`:
   - 無。
+- `component.execution-primitives.shell-quote`:
+  - 無。
 - `component.execution-primitives.task-message-claim`:
   - `depends-on` → `capability.runtime-harness.evidence-ledger` — Canonicalize task message claim digests with the shared canonical JSON
 - `component.execution-primitives.task-session-record`:
@@ -158,7 +161,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.execution-primitives.antigravity-session` | Antigravity Session Access | `2–5` 個文件 / `100–200` 行 | 未宣告 |
 | `component.execution-primitives.bot-registry` | Bot Registry | `1–2` 個文件 / `200–500` 行 | 未宣告 |
-| `component.execution-primitives.checkout-filesystem` | Checkout Filesystem Primitives | `2–5` 個文件 / `200–500` 行 | 未宣告 |
+| `component.execution-primitives.checkout-filesystem` | Checkout Filesystem Primitives | `5–10` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.cli-layer` | Execution Primitives (cli) | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.github-command` | GitHub CLI Transport | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.hc-client` | hc Client | `1–2` 個文件 / `500–1000` 行 | 未宣告 |
@@ -171,13 +174,14 @@ flowchart LR
 | `component.execution-primitives.runtime-closeout` | Runtime Closeout | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.secret-patterns` | Secret Patterns | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 | `component.execution-primitives.session-artifact-io` | Immutable Session Artifact I/O | `1–2` 個文件 / `50–100` 行 | 未宣告 |
+| `component.execution-primitives.shell-quote` | POSIX Shell Quoting | `1–2` 個文件 / `2–5` 行 | 未宣告 |
 | `component.execution-primitives.task-message-claim` | Task Message Claim Primitives | `2–5` 個文件 / `100–200` 行 | 未宣告 |
 | `component.execution-primitives.task-session-record` | Task Session Record | `1–2` 個文件 / `200–500` 行 | 未宣告 |
 | `component.execution-primitives.terminal-core` | Terminal Pin and Pane Prefix | `2–5` 個文件 / `50–100` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:260815cb62ec50472f19d89a8600a5fddf6e9d192ceee42905455411689ee100`); selectors `5/5`.
+> **Proof**: `proven` (`sha256:21bb07c3b352f5d67847a3a3e563f743da2c697d3e83e2ad5bd5f752e46b05dc`); selectors `5/5`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%

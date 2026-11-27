@@ -1,9 +1,9 @@
 # organization/board 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:f548a2651022d6c44a8a099360d73db319d52f177dbe57337110916a798a7fd3" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-organization-board" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:4d76c7bb9bd0aee627a69419911c39906b4753385efd8464903f679729a09a48" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.organization.board`(kind `capability`)
-> **Matched Prefixes**:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
+> **Matched Prefixes**:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/autopilot.ts`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
 > **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
@@ -46,7 +46,7 @@ flowchart LR
 ### 1.3 規模信號
 
 - 規模量級:`50–100` 個文件 / `10k–20k` 行
-- 匹配前綴:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
+- 匹配前綴:`src/core/board/**`、`src/effects/board/**`、`src/cli/commands/autopilot.ts`、`src/cli/commands/board.ts`、`src/cli/commands/quota.ts`、`src/cli/commands/seats.ts`
 - 排除前綴:`src/effects/board/agy-review-session.ts`、`src/effects/board/antigravity-transcript.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -94,7 +94,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.board.assets-layer` | Board (assets) | `2–5` 個文件 / `20–50` 行 | 未宣告 |
 | `component.board.cli` | Board (cli) | `2–5` 個文件 / `1000–2000` 行 | 未宣告 |
-| `component.board.core` | Board (core) | `20–50` 個文件 / `5000–10000` 行 | 未宣告 |
+| `component.board.core` | Board (core) | `20–50` 個文件 / `10k–20k` 行 | 未宣告 |
 | `component.board.effects` | Board (effects) | `20–50` 個文件 / `5000–10000` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流

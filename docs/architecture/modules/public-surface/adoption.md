@@ -1,8 +1,8 @@
 # public-surface/adoption 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-adoption" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:9abad6f210fe0652aebdaed9489e41e8c22ecdb89ccb3b31f74fd3cf081a2a98" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-public-surface-adoption" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:ef0463bca9830093857dd4e620d2c078644f8968fd4797e905c5fe24676897b7" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.public-surface.adoption`(kind `capability`)
-> **Matched Prefixes**:`src/core/adoption/**`
+> **Matched Prefixes**:`src/core/adoption/**`、`src/effects/adoption/**`、`src/effects/fs-transaction.ts`、`src/cli/commands/adoption-plan.ts`、`src/cli/repo-adoption/**`
 > **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
@@ -41,8 +41,8 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 規模量級:`10–20` 個文件 / `500–1000` 行
-- 匹配前綴:`src/core/adoption/**`
+- 規模量級:`10–20` 個文件 / `2000–5000` 行
+- 匹配前綴:`src/core/adoption/**`、`src/effects/adoption/**`、`src/effects/fs-transaction.ts`、`src/cli/commands/adoption-plan.ts`、`src/cli/repo-adoption/**`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界
@@ -88,7 +88,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `component.adoption.cli-layer` | Adoption (cli) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 | `component.adoption.effects-layer` | Adoption (effects) | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
-| `component.adoption.primary` | Adoption Transaction | 未宣告 `source.include` | 未宣告 |
+| `component.adoption.primary` | Adoption Transaction | `10–20` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.adoption.tests-layer` | Adoption (tests) | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
