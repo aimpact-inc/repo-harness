@@ -14,7 +14,7 @@ import { collectPullRequestMergeReadiness } from '../src/effects/publication/mer
 import { collectBoard, collectBoardThrough, GH_MAX_BUFFER_BYTES, readGhJson, readParent, readLocalRepositoryId, readLocalRepositoryIdAsync, seatScreenHash, seatTerminalsWithBranches, type BoardCollectInput } from '../src/effects/board/collect';
 import { createKeyedSources, KEYED_SOURCE_MAX_AGE_MS } from '../src/effects/board/keyed-sources';
 import { runBoardMerge } from '../src/effects/board/merge';
-import { boardMergeDecisions, renderMergeHoldComment } from '../src/core/board/merge';
+import { boardMergeDecisions, prMergeNotes, renderMergeHoldComment } from '../src/core/board/merge';
 import { AUTOPILOT_LOCAL_AUTHORITY } from '../src/core/board/autopilot';
 import { startAutopilot } from '../src/effects/board/autopilot-store';
 import { runBoardCloseout, stopCodegraphServers } from '../src/effects/board/closeout';
@@ -979,6 +979,96 @@ test.each([
   expect(boardMergeDecisions(board).find(entry => entry.pr === 1491)).toMatchObject({
     eligible: false, reason: 'autopilot_park_required', detail: expect.stringContaining(`[${category}]`),
   });
+});
+
+test('round 1 PR body evidence accepts the shipped rollback and executed verification', () => {
+  const template = '## Risk and rollback\n\nRisk: An older park can hold a PR. Rollback: `git revert <squash-commit>`.';
+  expect(prMergeNotes(template + '\n\n## Verification\n\n- `bun test` — exit 0.')).toEqual({ rollback: true, verification: true });
+  for (const value of ['TBD', 'none']) expect(prMergeNotes(`Rollback: ${value}`).rollback).toBe(false);
+  for (const outcome of ['not run', 'skipped']) {
+    const verification = '## Verification\n\n- `bun test`';
+    expect(prMergeNotes(`${verification} — ${outcome}.`).verification).toBe(false);
+  }
+});
+
+test('round 1 owner-boundary paths stop a signed PR', () => {
+  for (const [path, category] of [
+    ['src/effects/evidence/secret-env.ts', 'high_security_uncertain'],
+    ['src/effects/operator/worktree-cleanup-removal.ts', 'high_security_uncertain'],
+    ['scripts/release-owner-steps.sh', 'deployment_request'],
+  ]) {
+    const board = replay(mergeReplay({ pulls: secondPass }, { ...AUTOPILOT_ON,
+      renamed: file => file.startsWith('.archcontext/model/') ? path : undefined,
+    }));
+    expect(boardMergeDecisions(board).find(entry => entry.pr === 1491)).toMatchObject({
+      eligible: false, reason: 'autopilot_park_required', detail: expect.stringContaining(`[${category}]`),
+    });
+  }
+});
+
+test('round 1 planned PR waits for a park reached through an external blocker', () => {
+  const edge = (number: number, nameWithOwner = 'Ancienttwo/repo-harness') => ({ number, state: 'OPEN', repository: { nameWithOwner } });
+  const input = replayInput(mergeReplay({
+    parent: data => { issueNode(data, 1475).blockedBy.nodes.push(edge(1500)); }, pulls: secondPass,
+  }, AUTOPILOT_ON));
+  const at = '2026-11-02T21:00:00Z';
+  const seen: string[] = [];
+  const gh_runner: BoardCollectInput['gh_runner'] = args => {
+    if (!args.some(arg => arg.startsWith('query=query ExternalBlocker'))) return input.gh_runner!(args);
+    const number = args.includes('number=1500') ? 1500 : 1501;
+    const repository = number === 1500 ? 'Ancienttwo/repo-harness' : 'Other/project';
+    expect(args).toContain(`owner=${repository.split('/')[0]}`);
+    expect(args).toContain(`name=${repository.split('/')[1]}`);
+    seen.push(`${repository}#${number}`);
+    const issue = { ...edge(number, repository), comments: { pageInfo: { hasPreviousPage: false }, nodes: number === 1501 ? [comment(PARK, at)] : [] },
+      blockedBy: { pageInfo: { hasNextPage: false }, nodes: number === 1500 ? [edge(1501, 'Other/project')] : [] } };
+    return { status: 0, stdout: JSON.stringify({ data: { repository: { issue } } }) };
+  };
+  const result = runBoardMerge({ ...input, gh_runner, pr: 1491, dry_run: true });
+  expect(seen).toEqual(['Ancienttwo/repo-harness#1500', 'Other/project#1501']);
+  expect(result.decisions.find(entry => entry.pr === 1491)).toMatchObject({ reason: 'merge_order', detail: expect.stringContaining('Other/project#1501') });
+});
+
+test('round 1 completes truncated holds for both merge order and attention', () => {
+  const at = '2026-11-02T21:00:00Z';
+  const park = comment(PARK, at);
+  const hold = comment('repo-harness merge hold\nReason: waiting on a decision', at);
+  const earlier = Array.from({ length: 50 }, (_, offset) => comment('Progress update', new Date(Date.parse(at) - (50 - offset) * 1000).toISOString()));
+  const shortPage = (record: Json) => ({ pageInfo: { hasPreviousPage: true }, nodes: [...earlier.slice(1), record] });
+  const input = replayInput(mergeReplay({
+    order: [1479, 1475],
+    parent: data => { issueNode(data, 1479).comments = shortPage(park); },
+    pulls: data => {
+      secondPass(data);
+      const pr = data.repository.pr1494;
+      pr.isDraft = false;
+      pr.comments = shortPage(hold);
+      pr.body = 'Closes #1476\n\nRollback: Revert the squash commit.';
+    },
+  }, { ...AUTOPILOT_ON, now: new Date('2026-11-05T02:00:00Z'), ready: [1491, 1494] }));
+  const seen: number[] = [];
+  const gh_runner: BoardCollectInput['gh_runner'] = args => {
+    const match = /\/issues\/(1479|1494)\/comments\?/u.exec(args.at(-1) ?? '');
+    if (match === null) return input.gh_runner!(args);
+    const number = Number(match[1]);
+    seen.push(number);
+    const thread = [...earlier, number === 1479 ? park : hold].map(({ url, createdAt, authorAssociation, body }) =>
+      ({ html_url: url, created_at: createdAt, author_association: authorAssociation, body }));
+    return { status: 0, stdout: JSON.stringify([thread]) };
+  };
+  const board = collectBoard({ ...input, gh_runner });
+  expect(seen.sort()).toEqual([1479, 1494]);
+  expect(boardMergeDecisions(board).find(entry => entry.pr === 1491)).toEqual({ pr: 1491, eligible: true });
+  expect(board.pull_requests.find(entry => entry.number === 1494)?.merge_hold.status).toBe('held');
+  const failed: BoardV1 = { ...board, pull_requests: board.pull_requests.map(pr => pr.number === 1494
+    ? { ...pr, required_check: { status: 'failure', completed_at: at, contexts: [] } } : pr) };
+  expect(evaluateBoardAttention(failed).findings.some(finding => finding.rule === 'A14' && finding.pull_requests.includes(1494))).toBe(false);
+});
+
+test('round 1 a parent park applies as a batch hold when auto-pilot is off', () => {
+  const edit = { parent: (data: Json) => { data.repository.issue.comments.nodes.push(comment(PARK, '2026-11-02T21:00:00Z')); }, pulls: secondPass };
+  expect(mergeReason(edit)).toBe('held');
+  expect(mergeReason(edit, AUTOPILOT_ON)).toBe('eligible');
 });
 
 test.each(['A1', 'A14', 'A15', 'A20'] as const)('a comment hold silences %s on the linked pull request', (rule) => {

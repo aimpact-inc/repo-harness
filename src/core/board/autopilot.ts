@@ -104,6 +104,7 @@ export interface AutopilotStatusDocumentV1 {
   readonly stop_reason: string | null;
   readonly last_advisor_tick_at: string | null;
   readonly parked: readonly AutopilotParkedItemV1[];
+  readonly parked_unavailable?: string;
 }
 
 export type AutopilotBoardAuthorityV1 =
@@ -583,6 +584,7 @@ export function buildAutopilotStatusDocument(input: {
   readonly exists: boolean;
   readonly state: AutopilotStateV1;
   readonly parked?: readonly AutopilotParkedItemV1[];
+  readonly parked_unavailable?: string;
 }): AutopilotStatusDocumentV1 {
   return Object.freeze({
     ...input.state,
@@ -590,6 +592,7 @@ export function buildAutopilotStatusDocument(input: {
     state_path: input.path,
     state_exists: input.exists,
     parked: Object.freeze([...(input.parked ?? [])]),
+    ...(input.parked_unavailable === undefined ? {} : { parked_unavailable: input.parked_unavailable }),
   });
 }
 
@@ -603,7 +606,9 @@ export function formatAutopilotStatusText(doc: AutopilotStatusDocumentV1): strin
     `Targets: workers=${doc.target_parallel_workers} ci=${doc.target_parallel_ci}`,
     `State file: ${doc.state_path}`,
   ];
-  if (doc.parked.length === 0) {
+  if (doc.parked_unavailable !== undefined) {
+    lines.push(`Parked (Needs Owner): unavailable (${doc.parked_unavailable})`);
+  } else if (doc.parked.length === 0) {
     lines.push('Parked (Needs Owner): none');
   } else {
     lines.push(`Parked (Needs Owner): ${doc.parked.length}`);

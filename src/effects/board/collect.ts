@@ -1,7 +1,7 @@
 import { execFile, spawnSync, type ExecFileException } from 'child_process';
 import { architecturePort, isArchitectureUnavailable, type ArchctxProviderOptions } from '../../core/architecture/contracts';
 import {
-  linkedPullRequests, projectBoard, seatTerminal, type BoardAcceptanceMergeV1, type BoardDailyRunInputV1, type BoardExecutionV1, type BoardHostPortsV1,
+  bodyLinks, linkedPullRequests, planFromComments, projectBoard, seatTerminal, type BoardAcceptanceMergeV1, type BoardDailyRunInputV1, type BoardExecutionV1, type BoardHostPortsV1,
   type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatLivenessV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
 } from '../../core/board/board';
 import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
@@ -10,9 +10,11 @@ import { readAutopilotStateIfGitRepo } from './autopilot-store';
 import { sha256Hex } from '../../core/evidence/sha256';
 import { isA22TaskSeat, STALLED_WORKING_MS } from '../../core/board/attention';
 import { isAllowedEditPath, readReviewI3Paths, workflowEditAllowed } from '../../core/board/hazards';
+import { blockerKey, mergeHoldNeedsFullThread, reachableOpenBlockers, readParkedItem, type BoardExternalBlockerV1 } from '../../core/board/merge';
 import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
 import {
-  BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeParentRead, decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardParentReadV1, type BoardPullRequestReadV1,
+  BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeExternalBlocker, decodeIssueComments, decodeParentRead,
+  decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardCommentPageV1, type BoardParentReadV1, type BoardPullRequestReadV1,
 } from '../../core/board/source';
 import { normalizeCapabilityPath } from '../../core/capabilities/registry';
 import { HC_MIN_VERSION } from '../../core/terminal/herdr-pin';
@@ -40,6 +42,7 @@ const SEAT_GIT_TIMEOUT_MS = 10_000;
 
 const COMMENT_NODES = 'nodes { url createdAt authorAssociation body }';
 const COMMENTS = `comments(last: ${BOARD_PAGE.comments}) { pageInfo { hasPreviousPage } ${COMMENT_NODES} }`;
+const BLOCKED_BY = `blockedBy(first: ${BOARD_PAGE.blocked_by}) { pageInfo { hasNextPage } nodes { number state repository { nameWithOwner } } }`;
 const ISSUE_FIELDS = `number title url state labels(first: ${BOARD_PAGE.labels}) { pageInfo { hasNextPage } nodes { name } } milestone { title }`;
 /** The parent thread holds the plan, the coordinator claim and the merge holds, so the read follows its comment cursor to the oldest page. */
 const parentComments = (before: string) => `comments(last: ${BOARD_PAGE.parent_comments}${before}) { pageInfo { hasPreviousPage startCursor } ${COMMENT_NODES} }`;
@@ -57,7 +60,7 @@ export const PARENT_QUERY = `query($owner: String!, $name: String!, $number: Int
       ${ISSUE_FIELDS} ${parentComments('')}
       subIssues(first: ${BOARD_PAGE.sub_issues}, after: $after) { pageInfo { hasNextPage endCursor } nodes {
         ${ISSUE_FIELDS} ${COMMENTS}
-        blockedBy(first: ${BOARD_PAGE.blocked_by}) { pageInfo { hasNextPage } nodes { number state } }
+        ${BLOCKED_BY}
         timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], last: ${BOARD_PAGE.timeline}) { pageInfo { hasPreviousPage } nodes {
           ... on CrossReferencedEvent { source { ... on PullRequest { number repository { nameWithOwner } } } }
         } }
@@ -65,6 +68,12 @@ export const PARENT_QUERY = `query($owner: String!, $name: String!, $number: Int
     }
   }
   repairs: search(query: $repairs, type: ISSUE, first: ${BOARD_PAGE.repairs}) { issueCount nodes { ... on Issue { number body } } }
+}`;
+
+const EXTERNAL_BLOCKER_QUERY = `query ExternalBlocker($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $number) {
+    number state repository { nameWithOwner } ${BLOCKED_BY} ${COMMENTS}
+  } }
 }`;
 
 /** The identity, review and head-rollup fields are the readiness inputs of the keyed source store; nested thread comments stay out. */
@@ -150,6 +159,12 @@ export function runGh(input: GhInput, args: readonly string[]): GhCallResult {
 /** One gh call that prints JSON; a failed call or invalid JSON is a `BoardCollectError`. */
 export function readGhJson(input: GhInput, args: readonly string[]): unknown {
   return ghJson(args, runGh(input, args));
+}
+
+/** The issues endpoint reads comments of both issue and pull request threads. */
+export function readIssueComments(input: GhInput, repository: string, number: number): BoardCommentPageV1 {
+  const subject = `repos/${repository}/issues/${number}/comments?per_page=100`;
+  return decodeIssueComments(readGhJson(input, ['api', '--hostname', 'github.com', '--paginate', '--slurp', subject]), subject);
 }
 
 /** One gh call that prints text; the board review and the board dispatch post their comments with it. A failed call is a `BoardCollectError`. */
@@ -577,6 +592,34 @@ export function readPullRequests(input: GhInput, owner: string, name: string, nu
   return decodePullRequestsRead({ repository }, numbers);
 }
 
+/** Resolve the live graph from the issues of open PRs. An external vertex is read once per board. */
+function readExternalBlockers(input: GhInput, parent: BoardParentReadV1, prs: readonly BoardPullRequestReadV1[]): readonly BoardExternalBlockerV1[] {
+  const repository = parent.repository.name_with_owner;
+  const items = new Map(parent.sub_issues.map(item => [item.number, item] as const));
+  const seeds = prs.flatMap(pr => {
+    const { closes, refs } = bodyLinks(repository, pr.body);
+    const linked = [...closes, ...refs].filter(number => items.has(number));
+    const open = linked.filter(number => items.get(number)?.state === 'open');
+    return open.length > 0 ? open : linked;
+  });
+  const external = new Map<string, BoardExternalBlockerV1>();
+  reachableOpenBlockers(repository, [...new Set(seeds)], ref => {
+    const local = ref.repository.toLowerCase() === repository.toLowerCase() ? items.get(ref.number) : undefined;
+    if (local !== undefined) return local;
+    const key = blockerKey(ref);
+    const known = external.get(key);
+    if (known !== undefined) return known;
+    const [owner, name] = ref.repository.split('/') as [string, string];
+    const read = decodeExternalBlocker(graphql(input, EXTERNAL_BLOCKER_QUERY, { owner, name, number: ref.number }), ref.repository, ref.number);
+    const comments = read.state === 'open' && read.comments.truncated ? readIssueComments(input, ref.repository, ref.number) : read.comments;
+    const blocker = { ...ref, state: read.state, blocked_by: read.blocked_by,
+      parked: read.state === 'open' && readParkedItem('issue', ref.number, comments) !== null };
+    external.set(key, blocker);
+    return blocker;
+  });
+  return [...external.values()];
+}
+
 /** One board read through a fresh keyed source store: the path of every act. */
 export function collectBoard(input: BoardCollectInput): BoardV1 {
   return collectBoardThrough(input, createKeyedSources());
@@ -592,8 +635,13 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
   const candidates = [...new Set(parent.sub_issues.flatMap(issue => issue.pull_request_candidates))].sort((left, right) => left - right);
   const reads = readPullRequests(input, owner, name, candidates);
   const linked = linkedPullRequests(parent, reads);
+  const open = linked.filter(read => read.state === 'open');
+  const holdComments = new Map([...parent.sub_issues, ...open].filter(read => mergeHoldNeedsFullThread(read.comments))
+    .map(read => [read.number, readIssueComments(input, repository, read.number)] as const));
+  const externalBlockers = autopilotEnabled && planFromComments(parent.parent.comments).status === 'observed'
+    ? readExternalBlockers(input, parent, open) : [];
   const readinessTransport = boardReadinessTransport(input, repository);
-  const readiness = linked.filter(read => read.state === 'open').map((read) => {
+  const readiness = open.map((read) => {
     const selection: PullRequestSelectionV2 = {
       provider_repository_id: String(parent.repository.database_id), repository, pr_number: read.number,
       expected_head_sha: read.head_sha, expected_base_sha: read.base_sha,
@@ -607,8 +655,7 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
   });
   const policy = defaultBranchPolicy(input, repository, parent.repository.default_branch);
   const i3 = i3Paths(policy);
-  const evidence = new Map(linked.filter(read => read.state === 'open')
-    .map(read => [read.number, tierEvidence(input, repository, read, i3, autopilotEnabled)] as const));
+  const evidence = new Map(open.map(read => [read.number, tierEvidence(input, repository, read, i3, autopilotEnabled)] as const));
   const seats = execution(input, parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
     new Set(linked.map(read => String(read.number))), observedAt);
   return projectBoard({
@@ -616,6 +663,8 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
     parent,
     acceptance_merge: acceptanceMerge(policy),
     autopilot,
+    hold_comments: holdComments,
+    ...(externalBlockers.length === 0 ? {} : { autopilot_external_blockers: externalBlockers }),
     review_evidence: { i3_paths: i3, pull_requests: evidence },
     pull_requests: reads,
     readiness,

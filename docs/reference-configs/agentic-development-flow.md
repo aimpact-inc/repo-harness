@@ -158,9 +158,9 @@ The board rule R5 reads only the rows with `path_visible: true`: a changed path 
 
 | High signal | Paths that R5 reads |
 | --- | --- |
-| Reads, moves or exposes credentials, tokens or secrets. | `src/core/security/**` |
-| Changes a path that deletes files, worktrees, branches or seats. | `src/effects/board/closeout.ts`, `src/cli/installer/uninstall.ts`, `scripts/ship-worktrees.sh`, `scripts/worktree-merge-lib.sh` |
-| Changes release, publish or deploy, including `deploy/sql/`. | `deploy/sql/**`, `src/core/release/**`, `src/effects/release/**`, `scripts/check-npm-release.sh`, `scripts/check-release-published.sh` |
+| Reads, moves or exposes credentials, tokens or secrets. | `src/core/security/**`, `src/effects/evidence/secret-env.ts` |
+| Changes a path that deletes files, worktrees, branches or seats. | `src/effects/board/closeout.ts`, `src/effects/operator/worktree-cleanup-removal.ts`, `src/cli/installer/uninstall.ts`, `scripts/ship-worktrees.sh`, `scripts/worktree-merge-lib.sh` |
+| Changes release, publish or deploy, including `deploy/sql/`. | `deploy/sql/**`, `src/core/release/**`, `src/effects/release/**`, `scripts/check-npm-release.sh`, `scripts/check-release-published.sh`, `scripts/release-owner-steps.sh` |
 <!-- review-high-list:list:end -->
 
 Review follows the `repo-harness-issue-flow` skill, [references/acceptor.md](../../assets/skills/repo-harness-issue-flow/references/acceptor.md). The tier selects the depth: no independent review for Low, one fresh-context review from a model family different from the writer's for Medium, and the gatekeeper plus one review for High, at least one of the two from a model family different from the writer's. The second High review covers I1, I2 and configured I3 paths (server-side auth, row-level security, entitlement or release SQL paths that the repository's policy names). The two High reviews start in parallel on the same head. The round rules (who reviews each round, the claims of a round, the round-2 scope and the merge-or-stop rule) are only in [references/acceptor.md §2.2](../../assets/skills/repo-harness-issue-flow/references/acceptor.md#22-rounds). The Acceptor SOP owns the round, findings and publish steps.

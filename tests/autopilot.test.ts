@@ -543,6 +543,11 @@ test('CLI rh autopilot start|stop|status handles cadence, stop reason, JSON/text
   expect(statusText.stdout).toContain('Last advisor tick: none');
   expect(statusText.stdout).toContain('pull_request #3590 [high_security_uncertain]: Confirm I1 scope');
   expect(statusText.stdout).not.toContain('#3591');
+  const offline = await runAutopilotCli(['autopilot', 'status', '--json'], {
+    ...ports, readParked: () => { throw new AutopilotError('autopilot_parked_read_failed', 'GitHub unavailable'); },
+  });
+  expect(offline.exitCode).toBe(0);
+  expect(JSON.parse(offline.stdout)).toMatchObject({ enabled: true, parked_unavailable: 'GitHub unavailable' });
 
   clock = new Date('2026-11-27T13:00:00.000Z');
   const stopped = await runAutopilotCli(['autopilot', 'stop', '--reason', 'manual check', '--json'], ports);

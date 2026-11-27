@@ -11,7 +11,7 @@
 import type { Nodes } from 'mdast';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { isRecord } from '../evidence/is-record';
-import { GITHUB_NAME_PATTERN, GITHUB_OWNER_PATTERN } from './github-repository';
+import { GITHUB_NAME_PATTERN, GITHUB_OWNER_PATTERN, GITHUB_REPOSITORY } from './github-repository';
 
 import { BoardSourceError, type BoardCommentPageV1 } from './protocol-comments';
 
@@ -33,8 +33,15 @@ export interface BoardIssueReadV1 {
   readonly comments: BoardCommentPageV1;
 }
 
+export interface BoardIssueDependencyV1 {
+  readonly number: number;
+  readonly state: 'open' | 'closed';
+  /** Omitted for an issue in the repository that owns the edge. */
+  readonly repository?: string;
+}
+
 export interface BoardSubIssueReadV1 extends BoardIssueReadV1 {
-  readonly blocked_by: readonly { readonly number: number; readonly state: 'open' | 'closed' }[];
+  readonly blocked_by: readonly BoardIssueDependencyV1[];
   /** Same-repository pull requests whose timeline cross-references this issue. Their bodies decide the link. */
   readonly pull_request_candidates: readonly number[];
 }
@@ -186,6 +193,46 @@ function issue(value: unknown, label: string): BoardIssueReadV1 {
   };
 }
 
+function blockedBy(connection: unknown, label: string, repository: string): readonly BoardIssueDependencyV1[] {
+  return Object.freeze(nodes(connection, label, 'hasNextPage').map((edge, at) => {
+    const blocker = obj(edge, `${label}[${at}]`);
+    const target = blocker.repository === undefined ? repository : repositoryName(blocker.repository, `${label}[${at}].repository`);
+    return Object.freeze({
+      number: int(blocker.number, `${label} number`), state: issueState(blocker.state, `${label} state`),
+      ...(target.toLowerCase() === repository.toLowerCase() ? {} : { repository: target }),
+    });
+  }));
+}
+
+function repositoryName(value: unknown, label: string): string {
+  const name = str(obj(value, label).nameWithOwner, `${label}.nameWithOwner`);
+  if (!GITHUB_REPOSITORY.test(name)) fail(`${label}.nameWithOwner is not owner/name`);
+  return name;
+}
+
+export function decodeExternalBlocker(data: unknown, repository: string, number: number): Pick<BoardSubIssueReadV1, 'state' | 'blocked_by' | 'comments'> {
+  const label = `blocker ${repository}#${number}`;
+  const node = obj(obj(obj(data, label).repository, `${label} repository`).issue, `${label} issue`);
+  if (node.number !== number || repositoryName(node.repository, label).toLowerCase() !== repository.toLowerCase()) fail(`${label} identity does not match`);
+  return {
+    state: issueState(node.state, `${label}.state`),
+    blocked_by: blockedBy(node.blockedBy, `${label}.blockedBy`, repository),
+    comments: comments(node.comments, `${label}.comments`),
+  };
+}
+
+/** The complete REST comment read shared by hold collection, park status and board posts. */
+export function decodeIssueComments(pages: unknown, label: string): BoardCommentPageV1 {
+  if (!Array.isArray(pages) || pages.length === 0 || !pages.every(Array.isArray)) fail(`${label} has no comment page list`);
+  return { truncated: false, comments: pages.flat().map((entry, at) => {
+    const comment = obj(entry, `${label} comment ${at}`);
+    return {
+      url: str(comment.html_url, `${label} comment URL`), created_at: time(comment.created_at, `${label} comment time`),
+      author_association: str(comment.author_association, `${label} comment author association`), body: str(comment.body, `${label} comment body`),
+    };
+  }) };
+}
+
 function subIssueRead(entry: unknown, label: string, repository: string): BoardSubIssueReadV1 {
   const node = obj(entry, label);
   const candidates = nodes(node.timelineItems, `${label}.timelineItems`, 'hasPreviousPage').flatMap((item) => {
@@ -197,10 +244,7 @@ function subIssueRead(entry: unknown, label: string, repository: string): BoardS
   });
   return Object.freeze({
     ...issue(node, label),
-    blocked_by: Object.freeze(nodes(node.blockedBy, `${label}.blockedBy`, 'hasNextPage').map((edge, edgeIndex) => {
-      const blocker = obj(edge, `${label}.blockedBy[${edgeIndex}]`);
-      return Object.freeze({ number: int(blocker.number, `${label}.blockedBy number`), state: issueState(blocker.state, `${label}.blockedBy state`) });
-    })),
+    blocked_by: blockedBy(node.blockedBy, `${label}.blockedBy`, repository),
     pull_request_candidates: Object.freeze([...new Set(candidates)].sort((left, right) => left - right)),
   });
 }

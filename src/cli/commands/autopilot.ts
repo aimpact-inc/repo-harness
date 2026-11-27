@@ -27,6 +27,14 @@ export function buildAutopilotCommand(ports: AutopilotCommandPorts = {}): Comman
   const cwd = ports.cwd ?? (() => process.cwd());
   const now = ports.now ?? (() => new Date());
   const readParked = ports.readParked ?? (repo_root => readParkedItems({ repo_root }));
+  const parkedStatus = (repoRoot: string) => {
+    try {
+      return { parked: readParked(repoRoot) };
+    } catch (error) {
+      if (!(error instanceof AutopilotError) || error.code !== 'autopilot_parked_read_failed') throw error;
+      return { parked_unavailable: error.message };
+    }
+  };
 
   const autopilot = new Command('autopilot')
     .description('Manage local repository auto-pilot state and inspect status');
@@ -78,7 +86,7 @@ export function buildAutopilotCommand(ports: AutopilotCommandPorts = {}): Comman
       try {
         const repoRoot = cwd();
         const read = readAutopilotState(repoRoot);
-        const doc = buildAutopilotStatusDocument({ ...read, parked: readParked(repoRoot) });
+        const doc = buildAutopilotStatusDocument({ ...read, ...parkedStatus(repoRoot) });
         process.stdout.write(options.json === true ? `${JSON.stringify(doc)}\n` : `${formatAutopilotStatusText(doc)}\n`);
       } catch (error) {
         handleAutopilotError(error);

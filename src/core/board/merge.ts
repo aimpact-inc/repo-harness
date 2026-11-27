@@ -1,10 +1,11 @@
+import type { Nodes, Paragraph } from 'mdast';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { isRecord } from '../evidence/is-record';
 import { isAutopilotParkCategory, type AutopilotParkCategory, type AutopilotParkedItemV1 } from './autopilot';
 import type { BoardItemV1, BoardPullRequestV1, BoardRequiredCheckV1, BoardV1 } from './board';
 import { pathHighHits } from './hazards';
 import { planOrderUnits } from './plan-block';
-import { field, protocolComments, type BoardCommentPageV1 } from './source';
+import { field, newestProtocolComment, protocolComments, type BoardCommentPageV1, type BoardIssueDependencyV1 } from './source';
 
 /**
  * `rh board merge` eligibility. A GitHub comment is a record, never
@@ -83,6 +84,17 @@ function parseParkFields(body: string): BoardMergeHoldParkV1 | undefined {
   return Object.freeze({ category, reason });
 }
 
+function activeMergeHolds(page: BoardCommentPageV1, released: string | undefined) {
+  return protocolComments(page, MERGE_HOLD_HEADER).filter(record => released === undefined || record.created_at >= released);
+}
+
+/** A visible active hold needs the older page to rule out another hold on the same thread. */
+export function mergeHoldNeedsFullThread(page: BoardCommentPageV1): boolean {
+  if (!page.truncated) return false;
+  const released = newestProtocolComment(page, MERGE_HOLD_RELEASED_HEADER)?.created_at;
+  return activeMergeHolds(page, released).length > 0;
+}
+
 /**
  * Every hold of one thread stays in force until a strictly newer release on
  * that thread. A release with the same time as a hold does not end it, so an
@@ -92,11 +104,10 @@ function parseParkFields(body: string): BoardMergeHoldParkV1 | undefined {
  * (the parent).
  */
 export function readMergeHold(page: BoardCommentPageV1, scoped: boolean): BoardMergeHoldV1 {
-  const released = protocolComments(page, MERGE_HOLD_RELEASED_HEADER).map(record => record.created_at).sort().at(-1) ?? null;
-  const boundary = page.comments.map(comment => comment.created_at).sort()[0] ?? null;
-  if (page.truncated && (released === null || boundary === null || released <= boundary)) return { status: 'unknown', reason: 'comments_truncated' };
-  const holds = protocolComments(page, MERGE_HOLD_HEADER)
-    .filter(record => released === null || record.created_at >= released)
+  const released = newestProtocolComment(page, MERGE_HOLD_RELEASED_HEADER)?.created_at;
+  const boundary = page.comments.map(comment => comment.created_at).sort()[0];
+  if (page.truncated && (released === undefined || boundary === undefined || released <= boundary)) return { status: 'unknown', reason: 'comments_truncated' };
+  const holds = activeMergeHolds(page, released)
     .map((record) => {
       const line = record.body.replace(/\r\n/gu, '\n').split('\n').find(entry => entry.startsWith('Issues: '));
       const issues = !scoped || line === undefined ? [] : [...line.matchAll(/#([1-9][0-9]*)/gu)].map(match => Number(match[1]));
@@ -134,7 +145,7 @@ function prHoldThreads(board: BoardV1, pr: BoardPullRequestV1, items: readonly n
   const parent = board.merge_hold;
   return [
     { where: `parent #${board.parent.number}`, hold: parent, records: parent.status === 'held' ? parent.holds.filter(record =>
-      record.issues === null ? record.park === undefined : record.issues.some(number => items.includes(number))) : [] },
+      record.issues === null ? board.autopilot === undefined || record.park === undefined : record.issues.some(number => items.includes(number))) : [] },
     ...board.items.filter(item => items.includes(item.number)).map(item => ({ where: `issue #${item.number}`, hold: item.merge_hold,
       records: item.merge_hold.status === 'held' ? item.merge_hold.holds : [] })),
     { where: `PR #${pr.number}`, hold: pr.merge_hold, records: pr.merge_hold.status === 'held' ? pr.merge_hold.holds : [] },
@@ -205,38 +216,78 @@ function issueIsParked(board: BoardV1, item: BoardItemV1): boolean {
   });
 }
 
-/** Follow open blocked-by edges, including those through another item of the candidate unit. */
-function reachableOpenBlockers(seeds: readonly number[], onBoard: ReadonlyMap<number, BoardItemV1>): Set<number> {
-  const seen = new Set<number>();
-  const pending = [...seeds];
-  while (pending.length > 0) {
-    const item = onBoard.get(pending.pop()!);
-    for (const blocker of item?.blocked_by ?? []) {
-      if (blocker.state !== 'open' || seen.has(blocker.number)) continue;
-      seen.add(blocker.number);
-      pending.push(blocker.number);
-    }
-  }
-  return seen;
+export interface BoardBlockerRefV1 {
+  readonly repository: string;
+  readonly number: number;
 }
 
-/** Read the rollback line and command outcomes from the PR body template. */
+type BoardBlockerNode = { readonly state: 'open' | 'closed'; readonly blocked_by: readonly BoardIssueDependencyV1[] };
+
+export interface BoardExternalBlockerV1 extends BoardBlockerRefV1, BoardBlockerNode {
+  readonly parked: boolean;
+}
+
+export function blockerKey(ref: BoardBlockerRefV1): string {
+  return `${ref.repository.toLowerCase()}#${ref.number}`;
+}
+
+/** Visit each reachable open dependency once, even if the graph crosses repositories or has a cycle. */
+export function reachableOpenBlockers(
+  repository: string,
+  seeds: readonly number[],
+  lookup: (ref: BoardBlockerRefV1) => BoardBlockerNode | undefined,
+): ReadonlyMap<string, BoardBlockerRefV1> {
+  const seen = new Set<string>();
+  const blockers = new Map<string, BoardBlockerRefV1>();
+  const follow = (ref: BoardBlockerRefV1, node: BoardBlockerNode | undefined): BoardBlockerRefV1[] =>
+    (node?.blocked_by ?? []).filter(edge => edge.state === 'open').map(edge => ({ repository: edge.repository ?? ref.repository, number: edge.number }));
+  const pending = seeds.flatMap(number => {
+    const ref = { repository, number };
+    return follow(ref, lookup(ref));
+  });
+  while (pending.length > 0) {
+    const ref = pending.pop()!;
+    const key = blockerKey(ref);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const node = lookup(ref);
+    if (node?.state === 'closed') continue;
+    blockers.set(key, ref);
+    pending.push(...follow(ref, node));
+  }
+  return blockers;
+}
+
+function inlineText(node: Nodes): string {
+  if (node.type === 'text' || node.type === 'inlineCode') return node.value;
+  return 'children' in node ? node.children.map(inlineText).join('') : '';
+}
+
+function rollbackInstruction(text: string, section: string): boolean {
+  const explicit = /(?:^|\n)[ \t]*Rollback:[ \t]*([^\n]*)/iu.exec(text)?.[1];
+  const inline = section === 'risk and rollback' ? /\bRollback:[ \t]*([^\n]*)/iu.exec(text)?.[1] : undefined;
+  const instruction = (explicit ?? inline ?? (section === 'rollback' ? text : '')).trim();
+  return /[\p{L}\p{N}]/u.test(instruction)
+    && !/^(?:<[^>]+>[.!]?$|(?:tbd|none|n\/?a|todo|not applicable|no rollback)\b)/iu.test(instruction);
+}
+
+function executedVerification(paragraph: Paragraph): boolean {
+  const at = paragraph.children.findIndex(child => child.type === 'inlineCode' && child.value.trim() !== '');
+  if (at < 0) return false;
+  const outcome = paragraph.children.slice(at + 1).map(inlineText).join('').trimStart().replace(/^[:–—-]\s*/u, '');
+  return /^(?:pass(?:ed)?\b|success(?:ful)?\b|succeeded\b|ok\b|exit(?: code| status)?[: ]+0\b|[1-9][0-9]*\s+(?:tests?\s+)?pass(?:ed)?\b|[1-9][0-9]*\/[1-9][0-9]*\b)/iu.test(outcome);
+}
+
+/** Read the rollback instruction and recorded successful commands from the PR body template. */
 export function prMergeNotes(body: string): { readonly rollback: boolean; readonly verification: boolean } {
   let section = '';
   let rollback = false;
   let verification = false;
-  const recorded = (text: string): boolean => /[\p{L}\p{N}]/u.test(text) && !/^\s*<[^>]+>\s*[.]?$/u.test(text);
   for (const node of fromMarkdown(body).children) {
-    if (node.type === 'heading' && node.depth <= 2) {
-      section = node.children.filter(child => child.type === 'text').map(child => child.value).join('').trim().toLowerCase();
-    } else if (node.type === 'paragraph') {
-      const line = node.children.map(child => child.type === 'text' || child.type === 'inlineCode' ? child.value : '').join('');
-      const instruction = section === 'rollback' ? line : /^Rollback:[ \t]*(.*)$/imu.exec(line)?.[1];
-      rollback ||= instruction !== undefined && recorded(instruction);
-    } else if (section === 'verification' && node.type === 'list') {
-      verification ||= node.children.some(item => item.children.some(paragraph => paragraph.type === 'paragraph'
-        && paragraph.children.some(child => child.type === 'inlineCode' && child.value.trim() !== '')
-        && paragraph.children.some(child => child.type === 'text' && recorded(child.value))));
+    if (node.type === 'heading' && node.depth <= 2) section = inlineText(node).trim().toLowerCase();
+    if (node.type === 'paragraph') rollback ||= rollbackInstruction(inlineText(node), section);
+    if (section === 'verification' && node.type === 'list') {
+      verification ||= node.children.some(item => item.children.some(paragraph => paragraph.type === 'paragraph' && executedVerification(paragraph)));
     }
   }
   return { rollback, verification };
@@ -293,7 +344,11 @@ function mergeOrderRefusal(
     const spanned = new Set(open.map(unitOf));
     if (spanned.size > 1) return { reason: 'merge_order', detail: `${open.map(number => `#${number}`).join(' ')} span ${spanned.size} plan units; split the PR` };
     const prUnit = open.length > 0 ? unitOf(open[0]!) : Math.max(...items.map(unitOf));
-    const blockers = board.autopilot === undefined ? null : reachableOpenBlockers(open.length > 0 ? open : items, onBoard);
+    const external = new Map(board.autopilot_external_blockers?.map(blocker => [blockerKey(blocker), blocker] as const));
+    const local = (ref: BoardBlockerRefV1): BoardItemV1 | undefined => ref.repository.toLowerCase() === board.repository.toLowerCase()
+      ? onBoard.get(ref.number) : undefined;
+    const blockers = board.autopilot === undefined ? null : reachableOpenBlockers(board.repository, open.length > 0 ? open : items,
+      ref => local(ref) ?? external.get(blockerKey(ref)));
     const earlier = units.slice(0, prUnit).flatMap(unit => {
       const pending = unit.filter(number => onBoard.get(number)?.state !== 'closed');
       if (blockers === null || pending.length === 0) return pending;
@@ -301,15 +356,20 @@ function mergeOrderRefusal(
         && pending.some(number => onBoard.get(number)?.pull_requests.includes(other.number)));
       return !stacks && pending.every(number => {
         const item = onBoard.get(number);
-        return !blockers.has(number) && item !== undefined && issueIsParked(board, item);
+        return !blockers.has(blockerKey({ repository: board.repository, number })) && item !== undefined && issueIsParked(board, item);
       }) ? [] : pending;
     });
     if (earlier.length > 0) return { reason: 'merge_order', detail: `earlier in merge_order and not closed: ${earlier.map(number => `#${number}`).join(' ')}` };
-    const parkedBlocker = blockers === null ? undefined : [...blockers].find(number => {
-      const item = onBoard.get(number);
-      return item !== undefined && issueIsParked(board, item);
-    });
-    return parkedBlocker === undefined ? null : { reason: 'merge_order', detail: `blocked by parked issue #${parkedBlocker}` };
+    for (const [key, ref] of blockers ?? []) {
+      const item = local(ref);
+      const observed = external.get(key);
+      if (item === undefined && observed === undefined) return { reason: 'merge_order', detail: `no park state for blocker ${ref.repository}#${ref.number}` };
+      if (item === undefined ? observed?.parked : issueIsParked(board, item)) {
+        const name = item === undefined ? `${ref.repository}#${ref.number}` : `#${ref.number}`;
+        return { reason: 'merge_order', detail: `blocked by parked issue ${name}` };
+      }
+    }
+    return null;
   }
   // A parent without a plan merges in blocked-by order: every blocker of each linked item must be closed.
   const bundle = bundledItems(pr, onBoard);

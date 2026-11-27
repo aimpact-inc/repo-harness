@@ -5,8 +5,8 @@ import {
   checkPlanSupersedes, checkPostBody, decodePostFields, renderPostBody, type BoardPostFieldsV1,
 } from '../../core/board/post';
 import { withSeatLine } from '../../core/board/seat-line';
-import type { BoardCommentPageV1 } from '../../core/board/source';
-import { BoardCollectError, readGhJson, runGhText, type GhInput } from './collect';
+import { BoardSourceError, type BoardCommentPageV1 } from '../../core/board/source';
+import { BoardCollectError, readGhJson, readIssueComments, runGhText, type GhInput } from './collect';
 
 /** The writes and reads of one post. Each is a process boundary, so the command and its tests take them in. */
 export interface BoardPostPorts {
@@ -39,18 +39,6 @@ export interface BoardPostResultV1 {
 /** A kind that only one thread shape takes: `disposition` names a FAIL acceptance record of a pull request. */
 const PR_ONLY: ReadonlySet<string> = new Set(['disposition']);
 
-/** Every comment of one issue or pull request in this repository: `--paginate` reads the whole thread. */
-function readComments(input: GhInput, target: number): BoardCommentPageV1 {
-  const pages = readGhJson(input, ['api', '--hostname', 'github.com', '--paginate', '--slurp', `repos/{owner}/{repo}/issues/${target}/comments?per_page=100`]);
-  if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new BoardCollectError(`gh api printed no comment page list for #${target}`);
-  const comments = pages.flat().map(entry => {
-    if (!isRecord(entry) || typeof entry.html_url !== 'string' || typeof entry.created_at !== 'string'
-      || typeof entry.author_association !== 'string' || typeof entry.body !== 'string') throw new BoardCollectError(`gh api printed an invalid comment for #${target}`);
-    return { url: entry.html_url, created_at: entry.created_at, author_association: entry.author_association, body: entry.body };
-  });
-  return { truncated: false, comments };
-}
-
 /** GitHub's repository issue list includes pull requests. Read comment threads only for open entries with comments. */
 export function readParkedItems(input: GhInput): readonly AutopilotParkedItemV1[] {
   try {
@@ -63,12 +51,12 @@ export function readParkedItems(input: GhInput): readonly AutopilotParkedItemV1[
       }
       if (entry.comments === 0) continue;
       const kind = entry.pull_request === undefined ? 'issue' : 'pull_request';
-      const item = readParkedItem(kind, entry.number, readComments(input, entry.number));
+      const item = readParkedItem(kind, entry.number, readIssueComments(input, '{owner}/{repo}', entry.number));
       if (item !== null) parked.push(item);
     }
     return parked.sort((left, right) => left.kind.localeCompare(right.kind) || left.number - right.number);
   } catch (error) {
-    if (!(error instanceof BoardCollectError)) throw error;
+    if (!(error instanceof BoardCollectError || error instanceof BoardSourceError)) throw error;
     throw new AutopilotError('autopilot_parked_read_failed', error.message);
   }
 }
@@ -87,7 +75,7 @@ function isPullRequest(repo_root: string, target: number): boolean {
 /** The ports of a real run: `gh api` reads the thread, `gh issue comment` posts to an issue or a pull request alike. */
 export function gitHubPostPorts(repo_root: string): BoardPostPorts {
   return {
-    comments: target => readComments({ repo_root }, target),
+    comments: target => readIssueComments({ repo_root }, '{owner}/{repo}', target),
     is_pull_request: target => isPullRequest(repo_root, target),
     comment: (target, body) => runGhText({ repo_root }, ['issue', 'comment', String(target), '--body-file', '-'], body),
   };

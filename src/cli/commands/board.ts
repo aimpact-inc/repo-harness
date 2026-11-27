@@ -575,10 +575,10 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         else process.stdout.write(result.url === null ? `${result.body}\n` : `${result.url}\n`);
       } catch (error) {
         if (!(error instanceof BoardPostFieldsError || error instanceof BoardPostRoundtripError || error instanceof BoardPostSupersedesError
-          || error instanceof BoardCollectError)) throw error;
+          || error instanceof BoardCollectError || error instanceof BoardSourceError)) throw error;
         // Refused fields and a plan without supersedes are refused input (exit 2); a parser that refuses the rendered text, or a failed
         // GitHub read or write, is a failure (exit 1). Neither case posted a comment.
-        const code = error instanceof BoardCollectError ? null : error.code;
+        const code = error instanceof BoardCollectError || error instanceof BoardSourceError ? null : error.code;
         process.stderr.write(`${JSON.stringify({ ok: false, error: code ?? error.name, message: code === null ? error.message : `${code}: ${error.message}` })}\n`);
         process.exitCode = error instanceof BoardPostFieldsError || error instanceof BoardPostSupersedesError ? 2 : 1;
       }
