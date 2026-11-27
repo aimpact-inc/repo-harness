@@ -10,6 +10,10 @@ responsibilities:
 source:
   include:
     - src/core/adoption/**
+    - src/effects/adoption/**
+    - src/effects/fs-transaction.ts
+    - src/cli/commands/adoption-plan.ts
+    - src/cli/repo-adoption/**
   entrypoints:
     - id: entrypoint.adoption.primary
       path: "src/cli/commands/adoption-plan.ts"

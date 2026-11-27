@@ -6,3 +6,8 @@ status: active
 parent: capability.public-surface.adoption
 layer: "core"
 summary: "Executes the reviewed apply repository adoption boundary."
+responsibilities:
+  - Hold the core-layer adoption planning, operation, managed-block, managed-hook, version-gate, render, rollback and summary modules.
+source:
+  include:
+    - src/core/adoption/**
