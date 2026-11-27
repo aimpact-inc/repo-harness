@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.ce11c614c3e4f64f",
+  "fingerprint": "sha256:750dff45f3b84f99aaeb5acff4dbfc64af214042ffc52b09c6d668fd8b0aca6e",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "entrypoint-bypass",
+  "subject": {
+    "selectorKind": "node",
+    "stableKey": "node:capability.workflow-engine.workflow-state",
+    "subjectSelectorId": "subject.node.afaa1fbb7db97638"
+  },
+  "affectedNodeIds": [
+    "capability.workflow-engine.workflow-state"
+  ],
+  "affectedNodeCount": 1,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "entrypointBypassCount": 4
+  },
+  "reason": "Declared entrypoint.workflow-state.policy-file on src/effects/state/policy-file.ts (#3594).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-27T09:19:07.000Z",
+  "provenance": {
+    "headSha": "5954780f44078258cedea8d6208139c3942db5ec",
+    "assessmentDigest": "sha256:edbafc7daff6848e1af62a2215e9e3730277d03222e86ce68802d0afcd5c2c25",
+    "baselineSnapshotDigest": "sha256:75c97d1875ced9689b8f3b09d85571c3d36b1ef7ea84e5d0dba6479aa944879d"
+  },
+  "snapshotDigest": "sha256:75c97d1875ced9689b8f3b09d85571c3d36b1ef7ea84e5d0dba6479aa944879d",
+  "evidenceDigest": "sha256:edbafc7daff6848e1af62a2215e9e3730277d03222e86ce68802d0afcd5c2c25",
+  "resolutionDigest": "sha256:96649e01c314ded7676efe67eecc510044b4063558baa8f3458d293e98ff8776",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "module.entrypointBypassCount",
+      "subjectSelectorId": "subject.node.afaa1fbb7db97638",
+      "nodeId": "capability.workflow-engine.workflow-state",
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.754e4e52cdeccad6"
+    }
+  ]
+}
