@@ -21,32 +21,16 @@ import type { TestsSnapshotV1, TestsUnavailableReason } from './tests';
 import {
   ARCHCTX_CODE,
   ARCHCTX_TOKEN,
-  ARCHITECTURE_CHANGE_REASONS,
-  ARCHITECTURE_DEBT_KINDS,
-  ARCHITECTURE_LAYER_DIRECTION_REASONS,
   ARCHITECTURE_LAYER_ORDER_REASONS,
   ARCHITECTURE_MAP_DEPENDENCY_REASONS,
   ARCHITECTURE_MAP_SIZE_REASONS,
   ARCHITECTURE_MAP_UNAVAILABLE_REASONS,
   ARCHITECTURE_NAMESPACE_TYPES,
-  ARCHITECTURE_PR_LAYER_REASONS,
-  ARCHITECTURE_PR_REASONS,
-  ARCHITECTURE_TEST_REASONS,
-  ARCHITECTURE_VIOLATION_REASONS,
   OPERATOR_ARCHITECTURE_MAP_SCHEMA,
   archctxRefusal,
-  flowSelectorKey,
-  flowSteps,
-  type ArchitectureChangesLayerV1,
-  type ArchitectureDecisionsLayerV1,
-  type ArchitectureFlowEvidenceV1,
-  type ArchitectureFlowSelectorV1,
-  type ArchitectureImpactV1,
   type ArchitectureLayerOrderV1,
   type ArchitectureMapDependenciesV1,
   type ArchitectureMapDependencyReason,
-  type ArchitectureMapFlowStepV1,
-  type ArchitectureMapFlowV1,
   type ArchitectureMapImportV1,
   type ArchitectureMapNodeV1,
   type ArchitectureMapRelationV1,
@@ -54,68 +38,70 @@ import {
   type ArchitectureMapSizesV1,
   type ArchitectureMapUnavailableReason,
   type ArchitectureMapUnavailableV1,
-  type ArchitectureMapV1,
+  type Gap,
+} from './architecture-map-model';
+import {
+  flowSelectorKey,
+  flowSteps,
+  type ArchitectureFlowEvidenceV1,
+  type ArchitectureFlowSelectorV1,
+  type ArchitectureMapFlowStepV1,
+  type ArchitectureMapFlowV1,
+} from './architecture-map-flows';
+import {
+  ARCHITECTURE_CHANGE_REASONS,
+  ARCHITECTURE_DEBT_KINDS,
+  ARCHITECTURE_LAYER_DIRECTION_REASONS,
+  ARCHITECTURE_PR_LAYER_REASONS,
+  ARCHITECTURE_PR_REASONS,
+  ARCHITECTURE_TEST_REASONS,
+  ARCHITECTURE_VIOLATION_REASONS,
+  type ArchitectureChangesLayerV1,
+  type ArchitectureDecisionsLayerV1,
+  type ArchitectureImpactV1,
+  type ArchitectureMapLayersV1,
   type ArchitectureModelChangeV1,
   type ArchitecturePullRequestImpactV1,
   type ArchitecturePullRequestsLayerV1,
   type ArchitectureTestCoverageV1,
   type ArchitectureTestsLayerV1,
   type ArchitectureViolationsLayerV1,
-  type Gap,
-} from './architecture-map-model';
+} from './architecture-map-layers';
 
 export {
-  ARCHITECTURE_CHANGE_REASONS,
-  ARCHITECTURE_DEBT_KINDS,
-  ARCHITECTURE_LAYER_DIRECTION_REASONS,
   ARCHITECTURE_LAYER_ORDER_REASONS,
   ARCHITECTURE_MAP_DEPENDENCY_REASONS,
   ARCHITECTURE_MAP_SIZE_REASONS,
   ARCHITECTURE_MAP_UNAVAILABLE_REASONS,
   ARCHITECTURE_MAP_WORKER_REASONS,
   ARCHITECTURE_NAMESPACE_TYPES,
+  OPERATOR_ARCHITECTURE_MAP_ROUTE,
+  OPERATOR_ARCHITECTURE_MAP_SCHEMA,
+  archctxRefusal,
+} from './architecture-map-model';
+export {
+  flowSelectorKey,
+  flowSteps,
+} from './architecture-map-flows';
+export {
+  ARCHITECTURE_CHANGE_REASONS,
+  ARCHITECTURE_DEBT_KINDS,
+  ARCHITECTURE_LAYER_DIRECTION_REASONS,
   ARCHITECTURE_PR_LAYER_REASONS,
   ARCHITECTURE_PR_REASONS,
   ARCHITECTURE_TEST_REASONS,
   ARCHITECTURE_VIOLATION_READS,
   ARCHITECTURE_VIOLATION_REASONS,
-  OPERATOR_ARCHITECTURE_MAP_ROUTE,
-  OPERATOR_ARCHITECTURE_MAP_SCHEMA,
-  archctxRefusal,
   architectureImpact,
   architectureViolationCommand,
-  flowSelectorKey,
-  flowSteps,
-} from './architecture-map-model';
+} from './architecture-map-layers';
 export type {
   ArchctxRefusalV1,
-  ArchitectureAnchorFindingV1,
-  ArchitectureChangeCommitV1,
-  ArchitectureChangeReason,
-  ArchitectureChangesLayerV1,
-  ArchitectureDebtItemV1,
-  ArchitectureDebtKind,
-  ArchitectureDecisionV1,
-  ArchitectureDecisionsLayerV1,
-  ArchitectureFlowEvidenceV1,
-  ArchitectureFlowProofV1,
-  ArchitectureFlowProofsV1,
-  ArchitectureFlowSelectorV1,
-  ArchitectureFlowStepV1,
-  ArchitectureImpactPathV1,
-  ArchitectureImpactTruncationV1,
-  ArchitectureImpactV1,
-  ArchitectureLayerDirectionReason,
   ArchitectureLayerOrderReason,
   ArchitectureLayerOrderV1,
-  ArchitectureLayerViolationV1,
   ArchitectureMapDependenciesV1,
   ArchitectureMapDependencyReason,
-  ArchitectureMapFlowOutcomeV1,
-  ArchitectureMapFlowStepV1,
-  ArchitectureMapFlowV1,
   ArchitectureMapImportV1,
-  ArchitectureMapLayersV1,
   ArchitectureMapNodeV1,
   ArchitectureMapRefusalV1,
   ArchitectureMapRelationV1,
@@ -124,10 +110,35 @@ export type {
   ArchitectureMapSizesV1,
   ArchitectureMapUnavailableReason,
   ArchitectureMapUnavailableV1,
-  ArchitectureMapV1,
   ArchitectureMapWorkerReason,
-  ArchitectureModelChangeV1,
   ArchitectureNamespaceType,
+} from './architecture-map-model';
+export type {
+  ArchitectureFlowEvidenceV1,
+  ArchitectureFlowProofV1,
+  ArchitectureFlowProofsV1,
+  ArchitectureFlowSelectorV1,
+  ArchitectureMapFlowOutcomeV1,
+  ArchitectureMapFlowStepV1,
+  ArchitectureMapFlowV1,
+} from './architecture-map-flows';
+export type {
+  ArchitectureAnchorFindingV1,
+  ArchitectureChangeCommitV1,
+  ArchitectureChangeReason,
+  ArchitectureChangesLayerV1,
+  ArchitectureDebtItemV1,
+  ArchitectureDebtKind,
+  ArchitectureDecisionV1,
+  ArchitectureDecisionsLayerV1,
+  ArchitectureFlowStepV1,
+  ArchitectureImpactPathV1,
+  ArchitectureImpactTruncationV1,
+  ArchitectureImpactV1,
+  ArchitectureLayerDirectionReason,
+  ArchitectureLayerViolationV1,
+  ArchitectureMapLayersV1,
+  ArchitectureModelChangeV1,
   ArchitecturePullRequestImpactV1,
   ArchitecturePullRequestReason,
   ArchitecturePullRequestsLayerV1,
@@ -137,7 +148,28 @@ export type {
   ArchitectureTestsLayerV1,
   ArchitectureViolationReason,
   ArchitectureViolationsLayerV1,
-} from './architecture-map-model';
+} from './architecture-map-layers';
+
+export interface ArchitectureMapV1 {
+  readonly schema_version: typeof OPERATOR_ARCHITECTURE_MAP_SCHEMA;
+  readonly repository_id: string;
+  readonly commit: string;
+  /** The branch that HEAD names when the cycle starts; null for a detached HEAD. */
+  readonly head_ref: string | null;
+  /** The archctx package version that served every archctx read of the cycle. */
+  readonly archctx_version: string;
+  readonly collected_at: string;
+  readonly nodes: readonly ArchitectureMapNodeV1[];
+  readonly relations: readonly ArchitectureMapRelationV1[];
+  /** The model's flows from the same `archctx export native` read. */
+  readonly flows: readonly ArchitectureMapFlowV1[];
+  /** The declared code of each flow step selector that exactly one node declares. */
+  readonly flow_evidence: readonly ArchitectureFlowEvidenceV1[];
+  readonly sizes: ArchitectureMapSizesV1;
+  readonly dependencies: ArchitectureMapDependenciesV1;
+  readonly layer_order: ArchitectureLayerOrderV1;
+  readonly layers: ArchitectureMapLayersV1;
+}
 
 type Check = (value: unknown) => boolean;
 const text: Check = value => typeof value === 'string';
