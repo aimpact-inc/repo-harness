@@ -148,6 +148,8 @@ const AGY_ORCHESTRATOR = { ...AGY_ADVISOR, tools: ["gh", "mcp", "net", "read", "
 const AGY_WORKER = { runtime: "agy", model: "gemini-4-neon-high", advisor_model: null, effort: null, tools: ["edit", "gh", "net", "read", "shell"], fleet: [] } as const;
 const AGY_WORKER_NO_GH = { ...NATIVE_SEATS_PRESET["worker-light"]!, effort: "high", tools: ["edit", "net", "read", "shell"] } as const;
 const AGY_FALLBACK = { runtime: "agy", model: "gemini-4-hydrogen-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
+/** A stored council seat whose runtime is `pi` selects the Pi route of each member that has one (#3644). */
+const PI_COUNCIL = { runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] } as const;
 
 type AgyFixture = {
   home: string; cwd: string; agy: string; hooks: string; bundle: string; tab: string; env: NodeJS.ProcessEnv;
@@ -689,21 +691,31 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     rmSync(dirname(out.members[0].out_path), { recursive: true, force: true });
   }));
 
-  test("seats council honors stored seats.council.runtime=agy for carbon while pi and magpie are installed, keeping fable and astra on their routes (#3587)", withAgySeat(f => {
+  test("seats council starts each member on its native route while pi and magpie are installed, and follows a stored seats.council.runtime=pi or agy (#3644)", withAgySeat(f => {
     mkdirSync(join(f.home, ".pi", "agent", "extensions"), { recursive: true });
     writeFileSync(join(f.home, ".pi", "agent", "extensions", "magpie.ts"), "");
     writeFileSync(join(f.home, "bin", "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
-    // Without seats.council on agy, pi + magpie still selects the magpie route for carbon.
-    const magpieDry = f.run(["council", "--issue", "3587", "--members", "fable,carbon,astra", "--repository-id", "1186405141", "--dry-run", "--json"]);
-    expect(magpieDry.status, magpieDry.stderr).toBe(0);
-    expect(JSON.parse(magpieDry.stdout).members).toEqual([
+    // Installed pi + magpie do not move a member onto its Pi route: every member starts native.
+    const nativeDry = f.run(["council", "--issue", "3644", "--members", "fable,carbon,astra", "--repository-id", "1186405141", "--dry-run", "--json"]);
+    expect(nativeDry.status, nativeDry.stderr).toBe(0);
+    expect(JSON.parse(nativeDry.stdout).members).toEqual([
+      expect.objectContaining({ member: "fable", runtime: "claude", model: "fable" }),
+      expect.objectContaining({ member: "carbon", runtime: "agy", model: "gemini-4-carbon-high" }),
+      expect.objectContaining({ member: "astra", runtime: "codex", model: "gpt-6.2-astra" }),
+    ]);
+
+    // A stored seats.council.runtime=pi selects the Pi route of each member that has one.
+    f.configure(AGY_ADVISOR, true, { council: PI_COUNCIL });
+    const piDry = f.run(["council", "--issue", "3644", "--members", "fable,carbon,astra", "--repository-id", "1186405141", "--dry-run", "--json"]);
+    expect(piDry.status, piDry.stderr).toBe(0);
+    expect(JSON.parse(piDry.stdout).members).toEqual([
       expect.objectContaining({ member: "fable", runtime: "claude", model: "fable" }),
       expect.objectContaining({ member: "carbon", runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon" }),
       expect.objectContaining({ member: "astra", runtime: "pi", model: "magpie/codex/gpt-6.2-astra" }),
     ]);
 
-    // With seats.council.runtime=agy, carbon honors native agy while fable and astra keep their routes.
+    // A stored seats.council.runtime=agy keeps carbon native and leaves the other members on their routes (#3587).
     f.configure(AGY_ADVISOR, true, {
       council: { runtime: "agy", model: "gemini-4-carbon-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] },
     });
@@ -712,7 +724,7 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     expect(JSON.parse(agyDry.stdout).members).toEqual([
       expect.objectContaining({ member: "fable", runtime: "claude", model: "fable" }),
       expect.objectContaining({ member: "carbon", runtime: "agy", model: "gemini-4-carbon-high" }),
-      expect.objectContaining({ member: "astra", runtime: "pi", model: "magpie/codex/gpt-6.2-astra" }),
+      expect.objectContaining({ member: "astra", runtime: "codex", model: "gpt-6.2-astra" }),
     ]);
   }));
 
@@ -2211,7 +2223,7 @@ console.log(JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: 
   });
 
   test("seats council previews without writes and launches member panes via Herdr with auto herdr.space resolution", () => {
-    withHome(DEFAULT_SEATS_CONFIG, home => withRepository(home, "rh", (repo, worktree) => {
+    withHome({ ...DEFAULT_SEATS_CONFIG, council: PI_COUNCIL }, home => withRepository(home, "rh", (repo, worktree) => {
       const bin = join(home, ".quota-bin");
       const scratch = realpathSync(mkdirSync(join(home, "scratch"), { recursive: true })!);
       const ghLog = join(home, "gh.log"), tabLog = join(home, "tab.log");
@@ -2410,6 +2422,7 @@ if (cmd === 'tab.new') {
   test("seats launch and council enforce Option A tab naming (#<issue>, PR#<pr>, council) and 3-pane hc.run tab packing with worktree cwd (#3494)", () => {
     const seatsConfig = {
       ...DEFAULT_SEATS_CONFIG,
+      council: PI_COUNCIL,
       reviewer: { ...DEFAULT_SEATS_CONFIG.reviewer, runtime: "pi" as const, model: "magpie/group/deepseek-v4.1-flash", effort: null },
     };
     withHome(seatsConfig, (home) => {
