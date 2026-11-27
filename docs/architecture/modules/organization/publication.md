@@ -131,6 +131,7 @@ change claim ownership.
   feedback facts and receipt types (`src/core/publication/feedback.ts`) and the
   feedback store (`src/effects/publication/feedback-store.ts`). Historical repair
   records can explain no progress. They cannot dispatch a new repair.
+- `src/effects/publication/feedback-store.ts`, `src/effects/publication/merge-executor.ts` and `src/effects/publication/app-hook-config.ts` are the declared public effects surfaces of this capability. Task Fleet, Board, Contract Assets and Task Agent Host import them through `entrypoint.publication.feedback-store`, `entrypoint.publication.merge-executor` and `entrypoint.publication.app-hook-config`.
 - Publication imports no Task Fleet file. The feedback records validate the task
   message claim through `component.execution-primitives.task-message-claim`.
   Task Fleet reads Publication as a plugin → core edge.

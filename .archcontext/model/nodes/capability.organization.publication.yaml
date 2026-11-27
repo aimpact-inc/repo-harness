@@ -29,6 +29,35 @@ source:
             - id: "sink.publication.readiness"
               path: "src/effects/publication/merge-readiness.ts"
               symbol: "collectPullRequestMergeReadiness"
+    - id: "entrypoint.publication.feedback-store"
+      path: "src/effects/publication/feedback-store.ts"
+      symbols:
+        - name: "writeFeedbackEvent"
+          sinks:
+            - id: "sink.publication.feedback-event-validation"
+              path: "src/core/publication/feedback.ts"
+              symbol: "validateFeedbackEvent"
+        - name: "readFeedbackEvent"
+          sinks:
+            - id: "sink.publication.feedback-event-read"
+              path: "src/effects/publication/feedback-store.ts"
+              symbol: "readFeedbackEventIn"
+    - id: "entrypoint.publication.app-hook-config"
+      path: "src/effects/publication/app-hook-config.ts"
+      symbols:
+        - name: "publishAppHookConfig"
+          sinks:
+            - id: "sink.publication.app-hook-config-validation"
+              path: "src/core/publication/publication-writes.ts"
+              symbol: "checkAppHookConfig"
+    - id: "entrypoint.publication.merge-executor"
+      path: "src/effects/publication/merge-executor.ts"
+      symbols:
+        - name: "executePublicationMerge"
+          sinks:
+            - id: "sink.publication.merge-preparation"
+              path: "src/effects/publication/merge-executor.ts"
+              symbol: "prepareMerge"
 extensions:
   harnessTier: "core"
   contractFiles:
