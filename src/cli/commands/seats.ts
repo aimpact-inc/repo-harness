@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'path';
-import { SeatPaneNameError } from '../../core/board/seat-launch';
+import { SeatPaneNameError } from '../../core/board/seat-pane-name';
 import { LAUNCH_SEAT_IDS, type LaunchSeatId } from '../../core/board/seats-settings';
 import { type SeatRouteV1 } from '../../core/board/seat-routing';
 import { readAgyQuota } from '../../effects/board/quota';

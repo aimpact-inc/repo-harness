@@ -1,7 +1,8 @@
 import type { BoardHostPortsV1, BoardSeatTerminalReadV1 } from './board';
-import { hcStatusClass, type HcStatusClass } from './desk';
 import { hasUnredactedSecret } from '../security/secret-patterns';
 import { HC_LOCAL_ADDRESS } from '../terminal/hc-address';
+import { ADVISOR_BOSS_COMMANDS, type AdvisorBossCommand } from './advisor-boss-commands';
+import { ADVISOR_SEAT_CLI_FAILURES, type AdvisorSeatCliFailure, type AdvisorSeatFailure } from './advisor-seat-failures';
 import { privateKeyLines, redactAdvisorLine } from './advisor-seat-redaction';
 
 /**
@@ -27,88 +28,6 @@ export const ADVISOR_TRANSCRIPT_LINE_WITHHELD = '[line withheld]';
 export const ADVISOR_SEAT_SEND_KIND = 'repo-harness.advisor-seat-send' as const;
 export const ADVISOR_SEAT_SEND_FAILURE_KIND = 'repo-harness.advisor-seat-send-failure' as const;
 export const ADVISOR_SEAT_TRANSCRIPT_KIND = 'repo-harness.advisor-seat-transcript' as const;
-
-/**
- * The board CLI failures; the operator routes add their registry, capacity,
- * timeout and decode codes. `advisor_send_unconfirmed`: `hc send` ran or may
- * have run and did not confirm, so the text may have reached the seat.
- */
-export const ADVISOR_SEAT_CLI_FAILURES = ['text_invalid', 'hc_unavailable', 'advisor_seat_absent', 'advisor_seat_ambiguous', 'advisor_send_unconfirmed', 'advisor_read_failed'] as const;
-export type AdvisorSeatCliFailure = typeof ADVISOR_SEAT_CLI_FAILURES[number];
-
-/**
- * Every refusal code of the operator advisor routes. The boss command route
- * adds `boss_cooldown`, `advisor_turn_running` and `advisor_turn_unknown`;
- * each stops before a send.
- */
-export const ADVISOR_SEAT_FAILURES = [
-  ...ADVISOR_SEAT_CLI_FAILURES,
-  'repository_read_only', 'registry_unavailable', 'repository_not_found', 'github_unavailable',
-  'advisor_busy', 'advisor_timeout', 'advisor_unavailable', 'advisor_invalid', 'invalid_request',
-  'boss_cooldown', 'advisor_turn_running', 'advisor_turn_unknown',
-] as const;
-export type AdvisorSeatFailure = typeof ADVISOR_SEAT_FAILURES[number];
-
-/**
- * The send failures that prove the text was not sent: each one stops before
- * `hc send` runs. Any other failure of a send leaves delivery unknown.
- */
-export const ADVISOR_SEAT_NOT_SENT: ReadonlySet<AdvisorSeatFailure> = new Set<AdvisorSeatFailure>([
-  'text_invalid', 'hc_unavailable', 'advisor_seat_absent', 'advisor_seat_ambiguous',
-  'repository_read_only', 'repository_not_found', 'registry_unavailable', 'github_unavailable', 'advisor_busy',
-  'boss_cooldown', 'advisor_turn_running', 'advisor_turn_unknown',
-]);
-
-/**
- * The four boss commands (#1757, owner M71): preset texts to the advisor seat
- * only. The client sends the id; the server fills `{parent}` and owns the
- * cooldown. The ids are the `RH_CMD_KEYS` of the approved mockup (#1737).
- */
-export const ADVISOR_BOSS_COMMANDS = ['rage', 'carrot', 'mine', 'valve'] as const;
-export type AdvisorBossCommand = typeof ADVISOR_BOSS_COMMANDS[number];
-
-export const ADVISOR_BOSS_COMMAND_TABLE: Readonly<Record<AdvisorBossCommand, { readonly cooldown_seconds: number; readonly text: string }>> = Object.freeze({
-  rage: {
-    cooldown_seconds: 30 * 60,
-    text: '【大棒】检查 parent #{parent} 下的执行席和审查席：列出超过时限、没有新提交、推送、评论或 CI 变化的席位，每个给一条处理建议（催一下、重派或停掉）。催一下的直接交给编排席；重派和停掉先回复我，等我确认。',
-  },
-  carrot: {
-    cooldown_seconds: 60 * 60,
-    text: '【萝卜】按当前席位上限和配额状态，为 parent #{parent} 提出下一批可并行派工的 issue、写入范围和顺序。只回复方案，等我批准后再交给编排席。',
-  },
-  mine: {
-    cooldown_seconds: 30 * 60,
-    text: '【排雷】对比 parent #{parent} 在跑和排队任务的写入范围，列出每个冲突（文件、涉及的 issue）和消除冲突的顺序。只回复结果，不派工。',
-  },
-  valve: {
-    cooldown_seconds: 60 * 60,
-    text: '【收放】按配额报告（`rh quota`）和 parent #{parent} 的队列长度，提议新的执行席上限（例如 6 → 5）和理由。只回复方案，等我批准。',
-  },
-});
-
-/**
- * The advisor turn as the read-back `status` (the hc status word) proves it.
- * A boss command goes only to a seat whose turn is over: an allow list, so a
- * missing or new status word never sends. With `blocked` the text and Enter
- * could answer a pending prompt.
- */
-const ADVISOR_TURN: Readonly<Record<HcStatusClass, 'over' | 'running' | 'unknown'>> = {
-  idle: 'over', done: 'over', working: 'running', blocked: 'running', error: 'unknown', unreported: 'unknown', other: 'unknown',
-};
-
-export function advisorTurnState(status: string | null): 'over' | 'running' | 'unknown' {
-  return ADVISOR_TURN[hcStatusClass(status)];
-}
-
-export function advisorBossCommandText(command: AdvisorBossCommand, parent: number): string {
-  return ADVISOR_BOSS_COMMAND_TABLE[command].text.replace('{parent}', String(parent));
-}
-
-/** The whole seconds left in the cooldown of one command after its counted sends; 0 when none is inside it. */
-export function advisorBossCooldownSeconds(command: AdvisorBossCommand, sentAtMs: readonly number[], nowMs: number): number {
-  const window = ADVISOR_BOSS_COMMAND_TABLE[command].cooldown_seconds * 1000;
-  return sentAtMs.reduce((remaining, at) => Math.max(remaining, Math.ceil((at + window - nowMs) / 1000)), 0);
-}
 
 export class AdvisorSeatError extends Error {
   constructor(

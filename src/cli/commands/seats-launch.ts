@@ -1,4 +1,5 @@
-import { CLAUDE_BUILTIN_AGENT_TYPES, SeatPaneNameError, buildSeatLaunch, seatPaneName, seatTabName, type SeatLaunchV1 } from '../../core/board/seat-launch';
+import { CLAUDE_BUILTIN_AGENT_TYPES, buildSeatLaunch, type SeatLaunchV1 } from '../../core/board/seat-launch';
+import { SeatPaneNameError, seatPaneName, seatTabName } from '../../core/board/seat-pane-name';
 import {
   AgySeatSettingsError,
   RETIRED_SEAT_FLEET_ROLES,

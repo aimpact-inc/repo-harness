@@ -1,4 +1,5 @@
-import { AdvisorSeatError, advisorTurnState, resolveAdvisorSeat } from './advisor-seat';
+import { AdvisorSeatError, resolveAdvisorSeat } from './advisor-seat';
+import { advisorTurnState } from './advisor-turn-state';
 import type {
   AutopilotBoardAuthorityV1,
   AutopilotQuotaAuthorityV1,

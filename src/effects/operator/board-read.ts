@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { withoutRepositorySelectingGitEnv } from '../git/runner';
 import { spawnRegisteredProcessGroup } from '../process-group-registry';
 import { terminateProcessGroup } from '../process-group-termination';
-import { ADVISOR_SEAT_CLI_FAILURES, type AdvisorSeatFailure } from '../../core/board/advisor-seat';
+import { ADVISOR_SEAT_CLI_FAILURES, type AdvisorSeatFailure } from '../../core/board/advisor-seat-failures';
 import { readRepoHarnessRegistryStrictSnapshot } from '../repo-registry';
 
 /** The advisor send and read-back run the board CLI as a child: it reads hc and GitHub synchronously. */

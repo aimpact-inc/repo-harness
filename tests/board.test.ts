@@ -23,7 +23,8 @@ import { githubRemoteRepository, parseRecordFindings, parseRefs } from '../src/c
 import { renderDependencyMigrationPlan } from '../src/core/board/dependency-migration';
 import { applyDependencyMigration, planDependencyMigration, runDependencyMigration } from '../src/effects/board/dependency-migration';
 import { attentionHostPorts, boardHostPorts } from '../src/effects/terminal/herdr-core';
-import { ADVISOR_TRANSCRIPT_LINE_WITHHELD, AdvisorSeatError, advisorSeatSendFailure, advisorTranscriptLines, advisorTurnState, decodeAdvisorSeatTranscript, readAdvisorSeat, seatStatusMessage, SEAT_STATUS_MESSAGE_MAX_CHARS, sendToAdvisorSeat } from '../src/core/board/advisor-seat';
+import { ADVISOR_TRANSCRIPT_LINE_WITHHELD, AdvisorSeatError, advisorSeatSendFailure, advisorTranscriptLines, decodeAdvisorSeatTranscript, readAdvisorSeat, seatStatusMessage, SEAT_STATUS_MESSAGE_MAX_CHARS, sendToAdvisorSeat } from '../src/core/board/advisor-seat';
+import { advisorTurnState } from '../src/core/board/advisor-turn-state';
 import { decodeBoardParents, decodeBoardSeats, projectBoardSeats, joinBoardParents, type BoardParentsV1 } from '../src/core/board/parents';
 import { BoardSourceError } from '../src/core/board/source';
 import { planDispatch } from '../src/core/board/dispatch';

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { XIcon } from '@phosphor-icons/react';
 import {
-  ADVISOR_TEXT_MAX_CHARS, advisorTurnState, decodeAdvisorSeatSend, decodeAdvisorSeatTranscript,
+  ADVISOR_TEXT_MAX_CHARS, decodeAdvisorSeatSend, decodeAdvisorSeatTranscript,
   type AdvisorSeatMessageRequestV1, type AdvisorSeatRequestV1, type AdvisorSeatSendV1, type AdvisorSeatTranscriptV1,
 } from '../core/board/advisor-seat';
+import { advisorTurnState } from '../core/board/advisor-turn-state';
 import { useModalFocus } from './Drawer';
 import type { OperatorMessageKey, OperatorTranslate } from './i18n';
 import { asApiError, type OperatorApiErrorV1 } from './operator-api-error';

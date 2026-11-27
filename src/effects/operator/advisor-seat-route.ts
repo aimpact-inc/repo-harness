@@ -1,8 +1,10 @@
+import { advisorBossCommandText, advisorBossCooldownSeconds } from '../../core/board/advisor-boss-commands';
 import {
-  ADVISOR_SEAT_NOT_SENT, advisorBossCommandText, advisorBossCooldownSeconds, advisorTurnState,
   decodeAdvisorBossCommandRequest, decodeAdvisorSeatMessageRequest, decodeAdvisorSeatSend, decodeAdvisorSeatSendFailure, decodeAdvisorSeatTranscript,
-  type AdvisorSeatFailure, type AdvisorSeatMessageRequestV1, type AdvisorSeatRequestV1, type AdvisorSeatSendOutcomeV1,
+  type AdvisorSeatMessageRequestV1, type AdvisorSeatRequestV1, type AdvisorSeatSendOutcomeV1,
 } from '../../core/board/advisor-seat';
+import { ADVISOR_SEAT_NOT_SENT, type AdvisorSeatFailure } from '../../core/board/advisor-seat-failures';
+import { advisorTurnState } from '../../core/board/advisor-turn-state';
 import type { JsonValue } from '../../core/evidence/types';
 import { BoardReadError, readRepositoryAdvisorTranscript, sendRepositoryAdvisor, type BoardReadInput } from './board-read';
 import { OperatorAuditUnavailableError, operatorAuditPath, readOperatorAuditRecords, type OperatorWriteIntentRecordV1, type OperatorWriteResultRecordV1 } from './write-audit';

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { cn } from '@cloudflare/kumo';
 import { XIcon } from '@phosphor-icons/react';
-import { ADVISOR_BOSS_COMMAND_TABLE, ADVISOR_BOSS_COMMANDS, advisorBossCommandText, advisorTurnState, type AdvisorBossCommand } from '../core/board/advisor-seat';
+import { ADVISOR_BOSS_COMMAND_TABLE, ADVISOR_BOSS_COMMANDS, advisorBossCommandText, type AdvisorBossCommand } from '../core/board/advisor-boss-commands';
+import { advisorTurnState } from '../core/board/advisor-turn-state';
 import { DESK_STATES, ISSUE_FLOW_WORKER_LIMIT, type DeskState } from '../core/board/desk';
 import {
   officeCard, officeCardRank, officeLit, officeRepositoryView, officeTotals, useOfficeOverview,
