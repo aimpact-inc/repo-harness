@@ -13,7 +13,6 @@ import {
   isWorkerSeat,
   seatHostId,
   seatsConfigInvalidMessage,
-  unavailablePiSeat,
   type AgyCatalogModel,
   type LaunchSeatId,
   type SeatConfigV1,
@@ -31,7 +30,7 @@ import { bunGlobalPackageRoot } from '../installer/skill-projection';
 import { SEAT_ENV, SEAT_REPOSITORY_ENV } from '../../core/board/seat-reset';
 import { isRecord } from '../../core/evidence/is-record';
 import { type CouncilMember } from '../../core/board/planner-consult';
-import { enabledRuntimesOf, magpieExtensionInstalled, probeAgySeat, SeatsConfigurationError } from '../../effects/board/seats-configuration';
+import { enabledRuntimesOf, probeAgySeat, SeatsConfigurationError } from '../../effects/board/seats-configuration';
 import { checkAntigravityHooks } from '../installer/targets/antigravity';
 import { resolveAntigravityRepository } from '../hook/host-adapter';
 import { EDIT_GUARD_SCOPE_SECTION } from '../hook/session-context';
@@ -151,20 +150,20 @@ export function installedPiExtension(env: NodeJS.ProcessEnv): string {
   return extension;
 }
 
-function councilMemberRoute(member: CouncilMember, seats: SeatsConfigV1, env: NodeJS.ProcessEnv) {
+/**
+ * The route of one council member. A member starts on its native route, which needs no host probe. A stored council
+ * runtime `pi` starts it on its Pi route instead, like a stored `agy` runtime starts a native `agy` member. A member
+ * without a native route keeps its other route.
+ */
+function councilMemberRoute(member: CouncilMember, seats: SeatsConfigV1) {
   const nativeRoute = resolveCatalogRoute(member, 'native');
-  if (seats.council?.runtime === 'agy' && nativeRoute?.runtime === 'agy') return nativeRoute;
   const magpieRoute = resolveCatalogRoute(member, 'magpie');
-  if (magpieRoute === null) return nativeRoute!;
-  if (magpieRoute.runtime !== 'pi') return magpieRoute;
-  const piAvailable = Bun.which('pi', { PATH: env.PATH ?? '' }) !== null
-    && magpieExtensionInstalled(env)
-    && unavailablePiSeat(magpieRoute, seats.routing) === null;
-  return piAvailable ? magpieRoute : (nativeRoute ?? magpieRoute);
+  if (seats.council?.runtime === 'pi' && magpieRoute?.runtime === 'pi') return magpieRoute;
+  return nativeRoute ?? magpieRoute!;
 }
 
-export function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, env: NodeJS.ProcessEnv): SeatConfigV1 {
-  const selected = councilMemberRoute(member, seats, env);
+export function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, _env: NodeJS.ProcessEnv): SeatConfigV1 {
+  const selected = councilMemberRoute(member, seats);
   const stored = seats.council;
   const matchesStored = stored !== null && stored.runtime === selected.runtime && stored.model === selected.model;
   return {
