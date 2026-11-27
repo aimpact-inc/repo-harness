@@ -4,7 +4,9 @@ import { basename } from 'path';
 import { fileURLToPath } from 'url';
 import { AdvisorSeatError, advisorSeatSendFailure, readAdvisorSeat, sendToAdvisorSeat } from '../../core/board/advisor-seat';
 import { AutopilotError } from '../../core/board/autopilot';
-import { isAdvisorSeatInReset, readAutopilotState, recordAutopilotAdvisorTick } from '../../effects/board/autopilot-store';
+import { autopilotStatePath, isAdvisorSeatInReset, readAutopilotStateAtPath, recordAutopilotAdvisorTick } from '../../effects/board/autopilot-store';
+import { readQuotaReport } from '../../effects/board/quota';
+import { readSeatsConfiguration } from '../../effects/board/seats-configuration';
 import { AttentionWatchError, attentionAutopilotTicker, attentionLogPath, attentionReviewCollector, runAttentionWindow, serviceTerminalRepository, startAttentionWatch } from '../../effects/board/attention-watch';
 import { evaluateBoardAttention, renderAttentionText } from '../../core/board/attention';
 import type { AttentionHostPortsV1, AttentionSentV1 } from '../../core/board/attention-delivery';
@@ -606,14 +608,19 @@ async function watchAttention(options: AttentionOptions, host: BoardHostPortsV1,
       publish: (seat, prNumber, read) => publishSeatReceipt({ repoRoot, seat, prNumber }, read),
       errorCode: error => error instanceof ReviewPublishError ? error.code : null,
     });
+    let cachedAutopilotPath: string | null = null;
     const autopilotTick = options.deliver === true
       ? attentionAutopilotTicker({
         repository_id: repositoryId,
         parent,
         host: attentionHost,
         ports: {
-          readState: () => readAutopilotState(repoRoot),
+          readState: () => readAutopilotStateAtPath(cachedAutopilotPath ??= autopilotStatePath(repoRoot)),
           recordTick: now => recordAutopilotAdvisorTick({ repo_root: repoRoot, now }),
+          readQuota: async () => {
+            const { seats } = readSeatsConfiguration(process.env);
+            return await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used);
+          },
           seatTerminals: repoId => host.seatTerminals(repoId),
           isAdvisorInReset: isAdvisorSeatInReset,
         },

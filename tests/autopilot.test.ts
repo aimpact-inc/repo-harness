@@ -17,13 +17,22 @@ import {
 import { WINDOW_WITHOUT_WORKERS_MS, WINDOW_WITH_WORKERS_MS, type AttentionHostPortsV1 } from '../src/core/board/attention-delivery';
 import type { BoardSeatTerminalReadV1, BoardV1 } from '../src/core/board/board';
 import {
+  buildQuotaReport,
+  decodeClaudeQuotaCapture,
+  decodeCodexRateLimitsResult,
+  type QuotaReport,
+} from '../src/core/board/quota';
+import {
+  AUTOPILOT_STATE_REFRESH_MS,
   attentionAutopilotTicker,
   attentionLogPath,
   runAttentionWindow,
 } from '../src/effects/board/attention-watch';
+import { BoardCollectError, readGhJson } from '../src/effects/board/collect';
 import {
   autopilotStatePath,
   readAutopilotState,
+  readAutopilotStateAtPath,
   recordAutopilotAdvisorTick,
   startAutopilot,
   stopAutopilot,
@@ -66,6 +75,53 @@ function minimalBoard(now: Date, execution: BoardV1['execution'] = { status: 'ob
       herdr_app: { status: 'not_pinned' },
     },
   };
+}
+
+function healthyQuotaReport(nowMs: number): QuotaReport {
+  const observedAt = new Date(nowMs - 60_000).toISOString();
+  const reset5h = Math.floor((nowMs + 4 * 3_600_000) / 1000);
+  const reset7d = Math.floor((nowMs + 5 * 86_400_000) / 1000);
+  const claude = decodeClaudeQuotaCapture({
+    observed_at: observedAt,
+    rate_limits: {
+      five_hour: { used_percentage: 20, resets_at: reset5h },
+      seven_day: { used_percentage: 25, resets_at: reset7d },
+    },
+  });
+  const chatgpt = decodeCodexRateLimitsResult({
+    rateLimits: {
+      primary: { windowDurationMins: 300, usedPercent: 15, resetsAt: reset5h },
+      secondary: { windowDurationMins: 10080, usedPercent: 20, resetsAt: reset7d },
+      credits: null,
+      planType: 'pro',
+      rateLimitReachedType: null,
+    },
+  }, observedAt);
+  return buildQuotaReport([claude, chatgpt], nowMs);
+}
+
+function staleClaudeQuotaReport(nowMs: number): QuotaReport {
+  const staleAt = new Date(nowMs - 45 * 60_000).toISOString();
+  const freshAt = new Date(nowMs - 60_000).toISOString();
+  const reset5h = Math.floor((nowMs + 4 * 3_600_000) / 1000);
+  const reset7d = Math.floor((nowMs + 5 * 86_400_000) / 1000);
+  const claude = decodeClaudeQuotaCapture({
+    observed_at: staleAt,
+    rate_limits: {
+      five_hour: { used_percentage: 20, resets_at: reset5h },
+      seven_day: { used_percentage: 25, resets_at: reset7d },
+    },
+  });
+  const chatgpt = decodeCodexRateLimitsResult({
+    rateLimits: {
+      primary: { windowDurationMins: 300, usedPercent: 15, resetsAt: reset5h },
+      secondary: { windowDurationMins: 10080, usedPercent: 20, resetsAt: reset7d },
+      credits: null,
+      planType: 'pro',
+      rateLimitReachedType: null,
+    },
+  }, freshAt);
+  return buildQuotaReport([claude, chatgpt], nowMs);
 }
 
 function fakeAdvisorTerminal(address: string, status: string | null, seat = 'advisor', state: 'live' | 'finished' = 'live'): BoardSeatTerminalReadV1 {
@@ -218,6 +274,7 @@ test('attention watcher hourly advisor tick resolves advisor dynamically by labe
     ports: {
       readState: () => readAutopilotState(repo),
       recordTick: now => recordAutopilotAdvisorTick({ repo_root: repo, now }),
+      readQuota: () => healthyQuotaReport(clock),
       seatTerminals: repoId => {
         queriedRepos.push(repoId);
         return { status: 'observed', terminals };
@@ -294,11 +351,10 @@ test('attention watcher hourly advisor tick resolves advisor dynamically by labe
   await runWindow();
   expect(sent).toHaveLength(1);
   expect(sent[0]!.terminal).toBe('t99');
-  expect(sent[0]!.text).toContain('[advisor-plan]');
+  expect(sent[0]!.text).toContain('[rh-notice] advisor-plan #3581 /tmp/repo-harness-advisor/plans/1186405141-20261127-1145.md');
   expect(sent[0]!.text).toContain('batch parents and standalone open issues');
   expect(sent[0]!.text).toContain('repo-harness.repository=1186405141');
   expect(sent[0]!.text).toContain('repo-harness.seat=orchestrator');
-  expect(sent[0]!.text).toContain('/tmp/repo-harness-advisor/plans/20261127-1145.md');
   expect(readAutopilotState(repo).state.last_advisor_tick_at).toBe('2026-11-27T11:45:00.000Z');
 
   // 12:15 (30m after tick): not due yet.
@@ -336,16 +392,18 @@ test('shorter cadence fires mid-window with advancing clock and deliver=false ne
   let clock = Date.parse('2026-11-27T10:00:00.000Z');
   startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 20, now: new Date(clock) });
 
+  const statePath = autopilotStatePath(repo);
   const tick = attentionAutopilotTicker({
     repository_id: 1186405141,
     parent: 3581,
     host: fakeAttentionHost(sent),
     ports: {
-      readState: () => readAutopilotState(repo),
+      readState: () => readAutopilotStateAtPath(statePath),
       recordTick: now => {
         tickTimes.push(now.toISOString());
         return recordAutopilotAdvisorTick({ repo_root: repo, now });
       },
+      readQuota: () => healthyQuotaReport(clock),
       seatTerminals: () => ({ status: 'observed', terminals: [fakeAdvisorTerminal('t42', 'idle')] }),
       isAdvisorInReset: () => false,
     },
@@ -388,7 +446,8 @@ test('shorter cadence fires mid-window with advancing clock and deliver=false ne
     '2026-11-27T11:20:00.000Z',
     '2026-11-27T11:40:00.000Z',
   ]);
-  expect(slept).toEqual([20 * 60_000, 20 * 60_000, 20 * 60_000, 20 * 60_000, 20 * 60_000, 20 * 60_000]);
+  expect(slept.every(step => step > 0 && step <= AUTOPILOT_STATE_REFRESH_MS)).toBe(true);
+  expect(slept.reduce((sum, step) => sum + step, 0)).toBe(2 * WINDOW_WITHOUT_WORKERS_MS);
   expect(WINDOW_WITH_WORKERS_MS).toBe(15 * 60_000);
 
   // Busy advisor defers inside a 60m no-worker window and retries after 15m once idle.
@@ -398,13 +457,15 @@ test('shorter cadence fires mid-window with advancing clock and deliver=false ne
   startAutopilot({ repo_root: deferRepo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 60, now: new Date(deferClock) });
   deferClock += 60 * 60_000; // 11:00: due now
   let advisorStatus: string = 'working';
+  const deferStatePath = autopilotStatePath(deferRepo);
   const deferTicker = attentionAutopilotTicker({
     repository_id: 1186405141,
     parent: 3581,
     host: fakeAttentionHost(deferSent),
     ports: {
-      readState: () => readAutopilotState(deferRepo),
+      readState: () => readAutopilotStateAtPath(deferStatePath),
       recordTick: now => recordAutopilotAdvisorTick({ repo_root: deferRepo, now }),
+      readQuota: () => healthyQuotaReport(deferClock),
       seatTerminals: () => ({ status: 'observed', terminals: [fakeAdvisorTerminal('t77', advisorStatus)] }),
       isAdvisorInReset: () => false,
     },
@@ -479,7 +540,7 @@ test('CLI rh autopilot start|stop|status handles cadence, stop reason, JSON/text
     stop_reason: 'manual check',
   });
 
-  // Pure tick message formatting sanity check against advisor text limits (single line, no hardcoded terminal).
+  // Pure tick message formatting sanity check against advisor text limits (single line, repo-scoped plan path, [rh-notice] envelope).
   const msg = formatAutopilotAdvisorTickMessage({
     repository_id: 42,
     parent: 3581,
@@ -488,4 +549,258 @@ test('CLI rh autopilot start|stop|status handles cadence, stop reason, JSON/text
   });
   expect(msg).not.toContain('\n');
   expect(msg).toContain('repo-harness.repository=42');
+  expect(msg).toContain('[rh-notice] advisor-plan #3581 /tmp/repo-harness-advisor/plans/42-20261127-1300.md');
+});
+
+test('board read failure sends nothing across the failed window and keeps last_advisor_tick_at unchanged', async () => {
+  const repo = createTempGitRepo('rh-autopilot-board-fail-');
+  const home = tmpWorkspace('rh-autopilot-board-fail-home-');
+  cleanupPaths.push(home);
+  const logPath = attentionLogPath(1186405141, 3581, { REPO_HARNESS_HOME: home });
+  const sent: Array<{ readonly terminal: string; readonly text: string }> = [];
+  let quotaReads = 0;
+
+  let clock = Date.parse('2026-11-27T10:00:00.000Z');
+  startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 1, now: new Date(clock) });
+  clock += 60_000; // 10:01: due now
+
+  const ticker = attentionAutopilotTicker({
+    repository_id: 1186405141,
+    parent: 3581,
+    host: fakeAttentionHost(sent),
+    ports: {
+      readState: () => readAutopilotState(repo),
+      recordTick: now => recordAutopilotAdvisorTick({ repo_root: repo, now }),
+      readQuota: () => {
+        quotaReads += 1;
+        return healthyQuotaReport(clock);
+      },
+      seatTerminals: () => ({ status: 'observed', terminals: [fakeAdvisorTerminal('t55', 'idle')] }),
+      isAdvisorInReset: () => false,
+    },
+  });
+
+  // Recoverable GitHub 503 via readGhJson: logs board_unavailable, sends nothing during the entire 15m failed window, keeps timestamp null.
+  const slept: number[] = [];
+  const errSpy = spyOn(process.stderr, 'write').mockImplementation(() => true);
+  try {
+    await runAttentionWindow({
+      parent: 3581,
+      deliver: true,
+      log_path: logPath,
+      autopilot_tick: ticker,
+      collect: () => readGhJson({ repo_root: repo, gh_runner: () => ({ status: 1, stdout: '', stderr: 'gh: HTTP 503' }) }, ['api', 'graphql']) as BoardV1,
+      host: fakeAttentionHost(sent),
+      now: () => new Date(clock),
+      sleep: async ms => { slept.push(ms); clock += ms; },
+    });
+  } finally {
+    errSpy.mockRestore();
+  }
+  expect(slept).toEqual([WINDOW_WITH_WORKERS_MS]);
+  expect(sent).toEqual([]);
+  expect(quotaReads).toBe(0);
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBeNull();
+
+  // Fatal board error also fails before any send and keeps timestamp null.
+  await expect(runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    autopilot_tick: ticker,
+    collect: () => { throw new BoardCollectError('gh auth failed'); },
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async () => {},
+  })).rejects.toBeInstanceOf(BoardCollectError);
+  expect(sent).toEqual([]);
+  expect(quotaReads).toBe(0);
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBeNull();
+
+  const records = readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const ticks = records.filter(record => record.kind === 'autopilot_tick');
+  expect(ticks.map(record => [record.outcome, record.reason])).toEqual([
+    ['skipped', 'board_unavailable'],
+    ['skipped', 'board_unavailable'],
+  ]);
+});
+
+test('unknown quota skips due tick without sending or stamping last_advisor_tick_at', async () => {
+  const repo = createTempGitRepo('rh-autopilot-quota-unknown-');
+  const home = tmpWorkspace('rh-autopilot-quota-unknown-home-');
+  cleanupPaths.push(home);
+  const logPath = attentionLogPath(1186405141, 3581, { REPO_HARNESS_HOME: home });
+  const sent: Array<{ readonly terminal: string; readonly text: string }> = [];
+  let seatQueries = 0;
+
+  let clock = Date.parse('2026-11-27T10:00:00.000Z');
+  startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 1, now: new Date(clock) });
+  clock += 60_000; // 10:01: due now
+
+  let stale = true;
+  const ticker = attentionAutopilotTicker({
+    repository_id: 1186405141,
+    parent: 3581,
+    host: fakeAttentionHost(sent),
+    ports: {
+      readState: () => readAutopilotState(repo),
+      recordTick: now => recordAutopilotAdvisorTick({ repo_root: repo, now }),
+      readQuota: () => (stale ? staleClaudeQuotaReport(clock) : healthyQuotaReport(clock)),
+      seatTerminals: () => {
+        seatQueries += 1;
+        return { status: 'observed', terminals: [fakeAdvisorTerminal('t61', 'idle')] };
+      },
+      isAdvisorInReset: () => false,
+    },
+  });
+
+  await runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    autopilot_tick: ticker,
+    collect: () => minimalBoard(new Date(clock)),
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async () => {},
+  });
+  expect(sent).toEqual([]);
+  expect(seatQueries).toBe(0);
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBeNull();
+
+  // Once quota is fresh again on the next window, the due tick sends and stamps timestamp.
+  stale = false;
+  clock += 60_000;
+  await runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    autopilot_tick: ticker,
+    collect: () => minimalBoard(new Date(clock)),
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async () => {},
+  });
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.terminal).toBe('t61');
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBe('2026-11-27T10:02:00.000Z');
+
+  const records = readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const ticks = records.filter(record => record.kind === 'autopilot_tick');
+  expect(ticks.map(record => [record.outcome, record.reason])).toEqual([
+    ['skipped', 'quota_unknown'],
+    ['sent', null],
+  ]);
+  expect(ticks[0]!.detail).toContain('claude: reading older than 30 min');
+});
+
+test('already-due deadline passed during review work ticks before sleeping', async () => {
+  const repo = createTempGitRepo('rh-autopilot-overdue-');
+  const home = tmpWorkspace('rh-autopilot-overdue-home-');
+  cleanupPaths.push(home);
+  const logPath = attentionLogPath(1186405141, 3581, { REPO_HARNESS_HOME: home });
+  const sent: Array<{ readonly terminal: string; readonly text: string }> = [];
+  const timeline: string[] = [];
+
+  let clock = Date.parse('2026-11-27T10:00:00.000Z');
+  startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 1, now: new Date(clock) });
+
+  const ticker = attentionAutopilotTicker({
+    repository_id: 1186405141,
+    parent: 3581,
+    host: {
+      send: (terminal, text) => {
+        timeline.push(`send@${new Date(clock).toISOString()}`);
+        sent.push({ terminal, text });
+        return { status: 'sent' };
+      },
+    },
+    ports: {
+      readState: () => readAutopilotState(repo),
+      recordTick: now => recordAutopilotAdvisorTick({ repo_root: repo, now }),
+      readQuota: () => healthyQuotaReport(clock),
+      seatTerminals: () => ({ status: 'observed', terminals: [fakeAdvisorTerminal('t71', 'idle')] }),
+      isAdvisorInReset: () => false,
+    },
+  });
+
+  await runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    autopilot_tick: ticker,
+    collect: () => minimalBoard(new Date(clock)),
+    // Review work takes 2 minutes, passing the 10:01 deadline before sleepThroughWindow begins.
+    review: async () => { clock = Date.parse('2026-11-27T10:02:00.000Z'); },
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async () => {
+      timeline.push(`sleep@${new Date(clock).toISOString()}`);
+    },
+  });
+
+  expect(timeline).toEqual([
+    'send@2026-11-27T10:02:00.000Z',
+    'sleep@2026-11-27T10:02:00.000Z',
+  ]);
+  expect(sent).toHaveLength(1);
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBe('2026-11-27T10:02:00.000Z');
+});
+
+test('starting autopilot during an OFF no-worker window ticks without restarting the watcher', async () => {
+  const repo = createTempGitRepo('rh-autopilot-midstart-');
+  const home = tmpWorkspace('rh-autopilot-midstart-home-');
+  cleanupPaths.push(home);
+  const logPath = attentionLogPath(1186405141, 3581, { REPO_HARNESS_HOME: home });
+  const sent: Array<{ readonly terminal: string; readonly text: string }> = [];
+  const tickTimes: string[] = [];
+
+  const statePath = autopilotStatePath(repo);
+  let clock = Date.parse('2026-11-27T10:00:00.000Z');
+  let startedMidWindow = false;
+  let shortenedCadence = false;
+  const ticker = attentionAutopilotTicker({
+    repository_id: 1186405141,
+    parent: 3581,
+    host: fakeAttentionHost(sent),
+    ports: {
+      readState: () => readAutopilotStateAtPath(statePath),
+      recordTick: now => {
+        tickTimes.push(now.toISOString());
+        return recordAutopilotAdvisorTick({ repo_root: repo, now });
+      },
+      readQuota: () => healthyQuotaReport(clock),
+      seatTerminals: () => ({ status: 'observed', terminals: [fakeAdvisorTerminal('t81', 'idle')] }),
+      isAdvisorInReset: () => false,
+    },
+  });
+
+  // Window starts at 10:00 with autopilot OFF and no review_collect poll; owner enables 60m cadence at 10:01,
+  // then shortens cadence to 2m at 10:02: both take effect inside the same window without restarting the watcher.
+  await runAttentionWindow({
+    parent: 3581,
+    deliver: true,
+    log_path: logPath,
+    autopilot_tick: ticker,
+    collect: () => minimalBoard(new Date(clock)),
+    host: fakeAttentionHost(sent),
+    now: () => new Date(clock),
+    sleep: async ms => {
+      clock += ms;
+      if (!startedMidWindow && clock >= Date.parse('2026-11-27T10:01:00.000Z')) {
+        startedMidWindow = true;
+        startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 60, now: new Date(clock) });
+      }
+      if (!shortenedCadence && clock >= Date.parse('2026-11-27T10:02:00.000Z')) {
+        shortenedCadence = true;
+        startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, cadence_minutes: 2, now: new Date(clock) });
+      }
+      if (tickTimes.length >= 1) clock = Date.parse('2026-11-27T11:00:00.000Z');
+    },
+  });
+
+  expect(tickTimes).toEqual(['2026-11-27T10:04:00.000Z']);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.terminal).toBe('t81');
+  expect(readAutopilotState(repo).state.last_advisor_tick_at).toBe('2026-11-27T10:04:00.000Z');
 });

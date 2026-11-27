@@ -1,6 +1,7 @@
 import { AdvisorSeatError, advisorTurnState, resolveAdvisorSeat } from './advisor-seat';
 import type { BoardHostPortsV1, BoardSeatTerminalReadV1 } from './board';
 import { ISSUE_FLOW_WORKER_LIMIT } from './desk';
+import { decodeQuotaReport, type QuotaReport } from './quota';
 
 /**
  * Local auto-pilot control state, hourly advisor tick planner and status projection (#3574).
@@ -89,9 +90,20 @@ export interface AutopilotStatusDocumentV1 {
   readonly parked: readonly AutopilotParkedItemV1[];
 }
 
+export type AutopilotBoardAuthorityV1 =
+  | { readonly status: 'observed' }
+  | { readonly status: 'unavailable'; readonly reason: string };
+
+export type AutopilotQuotaAuthorityV1 =
+  | { readonly status: 'observed'; readonly report: QuotaReport }
+  | { readonly status: 'unavailable'; readonly reason: string };
+
 export type AutopilotTickSkipReason =
   | 'disabled'
   | 'not_due'
+  | 'board_unavailable'
+  | 'quota_unavailable'
+  | 'quota_unknown'
   | 'hc_unavailable'
   | 'advisor_seat_absent'
   | 'advisor_seat_ambiguous'
@@ -399,7 +411,8 @@ function utcPlanStamp(now: Date): string {
 
 /**
  * Single-line hourly trigger sent to the label-resolved live advisor terminal.
- * Covers both batch parents and standalone open issues, and resolves the orchestrator by labels only.
+ * Covers both batch parents and standalone open issues, uses the existing advisor handoff envelope,
+ * scopes the plan path by repository ID, and resolves the orchestrator by labels only.
  */
 export function formatAutopilotAdvisorTickMessage(input: {
   readonly repository_id: number;
@@ -408,23 +421,103 @@ export function formatAutopilotAdvisorTickMessage(input: {
   readonly state: AutopilotStateV1;
 }): string {
   assertValidDate(input.now, 'now');
-  const planPath = `/tmp/repo-harness-advisor/plans/${utcPlanStamp(input.now)}.md`;
+  const planPath = `/tmp/repo-harness-advisor/plans/${input.repository_id}-${utcPlanStamp(input.now)}.md`;
   return `[rh-autopilot] tick repository=${input.repository_id} parent=#${input.parent} cadence=${input.state.cadence_minutes}m target_workers=${input.state.target_parallel_workers} target_ci=${input.state.target_parallel_ci}: `
     + `Read open issues (batch parents and standalone open issues), open PRs, CI/review state, \`rh quota\`, read-only archctx refactor recommendations, and parked items. `
-    + `Write the plan to ${planPath} and send a structured \`[advisor-plan]\` (Ready to dispatch, Ready to review / merge, Council candidates, Parked (Needs Owner)) to the live orchestrator resolved by labels (\`hc ls --label repo-harness.repository=${input.repository_id} --label repo-harness.seat=orchestrator\`). `
+    + `Write the plan (Ready to dispatch, Ready to review / merge, Council candidates, Parked (Needs Owner)) to ${planPath} and send \`[rh-notice] advisor-plan #${input.parent} ${planPath}\` to the live orchestrator resolved by labels (\`hc ls --label repo-harness.repository=${input.repository_id} --label repo-harness.seat=orchestrator\`). `
     + `Soft target: up to ${input.state.target_parallel_workers} parallel workers and ${input.state.target_parallel_ci} CI runs when disjoint ready issues exist; no synthetic issues; council default max ${input.state.council_max_members_default} member(s).`;
 }
 
 /**
+ * Fail-closed quota authority check for an auto-pilot advisor tick.
+ * Reuses the canonical `decodeQuotaReport` decoder (no second parser) and refuses when the read
+ * failed, has no accounts, or any required provider account reports `unknown`.
+ */
+export function autopilotQuotaProblem(
+  quota: AutopilotQuotaAuthorityV1,
+): { readonly reason: 'quota_unavailable' | 'quota_unknown'; readonly detail: string } | null {
+  if (quota.status === 'unavailable') {
+    return { reason: 'quota_unavailable', detail: `quota read failed: ${quota.reason}` };
+  }
+  let report: QuotaReport;
+  try {
+    report = decodeQuotaReport(quota.report);
+  } catch (error) {
+    return {
+      reason: 'quota_unavailable',
+      detail: `quota report invalid: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (report.accounts.length === 0) {
+    return { reason: 'quota_unknown', detail: 'quota report has no accounts' };
+  }
+  const unknown = report.accounts.filter(account => account.state === 'unknown');
+  if (unknown.length > 0) {
+    const summary = unknown
+      .map(account => account.reason === null ? `${account.account}: unknown` : `${account.account}: ${account.reason}`)
+      .join('; ');
+    return { reason: 'quota_unknown', detail: `required quota unknown (${summary})` };
+  }
+  return null;
+}
+
+function planAdvisorSeatDelivery(input: {
+  readonly state: AutopilotStateV1;
+  readonly repository_id: number;
+  readonly parent: number;
+  readonly now: Date;
+  readonly terminals: ReturnType<BoardHostPortsV1['seatTerminals']>;
+  readonly advisor_in_reset: boolean;
+  readonly defer_ms: number;
+}): AutopilotTickPlanV1 {
+  if (input.terminals.status === 'unavailable') {
+    return { action: 'skip', reason: 'hc_unavailable', terminal: null, detail: `hc did not list seat terminals: ${input.terminals.reason}`, next_due_ms: input.defer_ms };
+  }
+  let advisor: BoardSeatTerminalReadV1;
+  try {
+    advisor = resolveAdvisorSeat(input.terminals.terminals);
+  } catch (error) {
+    if (error instanceof AdvisorSeatError && (error.code === 'advisor_seat_absent' || error.code === 'advisor_seat_ambiguous')) {
+      return { action: 'skip', reason: error.code, terminal: null, detail: error.message, next_due_ms: input.defer_ms };
+    }
+    throw error;
+  }
+  if (input.advisor_in_reset) {
+    return { action: 'skip', reason: 'advisor_in_reset', terminal: advisor.address, detail: `advisor ${advisor.address} has an open reset request`, next_due_ms: input.defer_ms };
+  }
+  const turn = advisorTurnState(advisor.status);
+  if (turn === 'running') {
+    return { action: 'skip', reason: 'advisor_busy', terminal: advisor.address, detail: `advisor ${advisor.address} is ${advisor.status ?? 'busy'}`, next_due_ms: input.defer_ms };
+  }
+  if (turn !== 'over') {
+    return { action: 'skip', reason: 'advisor_status_unknown', terminal: advisor.address, detail: `advisor ${advisor.address} status is ${advisor.status ?? 'unreported'}`, next_due_ms: input.defer_ms };
+  }
+  return {
+    action: 'send',
+    terminal: advisor.address,
+    text: formatAutopilotAdvisorTickMessage({
+      repository_id: input.repository_id,
+      parent: input.parent,
+      now: input.now,
+      state: input.state,
+    }),
+    next_due_ms: input.state.cadence_minutes * 60_000,
+  };
+}
+
+/**
  * Pure decision for one watcher check of the hourly advisor tick.
- * Resolves the advisor strictly from `repo-harness.repository` + `repo-harness.seat=advisor` labels,
- * skipping while the advisor is working, blocked, in an unknown state, or in an open seat reset.
+ * Requires observed board and non-unknown quota authorities, resolves the advisor strictly from
+ * `repo-harness.repository` + `repo-harness.seat=advisor` labels, and skips while working,
+ * blocked, unknown, or in an open seat reset.
  */
 export function planAutopilotAdvisorTick(input: {
   readonly state: AutopilotStateV1;
   readonly repository_id: number;
   readonly parent: number;
   readonly now: Date;
+  readonly board: AutopilotBoardAuthorityV1;
+  readonly quota: AutopilotQuotaAuthorityV1;
   readonly terminals: ReturnType<BoardHostPortsV1['seatTerminals']>;
   readonly advisor_in_reset: boolean;
 }): AutopilotTickPlanV1 {
@@ -442,70 +535,15 @@ export function planAutopilotAdvisorTick(input: {
       next_due_ms: dueAtMs - nowMs,
     };
   }
-  if (input.terminals.status === 'unavailable') {
-    return {
-      action: 'skip',
-      reason: 'hc_unavailable',
-      terminal: null,
-      detail: `hc did not list seat terminals: ${input.terminals.reason}`,
-      next_due_ms: null,
-    };
-  }
-  let advisor: BoardSeatTerminalReadV1;
-  try {
-    advisor = resolveAdvisorSeat(input.terminals.terminals);
-  } catch (error) {
-    if (error instanceof AdvisorSeatError && (error.code === 'advisor_seat_absent' || error.code === 'advisor_seat_ambiguous')) {
-      return {
-        action: 'skip',
-        reason: error.code,
-        terminal: null,
-        detail: error.message,
-        next_due_ms: null,
-      };
-    }
-    throw error;
+  if (input.board.status === 'unavailable') {
+    return { action: 'skip', reason: 'board_unavailable', terminal: null, detail: input.board.reason, next_due_ms: null };
   }
   const deferMs = Math.min(AUTOPILOT_BUSY_RETRY_MS, input.state.cadence_minutes * 60_000);
-  if (input.advisor_in_reset) {
-    return {
-      action: 'skip',
-      reason: 'advisor_in_reset',
-      terminal: advisor.address,
-      detail: `advisor ${advisor.address} has an open reset request`,
-      next_due_ms: deferMs,
-    };
+  const quotaIssue = autopilotQuotaProblem(input.quota);
+  if (quotaIssue !== null) {
+    return { action: 'skip', reason: quotaIssue.reason, terminal: null, detail: quotaIssue.detail, next_due_ms: deferMs };
   }
-  const turn = advisorTurnState(advisor.status);
-  if (turn === 'running') {
-    return {
-      action: 'skip',
-      reason: 'advisor_busy',
-      terminal: advisor.address,
-      detail: `advisor ${advisor.address} is ${advisor.status ?? 'busy'}`,
-      next_due_ms: deferMs,
-    };
-  }
-  if (turn !== 'over') {
-    return {
-      action: 'skip',
-      reason: 'advisor_status_unknown',
-      terminal: advisor.address,
-      detail: `advisor ${advisor.address} status is ${advisor.status ?? 'unreported'}`,
-      next_due_ms: null,
-    };
-  }
-  return {
-    action: 'send',
-    terminal: advisor.address,
-    text: formatAutopilotAdvisorTickMessage({
-      repository_id: input.repository_id,
-      parent: input.parent,
-      now: input.now,
-      state: input.state,
-    }),
-    next_due_ms: input.state.cadence_minutes * 60_000,
-  };
+  return planAdvisorSeatDelivery({ ...input, defer_ms: deferMs });
 }
 
 /**
