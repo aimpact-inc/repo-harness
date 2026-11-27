@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.d142ba725a315e4d",
+  "fingerprint": "sha256:5cc60095247f26954f840ffc81500b547f8726de37d0c9f5dd6d9169db711316",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "entrypoint-bypass",
+  "subject": {
+    "selectorKind": "node",
+    "stableKey": "node:component.hook-adapters.primary",
+    "subjectSelectorId": "subject.node.bc214dcf9864a0d0"
+  },
+  "affectedNodeIds": [
+    "component.hook-adapters.primary"
+  ],
+  "affectedNodeCount": 1,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "entrypointBypassCount": 11
+  },
+  "reason": "Declared entrypoint.hook-adapters.runtime (src/cli/hook/runtime.ts) and entrypoint.hook-adapters.event-telemetry (src/cli/hook/event-telemetry.ts) on component.hook-adapters.primary (#3596).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-27T09:19:07.000Z",
+  "provenance": {
+    "headSha": "5954780f44078258cedea8d6208139c3942db5ec",
+    "assessmentDigest": "sha256:15721fc56bfcb60c246cd468409303c9cf50d970fdb00c300d52e9647dc0ca5b",
+    "baselineSnapshotDigest": "sha256:dd414ff512efd7ed7bcec3898eef208ed3d51be3255f511aab0ffc97a4cc7aae"
+  },
+  "snapshotDigest": "sha256:dd414ff512efd7ed7bcec3898eef208ed3d51be3255f511aab0ffc97a4cc7aae",
+  "evidenceDigest": "sha256:15721fc56bfcb60c246cd468409303c9cf50d970fdb00c300d52e9647dc0ca5b",
+  "resolutionDigest": "sha256:3d6a4d66c9de3978816df7e405ad1eb8c4de28bb571968e923e340866e4e22a3",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "module.entrypointBypassCount",
+      "subjectSelectorId": "subject.node.bc214dcf9864a0d0",
+      "nodeId": "component.hook-adapters.primary",
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.40d80401703df47f"
+    }
+  ]
+}
