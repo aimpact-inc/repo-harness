@@ -17,6 +17,7 @@ import {
   observationExecFileSync,
   observationSpawnSync,
 } from '../readonly-observation';
+import { watchGitChild } from './async-child';
 
 /**
  * Wall clock for a git call that does not set its own timeout.
@@ -371,31 +372,11 @@ export function gitExecFile(args: readonly string[], options: GitExecAsyncOption
     const childEnv = gitChildEnv(args, env);
     const values = hasProviderToken(childEnv ?? process.env) ? providerTokenValues(childEnv ?? process.env) : [];
     const child = spawnRaw(resolveGitExecutable(gitBin, env), [...args], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let bytes = 0;
-    let exited: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null = null;
-    let timedOut = false;
-    let aborted = false;
-    let overflow = false;
-    let settled = false;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    const terminate = () => {
-      if (aborted && killTimer !== undefined) return;
-      child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), GIT_KILL_GRACE_MS);
-    };
-    const abort = () => { aborted = true; if (exited) finish(); else terminate(); };
-    const finish = (spawnError?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      clearTimeout(killTimer);
-      abortSignal?.removeEventListener('abort', abort);
-      child.stdout!.destroy();
-      child.stderr!.destroy();
-      const status = exited?.code ?? null;
-      const signal = exited?.signal ?? null;
+    watchGitChild(child, {
+      timeoutMs: resolveGitTimeout(timeout),
+      killGraceMs: GIT_KILL_GRACE_MS,
+      outputBytes: GIT_OUTPUT_MAX_BYTES,
+    }, abortSignal, ({ stdout, stderr, status, signal, timedOut, aborted, overflow, spawnError }) => {
       const redactAll = (text: string, cut = false) => values.length > 0 ? redactText(text, values, cut) : text;
       const errorText = redactAll(Buffer.concat(stderr).toString('utf8'), overflow);
       const failure = (message: string, code: number | null, signalName: NodeJS.Signals | null, timeout: boolean, text: string) =>
@@ -406,33 +387,6 @@ export function gitExecFile(args: readonly string[], options: GitExecAsyncOption
       else if (overflow) failure(`git ${subcommandOf(args)} output exceeded ${GIT_OUTPUT_MAX_BYTES} bytes`, null, signal, false, errorText);
       else if (status !== 0) failure(`git ${subcommandOf(args)} failed (${signal ?? `exit ${status}`})`, status, signal, false, errorText);
       else resolveOutput(redactAll(Buffer.concat(stdout).toString('utf8')));
-    };
-    const collect = (into: Buffer[]) => (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > GIT_OUTPUT_MAX_BYTES) {
-        if (!overflow) { overflow = true; terminate(); }
-        return;
-      }
-      into.push(chunk);
-    };
-    child.stdout!.on('data', collect(stdout));
-    child.stderr!.on('data', collect(stderr));
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      // A process that exited but left its pipes open to a descendant has nothing left to kill.
-      if (exited) finish();
-      else terminate();
-    }, resolveGitTimeout(timeout));
-    child.on('error', (error) => { if (child.pid === undefined) finish(error); });
-    child.on('exit', (code, signal) => {
-      exited = { code, signal };
-      if (timedOut || overflow || aborted) finish();
     });
-    child.on('close', (code, signal) => {
-      exited ??= { code, signal };
-      finish();
-    });
-    abortSignal?.addEventListener('abort', abort, { once: true });
-    if (abortSignal?.aborted) abort();
   });
 }

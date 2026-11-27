@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, unwatchFile, watchFile, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { initGitRepo, tmpWorkspace } from '../helpers/repo-fixture';
@@ -334,8 +334,10 @@ exit 3
     const ready = join(root, 'ready');
     const controller = new AbortController();
     const gitBin = writeGit(root, `#!${process.execPath}\nconst fs = require('node:fs');\nprocess.on('SIGTERM', () => {});\nfs.writeFileSync(${JSON.stringify(ready + '.tmp')}, String(process.pid));\nfs.renameSync(${JSON.stringify(ready + '.tmp')}, ${JSON.stringify(ready)});\nsetInterval(() => {}, 1000);\n`);
-    const watcher = watch(root);
-    const started = new Promise<void>(resolve => watcher.on('change', (_event, name) => { if (name === 'ready') resolve(); }));
+    const started = new Promise<void>(resolve => {
+      // Observe the ready file itself. Bun can miss the directory event for the rename on macOS.
+      watchFile(ready, { interval: 25 }, (stat) => { if (stat.isFile()) resolve(); });
+    });
     try {
       const result = gitExecFile(['status'], { gitBin, signal: controller.signal }).catch((error: unknown) => error);
       await started;
@@ -346,7 +348,7 @@ exit 3
       rmSync(ready);
       await expect(gitExecFile(['status'], { gitBin, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
       expect(readdirSync(root)).toEqual(['git']);
-    } finally { controller.abort(); watcher.close(); rmSync(root, { recursive: true, force: true }); }
+    } finally { controller.abort(); unwatchFile(ready); rmSync(root, { recursive: true, force: true }); }
   });
 
   test('a git call that ignores SIGTERM is killed after the grace period, the call rejects after the child is gone, and the topology lock is released', async () => {

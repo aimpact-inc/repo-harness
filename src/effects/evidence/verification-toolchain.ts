@@ -165,6 +165,7 @@ export function resolveToolchain(env: NodeJS.ProcessEnv): { readonly hash: strin
     ["process-group-launcher", join(packageRoot, "src/effects/process-group-launcher.ts")],
     ["process-group-termination", join(packageRoot, "src/effects/process-group-termination.ts")],
     ["git-runner", join(packageRoot, "src/effects/git/runner.ts")],
+    ["git-async-child", join(packageRoot, "src/effects/git/async-child.ts")],
     ["git-common-directory", join(packageRoot, "src/effects/git/common-directory.ts")],
     ["exclusive-directory-lock", join(packageRoot, "src/effects/locking/exclusive-directory-lock.ts")],
   ] as const;

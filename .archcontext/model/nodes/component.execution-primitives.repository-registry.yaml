@@ -11,3 +11,4 @@ responsibilities:
 source:
   include:
     - src/effects/repo-registry.ts
+    - src/effects/repo-registry-strict.ts
