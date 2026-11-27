@@ -11,13 +11,13 @@ export function buildQuotaCommand(): Command {
     .option('--json', 'Print the readings and states as one JSON line')
     .action(async (options: { json?: boolean }) => {
       // The section is read once: its exhaustion line classifies the windows, and its thresholds route them (#2909).
-      const { seats } = readSeatsConfiguration(process.env);
+      const { seats, overrides } = readSeatsConfiguration(process.env);
       const report = await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used);
       if (options.json) {
         console.log(JSON.stringify(report));
         return;
       }
       const quota = seatAccountQuotas(report.accounts, seats.routing);
-      console.log(`${formatQuotaReport(report)}\n${formatSeatModes(seats, quota)}\n${formatSeatRoutes(seats, quota)}`);
+      console.log(`${formatQuotaReport(report)}\n${formatSeatModes(seats, quota)}\n${formatSeatRoutes(seats, quota, overrides)}`);
     });
 }

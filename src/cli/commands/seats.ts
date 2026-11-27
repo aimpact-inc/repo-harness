@@ -2,8 +2,9 @@ import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'path';
 import { SeatPaneNameError } from '../../core/board/seat-pane-name';
+import { SEAT_OVERRIDES_PROTOCOL, seatOverrideIds } from '../../core/board/seat-overrides';
 import { LAUNCH_SEAT_IDS, type LaunchSeatId } from '../../core/board/seats-settings';
-import { type SeatRouteV1 } from '../../core/board/seat-routing';
+import { shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { readAgyQuota } from '../../effects/board/quota';
 import { readAntigravityTranscript } from '../../effects/board/antigravity-transcript';
 import { setRepoHarnessPanePrefix } from '../../effects/repo-registry';
@@ -14,7 +15,7 @@ import { recordLifecycleEvents } from '../../effects/board/lifecycle-index';
 import { COUNCIL_MEMBERS, parseCouncilMembers } from '../../core/board/planner-consult';
 import { runCouncilConsult } from '../../effects/board/planner-consult';
 import { formatSeatPool } from '../../core/board/seat-pool';
-import { refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
+import { readSeatsConfiguration, refreshSeatPool, SeatsConfigurationError } from '../../effects/board/seats-configuration';
 import { SeatsCommandError, consultIssueNumber, labelInput, labelOwnTerminal, selfLabelingArgv, withSeatLabelOptions, type SeatLabelInput } from './seats-labels';
 import { configuredSeats, probeClaudeResetStartup, quotaCheckedSeat, resolveCouncilMemberSeat } from './seats-runtime';
 import { callerSpace, effectiveSeatLaunch, openSeatTab, seatTabLaunch, writeLaunchError, type SeatLaunchResult } from './seats-launch';
@@ -42,12 +43,12 @@ export async function seatLaunch(seat: string, labels: SeatLabelInput = {}, env:
 }
 
 export function seatResetTarget(identity: SeatResetIdentity, env: NodeJS.ProcessEnv): SeatResetTarget {
-  const { seats } = configuredSeats(env);
+  const { seats, overrides } = configuredSeats(env);
   const configured = seats[identity.seat];
   return {
     runtime: configured.runtime,
     model: async () => {
-      const { seat, modeKnown } = await quotaCheckedSeat(identity.seat, seats, configured, env, undefined, () => readAgyQuota(env));
+      const { seat, modeKnown } = await quotaCheckedSeat(identity.seat, seats, configured, env, undefined, () => readAgyQuota(env), overrides);
       return { model: seat.model, effort: seat.effort, modeKnown };
     },
   };
@@ -102,6 +103,20 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
   return seatResetSteps(identity, action, host);
 }
 
+function renderSeatOverridesText(env: NodeJS.ProcessEnv): string {
+  const { base_seats, overrides } = readSeatsConfiguration(env);
+  const ids = seatOverrideIds(overrides);
+  if (ids.length === 0) return 'No active owner seat overrides.';
+  return ids.map(id => {
+    const override = overrides[id]!;
+    const base = base_seats[id];
+    const effort = override.effort === null ? '' : ` ${override.effort}`;
+    const model = shownModel(`seats.${id}.model`, override.model);
+    const baseText = base === null ? 'unconfigured' : `${base.runtime} ${shownModel(`seats.${id}.model`, base.model)}`;
+    return `${id}: ${override.runtime} ${model}${effort} (owner override; authorized ${override.authorized_at}; catalog ${baseText})`;
+  }).join('\n');
+}
+
 /** `loadNotify` comes from the composition root, only when peer-runtime is selected. */
 export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): Command {
   const seats = new Command('seats').description('Seat model pools and launch commands for Herdr panes');
@@ -147,6 +162,25 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       if (launch.labels.length > 0) process.stderr.write(`labels: ${launch.labels.join(' ')}\n`);
       if (launch.name !== null) process.stderr.write(`name: ${launch.name}\ntab: ${launch.tab}\n`);
       if (launch.ownerException !== null) process.stderr.write(`owner exception: ${launch.ownerException}\n`);
+      if (launch.ownerOverride !== undefined) {
+        const effort = launch.ownerOverride.effort === null ? '' : ` ${launch.ownerOverride.effort}`;
+        process.stderr.write(`owner override: ${launch.ownerOverride.runtime} ${launch.ownerOverride.model}${effort} (authorized ${launch.ownerOverride.authorized_at})\n`);
+      }
+    });
+  seats.command('overrides')
+    .description('Show active owner-authorized seat route overrides (read-only)')
+    .option('--json', 'Print the active overrides as JSON')
+    .action(({ json }: { json?: boolean }) => {
+      try {
+        if (json === true) {
+          const { revision, overrides } = readSeatsConfiguration(process.env);
+          process.stdout.write(`${JSON.stringify({ protocol: SEAT_OVERRIDES_PROTOCOL, kind: 'seat_overrides', config_revision: revision, overrides }, null, 2)}\n`);
+          return;
+        }
+        process.stdout.write(`${renderSeatOverridesText(process.env)}\n`);
+      } catch (error) {
+        writeLaunchError(error);
+      }
     });
   withSeatLabelOptions(seats
     .command('launch')
@@ -172,8 +206,9 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       }
       const { model: _model, modelField, ...shown } = result;
       const model = modelField === null ? {} : { model: modelField };
+      const ownerOverride = result.launch.ownerOverride === undefined ? {} : { ownerOverride: result.launch.ownerOverride };
       process.stdout.write(options.json === true ? `${JSON.stringify({ ok: true, ...shown, ...model }, null, 2)}\n`
-        : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement, ...model })}\n`);
+        : `${JSON.stringify({ ok: true, seat, name: result.launch.name, tab: result.launch.tab, space: result.space, placement: result.placement, ...model, ...ownerOverride })}\n`);
     });
   seats.command('council')
     .description(`Open 1 to 3 read-only council panes (${COUNCIL_MEMBERS.join(', ')}) for one issue and write proposals outside Git worktrees`)

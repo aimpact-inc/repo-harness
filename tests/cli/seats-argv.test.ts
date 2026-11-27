@@ -3638,3 +3638,74 @@ ${prelude}
     expect([sends(), log().at(-1)?.kind, log().at(-1)?.detail]).toEqual([[...Array(4).fill("/clear"), "/exit"], "relaunch_failed", "claude_did_not_exit"]);
   }));
 });
+
+describe("rh seats overrides (#3641)", () => {
+  test("owner override changes seats argv launch, displays read-only in seats overrides, and restores catalog route on revoke (#3641)", () => {
+    const outOfCatalog = { ...DEFAULT_SEATS_CONFIG['worker-opus'], runtime: 'pi' as const, model: 'example-provider/custom-model' };
+    // Without an override record, an out-of-catalog route in seats still fails closed.
+    withHome({ ...DEFAULT_SEATS_CONFIG, 'worker-opus': outOfCatalog }, home => {
+      const refused = argv(home, "worker-opus", "--json");
+      expect([refused.status, JSON.parse(refused.stderr).error]).toEqual([1, "config_invalid"]);
+    });
+
+    // With an active owner override record, argv honors the override and surfaces read-only metadata.
+    withHome(DEFAULT_SEATS_CONFIG, home => {
+      const configPath = join(home, ".repo-harness", "config.json");
+      const authorizedAt = "2026-11-27T15:30:00.000Z";
+      writeFileSync(configPath, JSON.stringify({
+        seats: DEFAULT_SEATS_CONFIG,
+        seat_overrides: {
+          "worker-opus": {
+            runtime: "pi",
+            model: "example-provider/custom-model",
+            effort: "high",
+            authorized_at: authorizedAt,
+            instruction: "Owner authorized custom provider",
+          },
+        },
+      }));
+
+      const jsonRun = argv(home, "worker-opus", "--json");
+      expect(jsonRun.status, jsonRun.stderr).toBe(0);
+      const launched = JSON.parse(jsonRun.stdout);
+      const args = bare(launched.argv);
+      const piIndex = args.indexOf("pi");
+      expect(piIndex).toBeGreaterThanOrEqual(0);
+      expect(args.slice(piIndex, piIndex + 7)).toEqual(["pi", "--provider", "example-provider", "--model", "custom-model", "--thinking", "high"]);
+      expect(launched.ownerOverride).toEqual({
+        seat: "worker-opus",
+        runtime: "pi",
+        model: "seats.worker-opus.model",
+        effort: "high",
+        authorized_at: authorizedAt,
+      });
+
+      const plainRun = argv(home, "worker-opus");
+      expect(plainRun.status, plainRun.stderr).toBe(0);
+      expect(plainRun.stderr).toContain(`owner override: pi seats.worker-opus.model high (authorized ${authorizedAt})`);
+
+      const runSeats = (...seatArgs: string[]) => spawnSync(process.execPath, [CLI, "seats", ...seatArgs], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+      const listText = runSeats("overrides");
+      expect(listText.status, listText.stderr).toBe(0);
+      expect(listText.stdout).toContain(`worker-opus: pi seats.worker-opus.model high (owner override; authorized ${authorizedAt}; catalog claude opus)`);
+      expect(listText.stdout).not.toContain("example-provider/custom-model");
+
+      const listJson = runSeats("overrides", "--json");
+      expect(listJson.status, listJson.stderr).toBe(0);
+      expect(JSON.parse(listJson.stdout).overrides["worker-opus"]).toMatchObject({
+        runtime: "pi", model: "example-provider/custom-model", effort: "high", authorized_at: authorizedAt,
+      });
+
+      // No CLI write subcommand exists for overrides.
+      const help = runSeats("--help");
+      expect(help.status).toBe(0);
+      expect(help.stdout).not.toMatch(/^\s+set\b/mu);
+
+      // Removing the override record restores the catalog route.
+      writeFileSync(configPath, JSON.stringify({ seats: DEFAULT_SEATS_CONFIG }));
+      expect(launch(home, "worker-opus").runtime).toBe("claude");
+      expect(launch(home, "worker-opus").ownerOverride).toBeUndefined();
+      expect(runSeats("overrides").stdout.trim()).toBe("No active owner seat overrides.");
+    });
+  });
+});

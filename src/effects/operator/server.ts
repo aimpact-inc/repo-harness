@@ -63,7 +63,19 @@ import { AGENTS_CONFIGURATION_FAILURES, OPERATOR_SETTINGS_AGENTS_PATH, OPERATOR_
 import { OPERATOR_REPORT_LANGUAGE_PATH, OPERATOR_REPORT_LANGUAGE_ROUTE, OPERATOR_DOCUMENTATION_LANGUAGE_ROUTE, requireLanguageSettings, readDocumentationLanguage, reportingLanguageWriteRoute, documentationLanguageWriteRoute, type OperatorLanguageSettingsAdapter } from './language-settings-route';
 export type { OperatorLanguageSettingsAdapter } from './language-settings-route';
 import { OperatorWriteRefusal } from './write-run';
-import { OPERATOR_SETTINGS_SEATS_PATH, OPERATOR_SETTINGS_SEATS_ROUTE, SEATS_CONFIGURATION_FAILURES, readSeatsSettings, seatsSettingsWriteRoute } from './seats-settings-route';
+import {
+  OPERATOR_SETTINGS_SEATS_PATH,
+  OPERATOR_SETTINGS_SEATS_ROUTE,
+  OPERATOR_SETTINGS_SEAT_OVERRIDES_PATH,
+  OPERATOR_SETTINGS_SEAT_OVERRIDES_REVOKE_ROUTE,
+  OPERATOR_SETTINGS_SEAT_OVERRIDES_ROUTE,
+  SEATS_CONFIGURATION_FAILURES,
+  readSeatOverridesSettings,
+  readSeatsSettings,
+  seatOverridesRevokeWriteRoute,
+  seatOverridesWriteRoute,
+  seatsSettingsWriteRoute,
+} from './seats-settings-route';
 import { SeatsConfigurationError, readSeatsConfiguration } from '../board/seats-configuration';
 import { AgentsConfigurationError } from '../configuration/agents-configuration';
 import type { AgentRuntimesCacheV1 } from '../../core/board/agents-settings';
@@ -172,9 +184,13 @@ export const OPERATOR_ROUTES: readonly OperatorRouteV1[] = Object.freeze([
   // The first write route: it changes only the host config's `agents` section.
   Object.freeze({ id: 'settings_agents_write', method: 'POST', pattern: OPERATOR_SETTINGS_AGENTS_ROUTE.source, write: true }),
   Object.freeze({ id: 'settings_seats', method: 'GET', pattern: OPERATOR_SETTINGS_SEATS_PATH, write: false }),
+  Object.freeze({ id: 'settings_seat_overrides', method: 'GET', pattern: OPERATOR_SETTINGS_SEAT_OVERRIDES_PATH, write: false }),
   Object.freeze({ id: 'quota', method: 'GET', pattern: OPERATOR_QUOTA_PATH, write: false }),
   // It changes only the host config's `seats` section; running panes keep their launch arguments.
   Object.freeze({ id: 'settings_seats_write', method: 'POST', pattern: OPERATOR_SETTINGS_SEATS_ROUTE.source, write: true }),
+  // Owner-authorized route overrides in `seat_overrides`; running panes keep their launch arguments.
+  Object.freeze({ id: 'settings_seat_overrides_write', method: 'POST', pattern: OPERATOR_SETTINGS_SEAT_OVERRIDES_ROUTE.source, write: true }),
+  Object.freeze({ id: 'settings_seat_overrides_revoke', method: 'POST', pattern: OPERATOR_SETTINGS_SEAT_OVERRIDES_REVOKE_ROUTE.source, write: true }),
   Object.freeze({ id: 'architecture_modules', method: 'GET', pattern: OPERATOR_ARCHITECTURE_MODULES_ROUTE.source, write: false }),
   Object.freeze({ id: 'architecture_module', method: 'GET', pattern: OPERATOR_ARCHITECTURE_MODULE_ROUTE.source, write: false }),
   Object.freeze({ id: 'architecture_review_prompt', method: 'GET', pattern: OPERATOR_ARCHITECTURE_REVIEW_PROMPT_ROUTE.source, write: false }),
@@ -437,6 +453,8 @@ export async function startOperatorServer(
     reportingLanguageWriteRoute(options.language_settings),
     documentationLanguageWriteRoute(options.env, options.language_settings),
     seatsSettingsWriteRoute(options.env),
+    seatOverridesWriteRoute(options.env),
+    seatOverridesRevokeWriteRoute(options.env),
     worktreeCleanupWriteRoute(options.env),
     worktreeCleanupPlanWriteRoute({ env: options.env }),
     worktreeCleanupExecuteWriteRoute({ env: options.env }),
@@ -751,6 +769,21 @@ export async function startOperatorServer(
       }
       try {
         sendJson(response, 200, await readSeatsSettings(options.env), headOnly);
+      } catch (error) {
+        if (!(error instanceof SeatsConfigurationError)) throw error;
+        sendRefusal(request, response, SEATS_CONFIGURATION_FAILURES[error.code].status,
+          errorBody(error.code, error.message, SEATS_CONFIGURATION_FAILURES[error.code].next_action), headOnly);
+      }
+      return;
+    }
+
+    if (pathname === OPERATOR_SETTINGS_SEAT_OVERRIDES_PATH) {
+      if (url.search !== '') {
+        sendRefusal(request, response, 400, errorBody('invalid_request', 'Seat overrides accept no query selectors.'), headOnly);
+        return;
+      }
+      try {
+        sendJson(response, 200, readSeatOverridesSettings(options.env), headOnly);
       } catch (error) {
         if (!(error instanceof SeatsConfigurationError)) throw error;
         sendRefusal(request, response, SEATS_CONFIGURATION_FAILURES[error.code].status,

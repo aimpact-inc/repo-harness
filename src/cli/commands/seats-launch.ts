@@ -11,6 +11,7 @@ import {
   type LaunchSeatId,
   type SeatConfigV1,
   type SeatId,
+  type SeatRuntime,
 } from '../../core/board/seats-settings';
 import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
@@ -30,12 +31,22 @@ import { AntigravityHooksPathError } from '../../effects/host-config/gate';
 import { SeatsCommandError, checkOwnerException, panePrefix, seatId, seatLabels, selfLabelingArgv, type SeatLabelInput } from './seats-labels';
 import { checkAgyLaunchTarget, checkedAgyRuntime, configuredSeats, installedPiExtension, plannedGatekeeper, quotaCheckedSeat } from './seats-runtime';
 
+export interface SeatLaunchOverrideV1 {
+  readonly seat: SeatId;
+  readonly runtime: SeatRuntime;
+  readonly model: string;
+  readonly effort: string | null;
+  readonly authorized_at: string;
+}
+
 export type SeatLaunchResult = SeatLaunchV1 & {
   readonly labels: readonly string[];
   readonly name: string | null;
   readonly tab: string | null;
   /** The owner decision URL that lifted the quota reservation for this launch (#2769). */
   readonly ownerException: string | null;
+  /** Active owner route override applied to this launch (#3641); omitted when running the catalog route. */
+  readonly ownerOverride?: SeatLaunchOverrideV1;
 };
 
 /** The launch and the effective seat config that it starts. */
@@ -48,7 +59,7 @@ export async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, 
   readonly effective: SeatConfigV1; readonly effectiveId: LaunchSeatId | 'gatekeeper-fallback'; readonly modeKnown: boolean;
 }> {
   const id = seatId(seat);
-  const { config, seats } = configuredSeats(env);
+  const { config, seats, overrides } = configuredSeats(env);
   const configured = configuredOverride ?? seats[id];
   if (configured === null) throw new SeatsCommandError('seat_not_configured', `The ${id} seat is not configured. Configure it in the seats section before launch.`);
   // The board review passes the gatekeeper route that its plan checked: the launched seat is the planned one, with no second quota read.
@@ -81,7 +92,7 @@ export async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, 
   // A planned gatekeeper route reserves no Claude seat while Claude is saving or exhausted.
   const { id: effectiveId, seat: effective, modeKnown, claudeSaving } = plannedSeat !== null
     ? { id: runtimeSeat, seat: plannedSeat.seat, modeKnown: true, claudeSaving: false }
-    : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException, readAgy);
+    : await quotaCheckedSeat(id, seats, configured, env, labels.ownerException, readAgy, overrides);
   if (prepareFleet && effective.runtime === 'agy') {
     if (agyProbe === undefined) {
       const installation = await agyInstallation?.catch(() => undefined);
@@ -126,10 +137,19 @@ export async function effectiveSeatLaunch(seat: string, labels: SeatLabelInput, 
     argv[argv.indexOf(effective.runtime)] = executable;
   }
   const labeledArgv = labelSet === undefined ? argv : selfLabelingArgv(id, labels, argv, env);
+  const activeOverride = configuredOverride === undefined ? overrides[effectiveId] : undefined;
+  const ownerOverride: SeatLaunchOverrideV1 | undefined = activeOverride === undefined ? undefined : {
+    seat: effectiveId,
+    runtime: activeOverride.runtime,
+    model: shownModel(`seats.${effectiveId}.model`, activeOverride.model),
+    effort: activeOverride.effort,
+    authorized_at: activeOverride.authorized_at,
+  };
   return { effective, effectiveId, modeKnown, agentArgv: argv, launch: {
     ...launch,
     argv: labelSet === undefined ? argv : (terminal === 'new' ? seatLoginShell(labeledArgv) : labeledArgv),
     labels: labelSet === undefined ? [] : hcLabelPairs(labelSet), name, tab, ownerException: labels.ownerException ?? null,
+    ...(ownerOverride === undefined ? {} : { ownerOverride }),
   } };
 }
 

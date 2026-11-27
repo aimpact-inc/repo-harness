@@ -12,6 +12,7 @@ import {
   type AgentRuntimeProbeV1,
   type AgentRuntimesCacheV1,
 } from '../../src/core/board/agents-settings';
+import { decodeSeatOverridesResponse } from '../../src/core/board/seat-overrides';
 import { DEFAULT_SEATS_CONFIG, MODEL_FAMILY_LABELS, NATIVE_SEATS_PRESET, ROUTING_CLASSES, SEAT_IDS, WORKER_SEAT_IDS, decodeSeatsConfig, decodeSeatsSettings, type SeatRoutingV1 } from '../../src/core/board/seats-settings';
 import { SEAT_POOL_STALE_MS, buildSeatPool, emptySeatPoolProbe } from '../../src/core/board/seat-pool';
 import { fetchSeatsSettings } from '../../src/operator-web/seats';
@@ -1388,6 +1389,155 @@ describe('seat settings routes', () => {
     const saved = await post(harness, { expected_revision: revision, seats: { ...section, advisor } }, 'seats');
     expect(saved.status).toBe(200);
     expect((await saved.json()).changed_keys).toEqual(['seats.advisor.fleet']);
+  });
+
+  test('owner seat override API sets, exposes, enforces invariants, and revokes an out-of-catalog route (#3641)', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const env = { HOME: harness.home };
+    const overrideModel = 'example-provider/custom-model';
+    const instruction = 'Owner authorized custom provider for worker-opus';
+    const sendOverride = (path: '/api/v1/settings/seats/overrides' | '/api/v1/settings/seats/overrides/revoke', body: Record<string, unknown>) =>
+      fetch(`${harness.server.url}${path}`, {
+        method: 'POST',
+        headers: { Origin: harness.server.url, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json', Cookie: harness.cookie },
+        body: JSON.stringify({ request_id: randomUUID(), ...body }),
+      });
+
+    // Without an override, an out-of-catalog route on worker-opus in frontend routing still fails closed.
+    const initial = await seats(harness);
+    const { revision: baseRev, ...baseSection } = initial.config;
+    const directOutOfCatalog = await post(harness, {
+      expected_revision: baseRev,
+      seats: { ...baseSection, 'worker-opus': { ...baseSection['worker-opus'], runtime: 'pi', model: overrideModel } },
+    }, 'seats');
+    expect(directOutOfCatalog.status).toBe(400);
+
+    // GET /api/v1/settings/seats/overrides starts empty.
+    const emptyGet = await fetch(`${harness.server.url}/api/v1/settings/seats/overrides`);
+    expect(emptyGet.status).toBe(200);
+    expect(decodeSeatOverridesResponse(await emptyGet.json())).toEqual({
+      protocol: 1, kind: 'operator_seat_overrides', config_revision: baseRev, overrides: {},
+    });
+
+    // Authorize an override through the operator write channel; POST response and audit omit submitted free text (I1).
+    const setRes = await sendOverride('/api/v1/settings/seats/overrides', {
+      expected_revision: baseRev,
+      seat: 'worker-opus',
+      runtime: 'pi',
+      model: overrideModel,
+      effort: 'high',
+      instruction,
+      owner_approved: true,
+    });
+    expect(setRes.status).toBe(200);
+    const setText = await setRes.text();
+    expect(setText).not.toContain(overrideModel);
+    expect(setText).not.toContain(instruction);
+    expect(readFileSync(operatorAuditPath({ REPO_HARNESS_HOME: harness.harnessHome }), 'utf8')).not.toContain(overrideModel);
+    const setBody = JSON.parse(setText) as { config_revision: string; seat: string; active: boolean; authorized_at: string; changed_keys: string[] };
+    expect(setBody).toMatchObject({ seat: 'worker-opus', active: true, changed_keys: ['seat_overrides.worker-opus'] });
+
+    // GET overrides shows the record; GET /api/v1/settings/seats preserves the valid base catalog route; resolver overlays the override.
+    const activeOverrides = decodeSeatOverridesResponse(await (await fetch(`${harness.server.url}/api/v1/settings/seats/overrides`)).json());
+    expect(activeOverrides.overrides['worker-opus']).toEqual({
+      runtime: 'pi', model: overrideModel, effort: 'high', authorized_at: setBody.authorized_at, instruction,
+    });
+    expect((await seats(harness)).config['worker-opus']).toMatchObject({ runtime: 'claude', model: 'opus' });
+    const resolved = readSeatsConfiguration(env);
+    expect(resolved.seats['worker-opus']).toMatchObject({ runtime: 'pi', model: overrideModel, effort: 'high', advisor_model: null });
+    expect(resolved.base_seats['worker-opus']).toMatchObject({ runtime: 'claude', model: 'opus' });
+
+    // Disabling a host runtime used only by an active override is refused.
+    const agentsBefore = await settings(harness);
+    const disablePi = await post(harness, {
+      expected_revision: agentsBefore.config.revision,
+      changes: [{ runtime: 'pi', enabled: false, uses: [] }],
+    });
+    expect([disablePi.status, (await disablePi.json()).error.code]).toEqual([422, 'runtime_in_use']);
+
+    // Turning off an optional seat with an active override is refused until revoked.
+    const lightSet = await sendOverride('/api/v1/settings/seats/overrides', {
+      expected_revision: setBody.config_revision,
+      seat: 'worker-light',
+      runtime: 'codex',
+      model: 'custom-model',
+      effort: 'medium',
+      instruction: 'Owner authorized codex for worker-light',
+      owner_approved: true,
+    });
+    expect(lightSet.status).toBe(200);
+    const lightRev = (await lightSet.json()).config_revision as string;
+    const disableSeat = await post(harness, {
+      expected_revision: lightRev,
+      seats: {
+        ...baseSection,
+        'worker-light': null,
+        routing: {
+          ...baseSection.routing,
+          important_fast: baseSection.routing.important_fast.filter(id => id !== 'worker-light'),
+          simple_fast: baseSection.routing.simple_fast.filter(id => id !== 'worker-light'),
+        },
+      },
+    }, 'seats');
+    expect([disableSeat.status, (await disableSeat.json()).error.code]).toEqual([422, 'seat_override_active']);
+
+    // Revoking both overrides removes top-level seat_overrides and restores the catalog routes.
+    const revokeLight = await sendOverride('/api/v1/settings/seats/overrides/revoke', {
+      expected_revision: lightRev, seat: 'worker-light', owner_approved: true,
+    });
+    expect(revokeLight.status).toBe(200);
+    const revAfterLight = (await revokeLight.json()).config_revision as string;
+    const revokeOpus = await sendOverride('/api/v1/settings/seats/overrides/revoke', {
+      expected_revision: revAfterLight, seat: 'worker-opus', owner_approved: true,
+    });
+    expect(revokeOpus.status).toBe(200);
+    const revokeBody = await revokeOpus.json() as { config_revision: string; seat: string; active: boolean; authorized_at: null; changed_keys: string[] };
+    expect(revokeBody).toMatchObject({ seat: 'worker-opus', active: false, authorized_at: null, changed_keys: ['seat_overrides.worker-opus'] });
+    expect(JSON.parse(readFileSync(harness.configPath, 'utf8')).seat_overrides).toBeUndefined();
+    expect(readSeatsConfiguration(env).seats['worker-opus']).toMatchObject({ runtime: 'claude', model: 'opus' });
+
+    // Revoking a seat without an active override returns 404.
+    const missing = await sendOverride('/api/v1/settings/seats/overrides/revoke', {
+      expected_revision: revokeBody.config_revision, seat: 'worker-opus', owner_approved: true,
+    });
+    expect([missing.status, (await missing.json()).error.code]).toEqual([404, 'seat_override_not_found']);
+  });
+
+  test('owner seat override API and resolver fail closed on invalid authorization, ranges, and stored records (#3641)', async () => {
+    const harness = await startHarness({ agents: PANE_AGENTS });
+    const env = { HOME: harness.home };
+    const { revision } = (await seats(harness)).config;
+    const sendSet = (body: Record<string, unknown>) => fetch(`${harness.server.url}/api/v1/settings/seats/overrides`, {
+      method: 'POST',
+      headers: { Origin: harness.server.url, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json', Cookie: harness.cookie },
+      body: JSON.stringify({ request_id: randomUUID(), expected_revision: revision, ...body }),
+    });
+    const base = { seat: 'worker-opus', runtime: 'pi', model: 'example-provider/custom-model', effort: 'high', instruction: 'Owner approved', owner_approved: true };
+
+    const cases: readonly (readonly [string, Record<string, unknown>, number, string])[] = [
+      ['owner_approved false', { ...base, owner_approved: false }, 422, 'owner_approval_required'],
+      ['blank instruction', { ...base, instruction: '   ' }, 422, 'seat_override_instruction_invalid'],
+      ['newline instruction', { ...base, instruction: 'line1\nline2' }, 422, 'seat_override_instruction_invalid'],
+      ['disabled runtime', { ...base, runtime: 'agy', model: 'custom-model', effort: null }, 422, 'seat_runtime_not_enabled'],
+      ['agy disallowed seat', { ...base, seat: 'reviewer', runtime: 'agy', model: 'custom-model', effort: null }, 422, 'seat_runtime_not_allowed'],
+      ['bad pi model shape', { ...base, model: 'no-slash' }, 422, 'seat_model_invalid'],
+      ['retired model', { ...base, runtime: 'codex', model: 'gpt-6.1-terra' }, 422, 'seat_model_retired'],
+      ['invalid effort', { ...base, effort: 'extreme' }, 422, 'seat_effort_invalid'],
+      ['unconfigured optional seat', { ...base, seat: 'council' }, 422, 'seat_not_configured'],
+      ['stale revision', { ...base, expected_revision: 'absent' }, 409, 'revision_conflict'],
+    ];
+    for (const [label, payload, status, code] of cases) {
+      const response = await sendSet(payload);
+      expect([label, response.status, (await response.json()).error.code]).toEqual([label, status, code]);
+    }
+    expect(sha256(harness.configPath)).toBe(revision);
+
+    // Tampered stored seat_overrides fails closed in readSeatsConfiguration.
+    writeFileSync(harness.configPath, JSON.stringify({
+      agents: PANE_AGENTS,
+      seat_overrides: { 'worker-opus': { runtime: 'pi', model: 'example-provider/custom-model', effort: 'high' } },
+    }));
+    expect(() => readSeatsConfiguration(env)).toThrow('seat_overrides');
   });
 
   test('a stale revision and a reused request_id with another body get 409', async () => {

@@ -257,9 +257,9 @@ export async function runReview(input: ReviewInput): Promise<ReviewResultV1> {
     if (input.pr !== undefined && !board.pull_requests.some(pr => pr.number === input.pr)) throw new BoardCollectError(`#${input.pr} is not a pull request of #${input.parent}`);
     const open = board.pull_requests.filter(pr => (input.pr === undefined || pr.number === input.pr) && pr.state === 'open' && !pr.is_draft && pr.required_check.status === 'success' && pr.acceptance.status === 'not_accepted');
     const comments = new Map(open.map(pr => [pr.number, readComments(input, pr.number)]));
-    const { seats } = readSeatsConfiguration(process.env);
+    const { seats, overrides } = readSeatsConfiguration(process.env);
     // The same projection that `seatLaunch` uses for `seats argv gatekeeper`, so the family check names the seat that launches.
-    const gatekeeper = effectiveGatekeeper(seats, seatAccountQuotas((await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing));
+    const gatekeeper = effectiveGatekeeper(seats, seatAccountQuotas((await readQuotaReport(process.env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing), overrides);
     const decisions = planReview({ board, comments, gatekeeper, reviewer: seats.reviewer }).filter(decision => input.pr === undefined || decision.pr === input.pr);
     const terminalsRead = input.host.seatTerminals(repositoryId);
     const seatTerminals = terminalsRead.status === 'observed' ? terminalsRead.terminals : [];

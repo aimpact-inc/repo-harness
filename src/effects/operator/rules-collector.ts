@@ -72,10 +72,10 @@ export const runRulesProcess: RulesProcessRunner = (argv, options) => new Promis
 /** The five routing classes for the current seats config and quota; null when either cannot be read. */
 export async function readRulesRoutes(env: NodeJS.ProcessEnv): Promise<readonly RulesRouteV1[] | null> {
   try {
-    const { seats } = readSeatsConfiguration(env);
+    const { seats, overrides } = readSeatsConfiguration(env);
     const quota = seatAccountQuotas((await readQuotaReport(env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
     return ROUTING_CLASSES.map((task) => {
-      const route = selectSeatRoute(task, seats, quota);
+      const route = selectSeatRoute(task, seats, quota, undefined, undefined, overrides);
       return route.id === null
         ? { class: task, seat: null, runtime: null, model: null }
         : { class: task, seat: route.id, runtime: route.seat.runtime, model: route.seat.model };

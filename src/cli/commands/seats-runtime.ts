@@ -3,16 +3,19 @@ import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { join } from 'path';
 import {
+  decodeEffectiveSeats,
+  effectiveSeatsInvalidMessage,
+  type SeatOverridesV1,
+} from '../../core/board/seat-overrides';
+import {
   AGY_READONLY_SEAT_TOOLS,
   ALLOWED_SEAT_FLEET_ROLES,
   AgySeatSettingsError,
   COUNCIL_TOOLS,
-  decodeSeatsConfig,
   isAgyAllowedSeat,
   isCouncilSeat,
   isWorkerSeat,
   seatHostId,
-  seatsConfigInvalidMessage,
   type AgyCatalogModel,
   type LaunchSeatId,
   type SeatConfigV1,
@@ -46,7 +49,7 @@ export function plannedGatekeeper(route: SeatRouteV1): Exclude<SeatRouteV1, { id
  * account of the launched seat has no fresh weekly reading (missing, unreadable or stale capture), so its mode is unknown.
  */
 export async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, configured: SeatConfigV1, env: NodeJS.ProcessEnv,
-  ownerException: string | undefined, readAgy: () => Promise<QuotaReading[]>): Promise<{
+  ownerException: string | undefined, readAgy: () => Promise<QuotaReading[]>, overrides?: SeatOverridesV1): Promise<{
   readonly id: LaunchSeatId | 'gatekeeper-fallback'; readonly seat: SeatConfigV1; readonly modeKnown: boolean;
   /** The Claude mode that `effectiveSeatConfig` read for this launch (#3091). */
   readonly claudeSaving: boolean;
@@ -72,11 +75,11 @@ export async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, c
   if (id === 'gatekeeper' && fallback !== null && own !== null && quota[own].state === 'exhausted' && seatAccount(fallback) !== own) {
     quota = await read(seatAccount(fallback));
   }
-  const gatekeeper = id === 'gatekeeper' ? effectiveGatekeeper(seats, quota) : null;
+  const gatekeeper = id === 'gatekeeper' ? effectiveGatekeeper(seats, quota, overrides) : null;
   const launchedId = gatekeeper?.id === 'gatekeeper-fallback' ? 'gatekeeper-fallback' : id;
   const seat = gatekeeper?.id === 'gatekeeper-fallback'
     ? gatekeeper.seat
-    : isCouncilSeat(id) ? configured : effectiveSeatConfig(id, { ...seats, [id]: configured }, quota)!;
+    : isCouncilSeat(id) ? configured : effectiveSeatConfig(id, { ...seats, [id]: configured }, quota, overrides)!;
   const account = seatAccount(seat);
   if (account !== null && seatState(launchedId, seat, quota) === 'exhausted') {
     throw new SeatsCommandError('seat_quota_exhausted', `The ${account} account is exhausted. Wait for quota before launching ${id}.${gatekeeper === null ? '' : ` Route ${gatekeeper.line}`}`);
@@ -176,12 +179,20 @@ export function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConf
   };
 }
 
-export function configuredSeats(env: NodeJS.ProcessEnv): { config: Record<string, unknown>; seats: SeatsConfigV1 } {
+export function configuredSeats(env: NodeJS.ProcessEnv): {
+  config: Record<string, unknown>;
+  seats: SeatsConfigV1;
+  base_seats: SeatsConfigV1;
+  overrides: SeatOverridesV1;
+} {
   let config: Record<string, unknown>;
   try { config = readGlobalConfiguration(env).config; } catch (error) { throw new SeatsCommandError('config_invalid', (error as Error).message); }
-  try { return { config, seats: decodeSeatsConfig(config.seats) }; } catch (error) {
+  try {
+    const resolved = decodeEffectiveSeats(config);
+    return { config, seats: resolved.seats, base_seats: resolved.base_seats, overrides: resolved.overrides };
+  } catch (error) {
     if (error instanceof SeatsConfigMigrationRequiredError || error instanceof AgySeatSettingsError) throw error;
-    throw new SeatsCommandError('config_invalid', seatsConfigInvalidMessage(error));
+    throw new SeatsCommandError('config_invalid', effectiveSeatsInvalidMessage(error));
   }
 }
 

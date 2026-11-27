@@ -186,7 +186,7 @@ export async function runDispatch(input: DispatchInput): Promise<DispatchResultV
   const repositoryId = String(readRepositoryId(input));
   const terminals = input.host.seatTerminals(repositoryId);
   if (terminals.status === 'unavailable') throw new BoardCollectError(`hc could not list the seat terminals: ${terminals.reason}`);
-  const { seats } = readSeatsConfiguration(env);
+  const { seats, overrides } = readSeatsConfiguration(env);
   const probes = collectSeatPoolProbes(env, SEAT_IDS.some(id => seats[id]?.runtime === 'agy'));
   const quota = seatAccountQuotas((await readQuotaReport(env, seats.routing.exhausted_at_or_above_used)).accounts, seats.routing);
   const plan = planDispatch({ parent, terminals: terminals.terminals, seats, quota, earlyStart: input.earlyStart,
@@ -196,7 +196,7 @@ export async function runDispatch(input: DispatchInput): Promise<DispatchResultV
     ...(input.bundle === null ? {} : { bundle: input.bundle }) });
   const started = await executeDispatch(plan, { repositoryId, parent: input.parent, space: input.space, dry_run: input.dry_run,
     // The same projection that `seatLaunch` uses for the argv, so the claim names the model that runs.
-    model: seat => effectiveSeatConfig(seat, seats, quota)?.model ?? null,
+    model: seat => effectiveSeatConfig(seat, seats, quota, overrides)?.model ?? null,
   }, {
     startWorktree: issue => startWorktree(input, issue),
     comment: (issue, body) => runGhText(input, ['issue', 'comment', String(issue), '--body-file', '-'], withSeatLine(body, env)),

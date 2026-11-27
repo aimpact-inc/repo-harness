@@ -42,7 +42,8 @@ import { readNotifyInstallRecord, relayIsLive } from '../../effects/terminal/not
 import { NOTIFY_INSTALL_COMMAND, NOTIFY_START_COMMAND } from '../../core/decision/notify-relay-record';
 import { CLI_NAME, RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
 import { readRecordedSelection, recordedPlugins } from '../installer/architecture-selection';
-import { decodeSeatsConfig, SEAT_IDS } from '../../core/board/seats-settings';
+import { decodeEffectiveSeats } from '../../core/board/seat-overrides';
+import { SEAT_IDS } from '../../core/board/seats-settings';
 import { MAGPIE_BASE_URL, MAGPIE_PORT, MAGPIE_PROVIDER } from '../../effects/review/magpie-endpoint';
 import { checkAntigravityGlobalRules, checkAntigravityHooks, checkAntigravitySkills } from '../installer/targets/antigravity';
 
@@ -652,7 +653,7 @@ export function checkMagpie(port = MAGPIE_PORT): DoctorCheckResult {
   }
 
   try {
-    const seats = decodeSeatsConfig(readGlobalConfiguration().config.seats);
+    const { seats } = decodeEffectiveSeats(readGlobalConfiguration().config);
     const seatUsesMagpie = SEAT_IDS.some(id => seats[id]?.model?.startsWith(`${MAGPIE_PROVIDER}/`));
     // With peer-runtime selected, generic review can route Codex and Pi through magpie.
     const reviewUsesMagpie = recordedPlugins(readRecordedSelection()).includes('peer-runtime');
