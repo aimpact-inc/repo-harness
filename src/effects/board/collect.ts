@@ -1,29 +1,24 @@
 import { execFile, spawnSync, type ExecFileException } from 'child_process';
 import { architecturePort, isArchitectureUnavailable, type ArchctxProviderOptions } from '../../core/architecture/contracts';
-import {
-  bodyLinks, linkedPullRequests, planFromComments, projectBoard, seatTerminal, type BoardAcceptanceMergeV1, type BoardDailyRunInputV1, type BoardExecutionV1, type BoardHostPortsV1,
-  type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatLivenessV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardToolingV1, type BoardV1,
+import { linkedPullRequests, planFromComments, projectBoard, type BoardDailyRunInputV1, type BoardHostPortsV1,
+  type BoardPathOwnerV1, type BoardPathOwnersV1, type BoardRequiredContextsV1, type BoardSeatTerminalInputV1, type BoardSeatTerminalReadV1, type BoardV1,
 } from '../../core/board/board';
-import { ADVISOR_SEAT } from '../../core/board/advisor-seat';
 import { isAutopilotEnabled } from '../../core/board/autopilot';
-import { readAutopilotStateIfGitRepo } from './autopilot-store';
 import { sha256Hex } from '../../core/evidence/sha256';
-import { isA22TaskSeat, STALLED_WORKING_MS } from '../../core/board/attention';
-import { isAllowedEditPath, readReviewI3Paths, workflowEditAllowed } from '../../core/board/hazards';
-import { blockerKey, mergeHoldNeedsFullThread, reachableOpenBlockers, readParkedItem, type BoardExternalBlockerV1 } from '../../core/board/merge';
-import type { BoardPullRequestTierEvidenceV1 } from '../../core/board/review-rules';
+import { mergeHoldNeedsFullThread } from '../../core/board/merge';
 import {
-  BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeExternalBlocker, decodeIssueComments, decodeParentRead,
+  BOARD_PAGE, BOARD_PARENT_COMMENT_PAGES, BOARD_SUB_ISSUE_PAGES, BoardSourceError, decodeIssueComments, decodeParentRead,
   decodePullRequestsRead, parentCommentsPreviousCursor, parentReadNextCursor, type BoardCommentPageV1, type BoardCommentV1, type BoardParentReadV1, type BoardPullRequestReadV1,
 } from '../../core/board/source';
 import { normalizeCapabilityPath } from '../../core/capabilities/registry';
-import { HC_MIN_VERSION } from '../../core/terminal/herdr-pin';
-import { parsePublicationPolicy, policyFileFromContents, PUBLICATION_POLICY_PATH, type PolicyFileAtRef } from '../../core/publication/acceptance-merge-policy';
 import type { PullRequestReadinessV2, PullRequestSelectionV2 } from '../../core/publication/merge-readiness';
 import { GitExecError, gitExecFile, gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
 import { collectPullRequestMergeReadiness } from '../publication/merge-readiness';
-import { decodeWorkflowPolicy } from '../../core/workflow/policy-schema';
-import { createKeyedSources, readinessKey, type GhRunner, type KeyedSources } from './keyed-sources';
+import { readAutopilotStateIfGitRepo } from './autopilot-store';
+import { BLOCKED_BY, COMMENTS, ISSUE_FIELDS, PULL_REQUEST_FIELDS, decodeDailyRun, decodeRequiredContexts, followCursor, parentComments, readExternalBlockers } from './collect-github';
+import { acceptanceMerge, boardReadinessTransport, defaultBranchPolicy, i3Paths, tierEvidence } from './collect-review-evidence';
+import { execution, seatBranch, tooling } from './collect-seat-observations';
+import { createKeyedSources, readinessKey, type KeyedSources } from './keyed-sources';
 
 const GH_TIMEOUT_MS = 30_000;
 /**
@@ -38,14 +33,6 @@ export const GH_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
  * 260 kB, 1.6% of `GH_MAX_BUFFER_BYTES`.
  */
 const PULL_REQUEST_GROUP = 20;
-const SEAT_GIT_TIMEOUT_MS = 10_000;
-
-const COMMENT_NODES = 'nodes { url createdAt authorAssociation body }';
-const COMMENTS = `comments(last: ${BOARD_PAGE.comments}) { pageInfo { hasPreviousPage } ${COMMENT_NODES} }`;
-const BLOCKED_BY = `blockedBy(first: ${BOARD_PAGE.blocked_by}) { pageInfo { hasNextPage } nodes { number state repository { nameWithOwner } } }`;
-const ISSUE_FIELDS = `number title url state labels(first: ${BOARD_PAGE.labels}) { pageInfo { hasNextPage } nodes { name } } milestone { title }`;
-/** The parent thread holds the plan, the coordinator claim and the merge holds, so the read follows its comment cursor to the oldest page. */
-const parentComments = (before: string) => `comments(last: ${BOARD_PAGE.parent_comments}${before}) { pageInfo { hasPreviousPage startCursor } ${COMMENT_NODES} }`;
 
 /** One older comment page of the parent; `$before` is the start cursor of the newer page. */
 export const PARENT_COMMENTS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $before: String!) {
@@ -69,26 +56,6 @@ export const PARENT_QUERY = `query($owner: String!, $name: String!, $number: Int
   }
   repairs: search(query: $repairs, type: ISSUE, first: ${BOARD_PAGE.repairs}) { issueCount nodes { ... on Issue { number body } } }
 }`;
-
-const EXTERNAL_BLOCKER_QUERY = `query ExternalBlocker($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) { issue(number: $number) {
-    number state repository { nameWithOwner } ${BLOCKED_BY} ${COMMENTS}
-  } }
-}`;
-
-/** The identity, review and head-rollup fields are the readiness inputs of the keyed source store; nested thread comments stay out. */
-const PULL_REQUEST_FIELDS = `number url state isDraft body baseRefName baseRefOid headRefName headRefOid mergedAt
-  changedFiles mergeable reviewDecision isCrossRepository
-  latestOpinionatedReviews(first: ${BOARD_PAGE.reviews}) { pageInfo { hasNextPage } nodes { state } }
-  reviewThreads(first: ${BOARD_PAGE.threads}) { totalCount pageInfo { hasNextPage } nodes { isResolved } }
-  files(first: ${BOARD_PAGE.files}) { totalCount nodes { path additions deletions } }
-  commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup {
-    contexts(first: ${BOARD_PAGE.checks}) { pageInfo { hasNextPage } nodes {
-      ... on CheckRun { name status conclusion startedAt completedAt detailsUrl checkSuite { workflowRun { event workflow { name } } } }
-      ... on StatusContext { context state targetUrl createdAt }
-    } }
-  } } } }
-  ${COMMENTS}`;
 
 /** One group of the cross-referenced pull requests, each once, so a PR that names several sub-issues is read once. */
 export function pullRequestsQuery(numbers: readonly number[]): string {
@@ -224,16 +191,7 @@ function dailyRun(input: BoardCollectInput, repository: string, branch: string):
     if (error instanceof BoardCollectError && !(error instanceof GhOutputLimitError)) return { status: 'unavailable', reason: 'github_unavailable' };
     throw error;
   }
-  const runs = (body as { workflow_runs?: unknown } | null)?.workflow_runs;
-  if (!Array.isArray(runs)) return { status: 'unavailable', reason: 'github_unavailable' };
-  const run = runs[0] as Record<string, unknown> | undefined;
-  if (run === undefined) return { status: 'unavailable', reason: 'no_daily_run' };
-  // The response must be the run the query asked for (same rule as the operator tests collector).
-  if (run.event !== 'schedule' || run.head_branch !== branch || run.path !== '.github/workflows/ci.yml' || run.status !== 'completed'
-    || typeof run.html_url !== 'string' || typeof run.created_at !== 'string' || (run.conclusion !== null && typeof run.conclusion !== 'string')) {
-    return { status: 'unavailable', reason: 'daily_run_invalid' };
-  }
-  return { status: 'observed', run_url: run.html_url, conclusion: run.conclusion as string | null, created_at: run.created_at };
+  return decodeDailyRun(body, branch);
 }
 
 /**
@@ -250,136 +208,7 @@ function requiredContexts(input: BoardCollectInput, repository: string, base: st
     if (error instanceof BoardCollectError) return { status: 'unavailable', reason: error.message };
     throw error;
   }
-  const contexts = (body as { required_status_checks?: { contexts?: unknown } | null } | null)?.required_status_checks?.contexts;
-  if (!Array.isArray(contexts) || contexts.length === 0 || !contexts.every(context => typeof context === 'string' && context !== '')) {
-    return { status: 'unavailable', reason: `the protection of ${base} requires no status check context list` };
-  }
-  return { status: 'observed', contexts: Object.freeze([...contexts as string[]]) };
-}
-
-/**
- * The policy file on the default branch. GitHub answers an absent file with
- * exit 1 and a JSON body of status 404; every other failure is null.
- */
-function defaultBranchPolicy(input: BoardCollectInput, repository: string, branch: string): PolicyFileAtRef | null {
-  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/contents/${PUBLICATION_POLICY_PATH}?ref=${encodeURIComponent(branch)}`]);
-  let body: unknown;
-  try {
-    body = JSON.parse(result.stdout);
-  } catch {
-    return null;
-  }
-  const absent = result.status === 1 && (body as { status?: unknown } | null)?.status === '404';
-  return absent ? { status: 'missing' } : result.status === 0 ? policyFileFromContents(body) : null;
-}
-
-/** `publication.acceptance_merge`, decoded only by the publication policy parser; an unread file leaves it unknown. */
-function acceptanceMerge(file: PolicyFileAtRef | null): BoardAcceptanceMergeV1 {
-  if (file === null) return 'unknown';
-  const policy = parsePublicationPolicy(file);
-  return policy.ok ? policy.acceptance_merge : 'unknown';
-}
-
-/** `review.i3_paths`; null for an unread file or an invalid value. */
-function i3Paths(file: PolicyFileAtRef | null): readonly string[] | null {
-  if (file === null) return null;
-  try {
-    const read = readReviewI3Paths(decodeWorkflowPolicy(file.status === 'present' ? file.text : null));
-    return read.status === 'present' ? read.paths : null;
-  } catch {
-    return null;
-  }
-}
-
-const PULL_REQUEST_FILE_PAGE = 100;
-/** The REST pull request files list stops at 3000 files. */
-const PULL_REQUEST_FILE_LIMIT = 3000;
-
-interface PullRequestFile {
-  readonly path: string;
-  readonly modified: boolean;
-  readonly previous_path: string | null;
-}
-
-/** The REST files of a pull request, paged by its changed-file count; null when a read fails or the pages do not hold that count. */
-function pullRequestFiles(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): PullRequestFile[] | null {
-  const count = read.readiness_inputs.changed_files;
-  if (count > PULL_REQUEST_FILE_LIMIT) return null;
-  const files: PullRequestFile[] = [];
-  for (let page = 1; page <= Math.ceil(count / PULL_REQUEST_FILE_PAGE); page++) {
-    const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/pulls/${read.number}/files?per_page=${PULL_REQUEST_FILE_PAGE}&page=${page}`]);
-    let entries: unknown;
-    try {
-      entries = result.status === 0 ? JSON.parse(result.stdout) : null;
-    } catch {
-      return null;
-    }
-    if (!Array.isArray(entries)) return null;
-    for (const entry of entries as { filename?: unknown; status?: unknown; previous_filename?: unknown }[]) {
-      if (typeof entry?.filename !== 'string') return null;
-      files.push({ path: entry.filename, modified: entry.status === 'modified', previous_path: typeof entry.previous_filename === 'string' ? entry.previous_filename : null });
-    }
-  }
-  return files.length === count ? files : null;
-}
-
-/** The parsed YAML of a file at a commit; null when the read fails, GitHub returns no inline content, or the text does not parse. */
-function yamlAt(input: BoardCollectInput, repository: string, path: string, sha: string): { readonly value: unknown } | null {
-  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${sha}`]);
-  try {
-    const body = result.status === 0 ? JSON.parse(result.stdout) as { type?: unknown; encoding?: unknown; content?: unknown } : null;
-    if (body?.type !== 'file' || body.encoding !== 'base64' || typeof body.content !== 'string') return null;
-    return { value: Bun.YAML.parse(Buffer.from(body.content, 'base64').toString('utf-8')) };
-  } catch {
-    return null;
-  }
-}
-
-/** The merge base of a pull request's base and head commits, the old side of its REST file diff; null when the compare read fails. */
-function mergeBase(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1): string | null {
-  const result = runGh(input, ['api', '--hostname', 'github.com', `repos/${repository}/compare/${read.base_sha}...${read.head_sha}?per_page=1`]);
-  try {
-    const sha: unknown = result.status === 0 ? (JSON.parse(result.stdout) as { merge_base_commit?: { sha?: unknown } }).merge_base_commit?.sha : null;
-    return typeof sha === 'string' && /^[0-9a-f]{40}$/u.test(sha) ? sha : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The diff evidence of one open pull request (#3187): the rename sources, read only while I3 globs exist, and the modified workflow
- * files that the edit allowlist clears, from their YAML at the merge base and the head commit. The base tip can hold changes that the
- * pull request does not make, so it is not the old side. A failed read clears no file.
- */
-function tierEvidence(input: BoardCollectInput, repository: string, read: BoardPullRequestReadV1, i3: readonly string[] | null, autopilotEnabled: boolean): BoardPullRequestTierEvidenceV1 {
-  const renames = autopilotEnabled || (i3 !== null && i3.length > 0);
-  if (read.files === null || (!renames && !read.files.some(isAllowedEditPath))) return { rename_sources: [], cleared_paths: [] };
-  const files = pullRequestFiles(input, repository, read);
-  const candidates = (files ?? []).filter(file => file.modified && isAllowedEditPath(file.path));
-  const old = candidates.length === 0 ? null : mergeBase(input, repository, read);
-  const cleared = old === null ? [] : candidates.flatMap((file) => {
-    const base = yamlAt(input, repository, file.path, old);
-    const head = base === null ? null : yamlAt(input, repository, file.path, read.head_sha);
-    return base !== null && head !== null && workflowEditAllowed(file.path, base.value, head.value) ? [file.path] : [];
-  });
-  const sources = files === null ? null : files.flatMap(file => (file.previous_path === null ? [] : [file.previous_path]));
-  return { rename_sources: renames ? sources : [], cleared_paths: cleared };
-}
-
-function tooling(input: BoardCollectInput): BoardToolingV1 {
-  const herdrApp = { status: 'not_pinned' } as const;
-  const version = input.host.hcVersion();
-  return { hc: version.status === 'unavailable' ? version : { status: 'observed', version: version.version, min_version: HC_MIN_VERSION }, herdr_app: herdrApp };
-}
-
-/** One orchestrator and one advisor serve the whole repository (#1780): the board of every parent shows them. */
-const REPOSITORY_SEATS: ReadonlySet<string> = new Set(['orchestrator', ADVISOR_SEAT]);
-
-function seatBranch(cwd: string | null): string | null {
-  if (cwd === null) return null;
-  // The directory selects the repository, so a git variable of this process must not.
-  const read = gitSpawnSync(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd, env: withoutRepositorySelectingGitEnv(), encoding: 'utf8', timeout: SEAT_GIT_TIMEOUT_MS });
-  return read.error === undefined && read.status === 0 ? read.stdout.trim() : null;
+  return decodeRequiredContexts(body, base);
 }
 
 /** Each terminal with the current branch of its directory, read with git in that directory. The directory stays here. */
@@ -387,38 +216,6 @@ export function seatTerminalsWithBranches(terminals: readonly BoardSeatTerminalR
   return terminals.map(({ cwd, agent_pid: _agentPid, ...terminal }) => ({ ...terminal, branch: seatBranch(cwd) }));
 }
 
-/**
- * The seat terminals of this repository and parent: the orchestrator and the
- * advisor by their seat label with any parent label or none; a terminal with
- * an issue or pr label when that issue is an item of this board or that pull
- * request is a pull request of this board, because the sub-issue list owns
- * "this seat belongs to this parent" and a seat can start with no parent
- * label; and a terminal with neither label by this parent label. No such
- * terminal means the seat labels are not written, which the board does not
- * read as "no stuck seats".
- */
-function execution(input: BoardCollectInput, repositoryId: number, items: ReadonlySet<string>, pullRequests: ReadonlySet<string>, observedAt: string): { readonly execution: BoardExecutionV1; readonly seat_liveness: BoardSeatLivenessV1 } {
-  const read = input.host.seatTerminals(String(repositoryId));
-  if (read.status === 'unavailable') return { execution: read, seat_liveness: read };
-  const parent = String(input.parent);
-  const ofBoard = ({ seat, issue, pr, parent: label }: BoardSeatTerminalReadV1['labels']): boolean => {
-    if (seat !== undefined && REPOSITORY_SEATS.has(seat)) return true;
-    if (issue === undefined && pr === undefined) return label === parent;
-    return (issue !== undefined && items.has(issue)) || (pr !== undefined && pullRequests.has(pr));
-  };
-  const terminals = read.terminals.filter(({ labels }) => ofBoard(labels));
-  if (terminals.length === 0) {
-    const none = { status: 'unavailable', reason: 'no_seat_terminals' } as const;
-    return { execution: none, seat_liveness: none };
-  }
-  return {
-    execution: { status: 'observed', terminals: Object.freeze(seatTerminalsWithBranches(terminals).map(seatTerminal)) },
-    seat_liveness: seatLiveness(input.host, terminals, Date.parse(observedAt)),
-  };
-}
-
-/** The screen lines that a liveness probe reads. */
-const SEAT_SCREEN_LINES = 40;
 const SPINNER_FRAMES = /[\u2800-\u28FF]/gu;
 /** Elapsed-time counters such as `12s`, `1m 05s`, `2h`, `340ms` and `03:12`; they move while a stream hangs. Token counters such as `↓ 2.1k` stay. */
 const ELAPSED_COUNTERS = /\b\d+(?:\.\d+)?\s?(?:ms|s|m|h)\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/gu;
@@ -426,28 +223,6 @@ const ELAPSED_COUNTERS = /\b\d+(?:\.\d+)?\s?(?:ms|s|m|h)\b|\b\d{1,2}:\d{2}(?::\d
 /** The hash of a seat screen without its Braille spinner frames and elapsed-time counters, which change while the agent makes no progress. */
 export function seatScreenHash(text: string): string {
   return sha256Hex(text.replace(SPINNER_FRAMES, '').replace(ELAPSED_COUNTERS, ''));
-}
-
-/** Probe working seats past the bound and task seats with no reported status. Read the process table once. */
-function seatLiveness(host: BoardCollectInput['host'], terminals: readonly BoardSeatTerminalReadV1[], now: number): BoardSeatLivenessV1 {
-  const candidates = terminals.filter(({ state, status, status_ms, labels }) => {
-    if (state !== 'live' || labels.seat === undefined) return false;
-    if (status === null) return isA22TaskSeat(labels.seat);
-    return status === 'working' && status_ms !== null && now - status_ms > STALLED_WORKING_MS;
-  });
-  if (candidates.length === 0) return { status: 'observed', probes: [] };
-  const table = host.childProcessCounts();
-  if (table.status === 'unavailable') return table;
-  return {
-    status: 'observed',
-    probes: Object.freeze(candidates.flatMap((terminal) => {
-      if (terminal.agent_pid === null) return [];
-      const screen = host.seatRead(terminal.address, SEAT_SCREEN_LINES);
-      const usable = screen.status === 'observed' && screen.text.trim() !== '';
-      return [Object.freeze({ address: terminal.address, status_ms: terminal.status === null ? null : terminal.status_ms, turn: terminal.turn,
-        children: table.counts.get(terminal.agent_pid) ?? 0, screen_hash: usable ? seatScreenHash(screen.text) : null })];
-    })),
-  };
 }
 
 /**
@@ -547,46 +322,6 @@ export function readParent(input: Pick<BoardCollectInput, 'repo_root' | 'reposit
   return { parent, observed_at: observedAt };
 }
 
-/** `first` and each page that a cursor of the page before it selects, up to `cap` pages. */
-function followCursor(first: unknown, cursor: (data: unknown, at: number) => string | null, read: (cursor: string) => unknown,
-  connection: string, size: number, cap: number): unknown[] {
-  const pages = [first];
-  // The decoder runs after the last page, so a repeated cursor or an endless stream must stop the loop here.
-  const cursors = new Set<string>();
-  for (let next = cursor(first, 0); next !== null; next = cursor(pages.at(-1), pages.length - 1)) {
-    if (cursors.has(next)) throw new BoardSourceError(`${connection} cursor ${next} repeats`);
-    if (pages.length === cap) throw new BoardSourceError(`${connection} has more than ${cap} pages of ${size}`);
-    cursors.add(next);
-    pages.push(read(next));
-  }
-  return pages;
-}
-
-/**
- * The provider transport of the readiness reads of one board read. Every pull
- * request of the repository gets the same repository identity, so those reads
- * run once; the keyed source store answers the content-addressed reads. The
- * pull request identity, checks, reviews and stack lists run each time, so the
- * identity and stack fences of each read stay. A failure is not stored. The
- * answers live only as long as this function's return value.
- */
-function boardReadinessTransport(input: GhInput, repository: string): GhRunner {
-  const root = `repos/${repository}`;
-  const reusable = (args: readonly string[]): boolean => (args[0] === 'repo' && args[1] === 'view')
-    || (args.length === 4 && args[0] === 'api' && args[1] === root && args[2] === '--hostname' && args[3] === 'github.com');
-  const answers = new Map<string, ReturnType<GhRunner>>();
-  return (args) => {
-    const key = reusable(args) ? JSON.stringify(args) : null;
-    const stored = key === null ? undefined : answers.get(key);
-    if (stored !== undefined) return stored;
-    const result = runGh(input, args);
-    // No exit status (spawn error, timeout) is -1, which no reader accepts: the read reports provider_unavailable.
-    const answer = { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr || result.error?.message || '' };
-    if (key !== null && answer.status === 0) answers.set(key, answer);
-    return answer;
-  };
-}
-
 /** The pull request read in groups of `PULL_REQUEST_GROUP`, one query each; the decoder gets the aliases of all groups as one answer. */
 export function readPullRequests(input: GhInput, owner: string, name: string, numbers: readonly number[]): BoardPullRequestReadV1[] {
   if (numbers.length === 0) return [];
@@ -599,34 +334,6 @@ export function readPullRequests(input: GhInput, owner: string, name: string, nu
     Object.assign(repository, data.repository);
   }
   return decodePullRequestsRead({ repository }, numbers);
-}
-
-/** Resolve the live graph from the issues of open PRs. An external vertex is read once per board. */
-function readExternalBlockers(input: GhInput, parent: BoardParentReadV1, prs: readonly BoardPullRequestReadV1[]): readonly BoardExternalBlockerV1[] {
-  const repository = parent.repository.name_with_owner;
-  const items = new Map(parent.sub_issues.map(item => [item.number, item] as const));
-  const seeds = prs.flatMap(pr => {
-    const { closes, refs } = bodyLinks(repository, pr.body);
-    const linked = [...closes, ...refs].filter(number => items.has(number));
-    const open = linked.filter(number => items.get(number)?.state === 'open');
-    return open.length > 0 ? open : linked;
-  });
-  const external = new Map<string, BoardExternalBlockerV1>();
-  reachableOpenBlockers(repository, [...new Set(seeds)], ref => {
-    const local = ref.repository.toLowerCase() === repository.toLowerCase() ? items.get(ref.number) : undefined;
-    if (local !== undefined) return local;
-    const key = blockerKey(ref);
-    const known = external.get(key);
-    if (known !== undefined) return known;
-    const [owner, name] = ref.repository.split('/') as [string, string];
-    const read = decodeExternalBlocker(graphql(input, EXTERNAL_BLOCKER_QUERY, { owner, name, number: ref.number }), ref.repository, ref.number);
-    const comments = read.state === 'open' && read.comments.truncated ? readIssueComments(input, ref.repository, ref.number) : read.comments;
-    const blocker = { ...ref, state: read.state, blocked_by: read.blocked_by,
-      parked: read.state === 'open' && readParkedItem('issue', ref.number, comments) !== null };
-    external.set(key, blocker);
-    return blocker;
-  });
-  return [...external.values()];
 }
 
 /** One board read through a fresh keyed source store: the path of every act. */
@@ -648,8 +355,9 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
   const holdComments = new Map([...parent.sub_issues, ...open].filter(read => mergeHoldNeedsFullThread(read.comments))
     .map(read => [read.number, readIssueComments(input, repository, read.number)] as const));
   const externalBlockers = autopilotEnabled && planFromComments(parent.parent.comments).status === 'observed'
-    ? readExternalBlockers(input, parent, open) : [];
-  const readinessTransport = boardReadinessTransport(input, repository);
+    ? readExternalBlockers(parent, open, (query, variables) => graphql(input, query, variables), (repo, number) => readIssueComments(input, repo, number)) : [];
+  const gh = (args: readonly string[]) => runGh(input, args);
+  const readinessTransport = boardReadinessTransport(gh, repository);
   const readiness = open.map((read) => {
     const selection: PullRequestSelectionV2 = {
       provider_repository_id: String(parent.repository.database_id), repository, pr_number: read.number,
@@ -662,11 +370,11 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
       fatal_read_error: error => error instanceof GhOutputLimitError,
     }));
   });
-  const policy = defaultBranchPolicy(input, repository, parent.repository.default_branch);
+  const policy = defaultBranchPolicy(gh, repository, parent.repository.default_branch);
   const i3 = i3Paths(policy);
-  const evidence = new Map(open.map(read => [read.number, tierEvidence(input, repository, read, i3, autopilotEnabled)] as const));
-  const seats = execution(input, parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
-    new Set(linked.map(read => String(read.number))), observedAt);
+  const evidence = new Map(open.map(read => [read.number, tierEvidence(gh, repository, read, i3, autopilotEnabled)] as const));
+  const seats = execution(input.host, String(input.parent), parent.repository.database_id, new Set(parent.sub_issues.map(issue => String(issue.number))),
+    new Set(linked.map(read => String(read.number))), observedAt, seatTerminalsWithBranches, seatScreenHash);
   return projectBoard({
     observed_at: observedAt,
     parent,
@@ -681,6 +389,6 @@ export function collectBoardThrough(input: BoardCollectInput, sources: KeyedSour
     path_owners: pathOwners(input, linked),
     ...seats,
     daily_run: dailyRun(input, repository, parent.repository.default_branch),
-    tooling: tooling(input),
+    tooling: tooling(input.host),
   });
 }

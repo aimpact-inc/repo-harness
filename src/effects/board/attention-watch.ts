@@ -1,25 +1,18 @@
-import { appendFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { evaluateBoardAttention } from '../../core/board/attention';
 import {
-  ADVISOR_CAP_SPAN_MS, WINDOW_WITH_WORKERS_MS, attentionFindingKey, attentionSentSlot, deliveryTiming, liveSeatTerminals, planAttentionDeliveries,
-  type AttentionDeliveryV1, type AttentionHostPortsV1, type AttentionSentEntryV1, type AttentionSentV1,
+  ADVISOR_CAP_SPAN_MS, WINDOW_WITH_WORKERS_MS, attentionFindingKey, planAttentionDeliveries,
+  type AttentionHostPortsV1, type AttentionSentEntryV1, type AttentionSentV1,
 } from '../../core/board/attention-delivery';
-import {
-  AUTOPILOT_BUSY_RETRY_MS,
-  AutopilotError,
-  autopilotQuotaProblem,
-  nextAutopilotAdvisorTickAtMs,
-  planAutopilotAdvisorTick,
-  type AutopilotBoardAuthorityV1,
-  type AutopilotQuotaAuthorityV1,
-  type AutopilotStateV1,
-} from '../../core/board/autopilot';
+import { AUTOPILOT_BUSY_RETRY_MS, autopilotQuotaProblem, planAutopilotAdvisorTick, type AutopilotBoardAuthorityV1 } from '../../core/board/autopilot';
 import type { BoardHostPortsV1, BoardV1 } from '../../core/board/board';
-import { decodeQuotaReport, type QuotaReport } from '../../core/board/quota';
+import type { QuotaReport } from '../../core/board/quota';
 import { isReviewSeat, type SeatId } from '../../core/board/seats-settings';
 import { isBlockingSeverity, type ReviewSeverity } from '../../core/review/finding-severity';
 import { repoHarnessHome } from '../repo-harness-home';
+import { checkAutopilotSchedule, deliverAutopilotTick, readAutopilotQuotaAuthority, readAutopilotTickState } from './attention-autopilot';
+import { appendAttentionLog, createAutopilotWindowLoop, deliverAttentionWindow, notifyReviewReceipts, reviewWindow, sleepFor, sleepThroughWindow } from './attention-window';
 import type { AutopilotStateReadV1 } from './autopilot-store';
 import { BoardCollectError, boardAvailabilityFailure } from './collect';
 import type { ReviewObserver } from './review';
@@ -58,11 +51,6 @@ export type AttentionLogRecordV1 = { readonly at: string; readonly window: strin
   | { readonly kind: 'skip'; readonly route: string; readonly reason: string }
   | { readonly kind: 'send'; readonly route: string; readonly terminal: string; readonly rules: readonly string[]; readonly outcome: AttentionSendOutcome; readonly detail: string | null }
 );
-
-function append(path: string, record: AttentionLogRecordV1): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  appendFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-}
 
 /** Parent windows in the last 24 hours with an advisor send, across all logs of the repository. */
 export function advisorWakes(path: string, now: Date): number {
@@ -157,14 +145,6 @@ export function attentionReviewCollector<T extends ReadReceipt>(repositoryId: nu
   };
 }
 
-function reviewCollectMessage(line: ReviewCollectLine): string {
-  switch (line.kind) {
-    case 'published': return 'PASS published; run rh board merge';
-    case 'fail_held': return `FAIL held on ${line.terminal}: ${line.blocking} blocking; challenge once or run rh review collect`;
-    case 'refused': return `refused: ${line.error}`;
-  }
-}
-
 export interface AttentionAutopilotTickResultV1 {
   readonly outcome: 'sent' | 'skipped' | 'send_failed' | 'error';
   readonly terminal: string | null;
@@ -186,76 +166,6 @@ export interface AttentionAutopilotPortsV1 {
   readonly readQuota: () => QuotaReport | Promise<QuotaReport>;
   readonly seatTerminals: (repositoryId: string) => ReturnType<BoardHostPortsV1['seatTerminals']>;
   readonly isAdvisorInReset: (repositoryId: number) => boolean;
-}
-
-async function readAutopilotQuotaAuthority(
-  readQuota: AttentionAutopilotPortsV1['readQuota'],
-): Promise<AutopilotQuotaAuthorityV1> {
-  try {
-    return { status: 'observed', report: decodeQuotaReport(await readQuota()) };
-  } catch (error) {
-    return { status: 'unavailable', reason: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-function deliverAutopilotTick(
-  host: Pick<AttentionHostPortsV1, 'send'>,
-  recordTick: AttentionAutopilotPortsV1['recordTick'],
-  plan: Extract<ReturnType<typeof planAutopilotAdvisorTick>, { readonly action: 'send' }>,
-  now: Date,
-  deferMs: number,
-): AttentionAutopilotTickResultV1 {
-  const sent = host.send(plan.terminal, plan.text);
-  if (sent.status !== 'sent') {
-    return { outcome: 'send_failed', terminal: plan.terminal, reason: sent.reason, detail: sent.detail, next_due_ms: deferMs };
-  }
-  try {
-    recordTick(now);
-  } catch (error) {
-    if (error instanceof AutopilotError) {
-      return { outcome: 'error', terminal: plan.terminal, reason: error.code, detail: error.message, next_due_ms: deferMs };
-    }
-    throw error;
-  }
-  return { outcome: 'sent', terminal: plan.terminal, reason: null, detail: null, next_due_ms: plan.next_due_ms };
-}
-
-function readAutopilotTickState(
-  readState: AttentionAutopilotPortsV1['readState'],
-): { readonly ok: true; readonly read: AutopilotStateReadV1 } | { readonly ok: false; readonly result: AttentionAutopilotTickResultV1 } {
-  try {
-    return { ok: true, read: readState() };
-  } catch (error) {
-    if (error instanceof AutopilotError) {
-      return { ok: false, result: { outcome: 'error', terminal: null, reason: error.code, detail: error.message, next_due_ms: null } };
-    }
-    throw error;
-  }
-}
-
-function isQuotaAuthorityFailure(result: AttentionAutopilotTickResultV1): boolean {
-  return result.outcome === 'skipped' && (result.reason === 'quota_unknown' || result.reason === 'quota_unavailable');
-}
-
-function checkAutopilotSchedule(
-  state: AutopilotStateV1,
-  nowMs: number,
-  midWindow: boolean,
-  deferred: { readonly scheduleKey: string; readonly retryAtMs: number } | null,
-): { readonly ready: true; readonly scheduleKey: string }
-  | { readonly ready: false; readonly clearDeferred: boolean; readonly result: AttentionAutopilotTickResultV1 } {
-  const dueAtMs = nextAutopilotAdvisorTickAtMs(state);
-  if (dueAtMs === null) {
-    return { ready: false, clearDeferred: true, result: { outcome: 'skipped', terminal: null, reason: 'disabled', detail: 'auto-pilot is off', next_due_ms: null } };
-  }
-  const scheduleKey = `${state.enabled}:${state.activated_at ?? ''}:${state.cadence_minutes}:${state.last_advisor_tick_at ?? ''}`;
-  if (midWindow && deferred !== null && deferred.scheduleKey === scheduleKey && nowMs < deferred.retryAtMs) {
-    return { ready: false, clearDeferred: false, result: { outcome: 'skipped', terminal: null, reason: 'not_due', detail: null, next_due_ms: deferred.retryAtMs - nowMs } };
-  }
-  if (nowMs < dueAtMs) {
-    return { ready: false, clearDeferred: true, result: { outcome: 'skipped', terminal: null, reason: 'not_due', detail: null, next_due_ms: dueAtMs - nowMs } };
-  }
-  return { ready: true, scheduleKey };
 }
 
 /**
@@ -354,91 +264,6 @@ export interface AttentionWindowInput {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-const sleepFor = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
-
-interface AutopilotSleepController {
-  readonly nextCheckAt: () => number | null;
-  readonly tick: () => Promise<void>;
-}
-
-function nextWindowSleepMs(
-  current: number,
-  end: number,
-  hasReviewTick: boolean,
-  autopilot: AutopilotSleepController | undefined,
-): number {
-  const remaining = end - current;
-  const checkAt = autopilot?.nextCheckAt() ?? null;
-  const autopilotStep = checkAt !== null && checkAt > current && checkAt < end ? checkAt - current : remaining;
-  const reviewStep = hasReviewTick ? REVIEW_COLLECT_TICK_MS : remaining;
-  return Math.min(remaining, reviewStep, autopilotStep);
-}
-
-async function sleepThroughWindow(
-  end: number,
-  now: () => Date,
-  sleep: (ms: number) => Promise<void>,
-  tick?: () => void,
-  autopilot?: AutopilotSleepController,
-): Promise<void> {
-  if (tick === undefined && autopilot === undefined) {
-    await sleep(end - now().getTime());
-    return;
-  }
-  let lastAutopilotAt = Number.NEGATIVE_INFINITY;
-  const checkAutopilot = async (at: number): Promise<void> => {
-    const checkAt = autopilot?.nextCheckAt() ?? null;
-    if (autopilot === undefined || checkAt === null || checkAt > at || at <= lastAutopilotAt) return;
-    lastAutopilotAt = at;
-    await autopilot.tick();
-  };
-  for (let current = now().getTime(); current < end; current = now().getTime()) {
-    await checkAutopilot(current);
-    current = now().getTime();
-    if (current >= end) break;
-    await sleep(nextWindowSleepMs(current, end, tick !== undefined, autopilot));
-    const after = now().getTime();
-    if (after <= current) break;
-    if (after < end) {
-      tick?.();
-      await checkAutopilot(after);
-    }
-  }
-}
-
-function notifyReviewReceipts(input: AttentionWindowInput, tick: AttentionReviewTick, log: (record: Record<string, unknown>) => void): void {
-  for (const line of tick.lines) {
-    log({ kind: 'review_collect', line });
-    const text = `[rh-attention] #${input.parent} P1 review: PR #${line.pr} ${line.seat} ${reviewCollectMessage(line)}`;
-    for (const terminal of tick.orchestrators) {
-      const result = input.host.send(terminal, text);
-      log({ kind: 'send', route: 'orchestrator', terminal, rules: ['review'],
-        outcome: result.status === 'sent' ? 'sent' : 'send_failed', detail: result.status === 'sent' ? null : result.detail });
-    }
-  }
-}
-
-/**
- * One review pass: one log line and one message line per start or refusal. A
- * refused run (the lock, `gh`, an unknown launch) is a line too, so it never
- * ends the watcher; the marker of a started seat keeps the next window from a
- * second start for the same head.
- */
-async function reviewWindow(review: (observe: ReviewObserver) => Promise<unknown>, log: (record: Record<string, unknown>) => void): Promise<string[]> {
-  const lines: string[] = [];
-  const note = (pr: number | null, seat: string | null, outcome: 'started' | 'refused', detail: string | null) => {
-    log({ kind: 'review', pr, seat, outcome, detail });
-    lines.push(pr === null ? `refused: ${detail}` : `PR #${pr} ${outcome}${seat === null ? '' : ` on ${seat}`}${detail === null ? '' : `: ${detail}`}`);
-  };
-  try {
-    // Each event is noted as it happens: a later throw keeps every start that completed before it.
-    await review(event => event.kind === 'started' ? note(event.pr, event.seat, 'started', event.marker_url) : note(event.pr, null, 'refused', event.reason));
-  } catch (error) {
-    note(null, null, 'refused', error instanceof Error ? error.message : String(error));
-  }
-  return lines;
-}
-
 /**
  * One window. A blocked terminal gets `hc wait` up to the window end. When the
  * wait ends with the terminal still blocked, the watcher reads its status
@@ -454,56 +279,16 @@ async function reviewWindow(review: (observe: ReviewObserver) => Promise<unknown
  * that keeps no key leaves the map. A window that could not read the board
  * returns the slots it got.
  */
-interface AutopilotWindowLoop {
-  readonly nextCheckAt: () => number | null;
-  readonly tick: (board: AutopilotBoardAuthorityV1, midWindow: boolean) => Promise<void>;
-}
-
-function createAutopilotWindowLoop(
-  deliver: boolean,
-  tick: AttentionWindowInput['autopilot_tick'],
-  now: () => Date,
-  log: (record: Record<string, unknown>) => void,
-): AutopilotWindowLoop | undefined {
-  if (!deliver || tick === undefined) return undefined;
-  let nextCheckAt: number | null = null;
-  let windowBlocked = false;
-  return {
-    nextCheckAt: () => nextCheckAt,
-    tick: async (board, midWindow) => {
-      if (windowBlocked) return;
-      const startedAt = now();
-      const result = await tick(startedAt, { board, mid_window: midWindow });
-      if (result.outcome !== 'skipped' || (result.reason !== 'disabled' && result.reason !== 'not_due')) {
-        log({ kind: 'autopilot_tick', outcome: result.outcome, terminal: result.terminal, reason: result.reason, detail: result.detail });
-      }
-      if (board.status === 'unavailable' || isQuotaAuthorityFailure(result)) {
-        windowBlocked = true;
-        nextCheckAt = null;
-        return;
-      }
-      const completedMs = now().getTime();
-      const refreshAt = completedMs + AUTOPILOT_STATE_REFRESH_MS;
-      const dueAt = result.next_due_ms !== null && result.next_due_ms > 0
-        ? startedAt.getTime() + result.next_due_ms
-        : null;
-      nextCheckAt = dueAt !== null && dueAt < refreshAt
-        ? Math.max(dueAt, completedMs + 1)
-        : refreshAt;
-    },
-  };
-}
-
 export async function runAttentionWindow(input: AttentionWindowInput): Promise<AttentionSentV1> {
   const now = input.now ?? (() => new Date());
   const sleep = input.sleep ?? sleepFor;
   const prior = input.sent ?? new Map<string, ReadonlyMap<string, AttentionSentEntryV1>>();
   const started = now();
   const window = started.toISOString();
-  const log = (record: Record<string, unknown>) => append(input.log_path, { at: now().toISOString(), window, parent: input.parent, ...record } as AttentionLogRecordV1);
+  const log = (record: Record<string, unknown>) => appendAttentionLog(input.log_path, { at: now().toISOString(), window, parent: input.parent, ...record } as AttentionLogRecordV1);
   const readReviews = input.review_collect;
   const reviewTick = readReviews === undefined ? undefined : () => notifyReviewReceipts(input, readReviews(), log);
-  const autopilotLoop = createAutopilotWindowLoop(input.deliver, input.autopilot_tick, now, log);
+  const autopilotLoop = createAutopilotWindowLoop(input.deliver, input.autopilot_tick, now, log, AUTOPILOT_STATE_REFRESH_MS);
   reviewTick?.();
   let board: BoardV1;
   try { board = input.collect(); } catch (error) {
@@ -515,7 +300,7 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
     process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message })}\n`);
     log({ kind: 'error', message });
     // Failed board window: do not pass autopilotLoop so no advisor ticks send before the next successful board read.
-    await sleepThroughWindow(started.getTime() + WINDOW_WITH_WORKERS_MS, now, sleep, reviewTick);
+    await sleepThroughWindow(started.getTime() + WINDOW_WITH_WORKERS_MS, now, sleep, REVIEW_COLLECT_TICK_MS, reviewTick);
     return prior;
   }
   await autopilotLoop?.tick({ status: 'observed' }, false);
@@ -535,55 +320,8 @@ export async function runAttentionWindow(input: AttentionWindowInput): Promise<A
     await sleep(end - now().getTime());
     return next;
   }
-  for (const skip of plan.skipped) log({ kind: 'skip', route: skip.route, reason: skip.reason });
-  const record = (delivery: AttentionDeliveryV1, outcome: AttentionSendOutcome, detail: string | null = null) =>
-    log({ kind: 'send', route: delivery.route, terminal: delivery.terminal, rules: delivery.rules, outcome, detail });
-  // A failed host call is one failed send: the log keeps the host's message, and the other seats still get theirs.
-  const send = (delivery: AttentionDeliveryV1) => {
-    const sent = input.host.send(delivery.terminal, delivery.text);
-    if (sent.status === 'sent') {
-      record(delivery, 'sent');
-      // The review delivery carries no key: it holds no finding, so it sets no slot.
-      if (delivery.keys.length > 0) {
-        const slot = attentionSentSlot(delivery.route, delivery.terminal);
-        const updated = new Map(next.get(slot));
-        const sentAt = now().getTime();
-        for (const key of delivery.keys) {
-          const prev = updated.get(key);
-          updated.set(key, { count: (prev?.count ?? 0) + 1, last_sent_ms: sentAt });
-        }
-        next.set(slot, updated);
-      }
-    } else record(delivery, 'send_failed', sent.detail);
-  };
-  // The review message takes the delivery path of a finding: a blocked orchestrator gets `hc wait`, a working one the window end.
-  // A review start or refusal is housekeeping: the entry carries P3, the priority of the A8 and A9 rules.
-  // The message is one entry whatever the number of starts: its lines join with ` · `, not the `; ` of a finding entry.
-  const reviewText = `[rh-attention] #${input.parent} P3 review: ${reviewLines.join(' · ')}`;
-  const deliveries = [...plan.deliveries, ...(reviewLines.length === 0 ? [] : liveSeatTerminals(board, 'orchestrator').map((terminal): AttentionDeliveryV1 =>
-    ({ route: 'orchestrator', terminal: terminal.address, timing: deliveryTiming(terminal.status), rules: ['review'], keys: [], text: reviewText })))];
-  for (const delivery of deliveries.filter(entry => entry.timing === 'now')) send(delivery);
-  const stillBlocked: AttentionDeliveryV1[] = [];
-  for (const delivery of deliveries.filter(entry => entry.timing === 'after_wait')) {
-    const seconds = Math.max(1, Math.floor((end - now().getTime()) / 1000));
-    const waited = input.host.wait(delivery.terminal, seconds);
-    if (waited.status === 'failed') record(delivery, 'send_failed', waited.detail);
-    else if (waited.ended) record(delivery, 'terminal_ended', waited.reason);
-    else if (waited.state === 'blocked') stillBlocked.push(delivery);
-    else send(delivery);
-  }
-  const autopilotSleep = autopilotLoop === undefined
-    ? undefined
-    : { nextCheckAt: autopilotLoop.nextCheckAt, tick: () => autopilotLoop.tick({ status: 'observed' }, true) };
-  await sleepThroughWindow(end, now, sleep, reviewTick, autopilotSleep);
-  for (const delivery of stillBlocked) {
-    const current = input.host.state(delivery.terminal);
-    if (current.status === 'failed') record(delivery, 'send_failed', current.detail);
-    else if (current.ended) record(delivery, 'terminal_ended', 'ended before the window end');
-    else if (current.state === 'blocked') record(delivery, 'skipped_blocked', 'blocked at the window end');
-    else send(delivery);
-  }
-  for (const delivery of deliveries.filter(entry => entry.timing === 'window_end')) send(delivery);
+  await deliverAttentionWindow({ parent: input.parent, host: input.host, board, plan, next, now, sleep, end, reviewLines,
+    reviewIntervalMs: REVIEW_COLLECT_TICK_MS, reviewTick, autopilotLoop, log });
   return next;
 }
 
