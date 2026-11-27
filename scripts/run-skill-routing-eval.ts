@@ -475,11 +475,6 @@ export function createStubProvider(options: StubProviderOptions = {}): ProviderA
   };
 }
 
-/** Perfect-echo stub used by this file's own deterministic pipeline tests: always returns the case's own expected_route (empty array for "none"), proving the full pipeline computes ceiling metrics and an all-PASS threshold evaluation when routing is perfect. */
-export function perfectEchoRouteFor(routingCase: RoutingCase): readonly string[] {
-  return routingCase.expected_route === "none" ? [] : [routingCase.expected_route];
-}
-
 export interface ProcessProviderOptions {
   readonly claudeCommand?: string;
   readonly codexCommand?: string;
