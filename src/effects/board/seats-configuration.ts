@@ -31,6 +31,7 @@ import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settin
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError } from '../../core/host-config/types';
+import { renderJsonObjectUpdate } from '../adoption/standard-plan';
 import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { antigravityAgentsDirHostPath, checkAntigravityPath, openHostConfigGate } from '../host-config/gate';
 import { hostConfigPaths, hostPathKey, readLedger } from '../host-config/store';
@@ -540,7 +541,7 @@ export async function applySeatOverride(
       const nextOverrides = decodeSeatOverridesSection({ ...currentOverrides, [request.seat]: override });
       applySeatOverrides(base, nextOverrides);
       return { config: { ...config, seat_overrides: nextOverrides }, value: override.authorized_at };
-    }, { expectedRevision: request.expected_revision });
+    }, { expectedRevision: request.expected_revision, render: renderJsonObjectUpdate });
     return decodeSeatOverrideResult({
       config_revision: result.revision,
       seat: request.seat,
@@ -580,7 +581,7 @@ export function revokeSeatOverride(
       }
       const nextOverrides = decodeSeatOverridesSection(Object.fromEntries(remainingEntries));
       return { config: { ...config, seat_overrides: nextOverrides }, value: true };
-    }, { expectedRevision: request.expected_revision });
+    }, { expectedRevision: request.expected_revision, render: renderJsonObjectUpdate });
     return decodeSeatOverrideResult({
       config_revision: result.revision,
       seat: request.seat,

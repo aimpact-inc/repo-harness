@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'path';
 import { SeatPaneNameError } from '../../core/board/seat-pane-name';
-import { SEAT_OVERRIDES_PROTOCOL, seatOverrideIds } from '../../core/board/seat-overrides';
+import { SEAT_OVERRIDES_PROTOCOL, seatOverrideIds, type SeatLaunchOverrideV1 } from '../../core/board/seat-overrides';
 import { LAUNCH_SEAT_IDS, type LaunchSeatId } from '../../core/board/seats-settings';
 import { shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { readAgyQuota } from '../../effects/board/quota';
@@ -103,6 +103,11 @@ export function seatHandoff(env: NodeJS.ProcessEnv = process.env, now = new Date
   return seatResetSteps(identity, action, host);
 }
 
+function formatOwnerOverrideLine(override: SeatLaunchOverrideV1): string {
+  const effort = override.effort === null ? '' : ` ${override.effort}`;
+  return `owner override: ${override.runtime} ${override.model}${effort} (authorized ${override.authorized_at})`;
+}
+
 function renderSeatOverridesText(env: NodeJS.ProcessEnv): string {
   const { base_seats, overrides } = readSeatsConfiguration(env);
   const ids = seatOverrideIds(overrides);
@@ -162,10 +167,7 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
       if (launch.labels.length > 0) process.stderr.write(`labels: ${launch.labels.join(' ')}\n`);
       if (launch.name !== null) process.stderr.write(`name: ${launch.name}\ntab: ${launch.tab}\n`);
       if (launch.ownerException !== null) process.stderr.write(`owner exception: ${launch.ownerException}\n`);
-      if (launch.ownerOverride !== undefined) {
-        const effort = launch.ownerOverride.effort === null ? '' : ` ${launch.ownerOverride.effort}`;
-        process.stderr.write(`owner override: ${launch.ownerOverride.runtime} ${launch.ownerOverride.model}${effort} (authorized ${launch.ownerOverride.authorized_at})\n`);
-      }
+      if (launch.ownerOverride !== undefined) process.stderr.write(`${formatOwnerOverrideLine(launch.ownerOverride)}\n`);
     });
   seats.command('overrides')
     .description('Show active owner-authorized seat route overrides (read-only)')
@@ -232,7 +234,8 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
         if (!dryRun && (!resolvedSpace || resolvedSpace.trim() === '')) {
           throw new SeatsCommandError('seat_space_missing', 'No Herdr.app space: pass --space <id>, or run the launch in a terminal that a Herdr.app pane shows.');
         }
-        const { seats: decodedSeats } = configuredSeats(env);
+        const { seats: decodedSeats, overrides } = configuredSeats(env);
+        const hasCouncilOverride = overrides.council !== undefined;
         const pendingCouncilByTab = new Map<string, Set<string>>();
         const result = await runCouncilConsult({
           cwd: process.cwd(),
@@ -248,21 +251,29 @@ export function buildSeatsCommand(loadNotify?: () => Promise<SeatResetNotify>): 
           dry_run: dryRun,
         }, {
           launch: async (member, labels, cwd, isDryRun) => {
-            const memberSeat = resolveCouncilMemberSeat(member, decodedSeats, env);
             const { launch, effective } = await effectiveSeatLaunch('council', labels, env, cwd, {
-              configuredOverride: memberSeat,
+              ...(hasCouncilOverride ? {} : { configuredOverride: resolveCouncilMemberSeat(member, decodedSeats, env) }),
               prepareFleet: !isDryRun,
               providerUnavailable,
             });
-            return { launch, model: effective.model, shell: effective.tools.includes('shell') };
+            const model = hasCouncilOverride ? shownModel('seats.council.model', effective.model) : effective.model;
+            return { launch, model, shell: effective.tools.includes('shell') };
           },
           openTab: ({ task, ...rest }, opts) => {
             openSeatTab(task === undefined ? rest : { ...rest, task }, env, null, opts?.privateTask === true, pendingCouncilByTab);
           },
         });
-        process.stdout.write(options.json === true || result.dry_run
-          ? `${JSON.stringify(result, null, 2)}\n`
-          : `${result.members.map(row => `${result.seat}(${row.member}) ${row.runtime}/${row.model ?? 'default'} ${row.pane_name} → ${row.out_path}`).join('\n')}\n`);
+        const activeOverride = result.members.find(row => row.ownerOverride !== undefined)?.ownerOverride;
+        if (options.json === true || result.dry_run) {
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+          if (options.json !== true && activeOverride !== undefined) {
+            process.stderr.write(`${formatOwnerOverrideLine(activeOverride)}\n`);
+          }
+        } else {
+          const lines = result.members.map(row => `${result.seat}(${row.member}) ${row.runtime}/${row.model ?? 'default'} ${row.pane_name} → ${row.out_path}`);
+          if (activeOverride !== undefined) lines.push(formatOwnerOverrideLine(activeOverride));
+          process.stdout.write(`${lines.join('\n')}\n`);
+        }
       } catch (error) {
         writeLaunchError(error);
       }

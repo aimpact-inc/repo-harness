@@ -13,7 +13,9 @@ import {
   decodeSeatsConfig,
   isAgyAllowedSeat,
   isAgyToolsValid,
+  isCouncilSeat,
   isRetiredSeatModel,
+  isReviewSeat,
   isWorkerSeat,
   seatModelShapeValid,
   seatsConfigInvalidMessage,
@@ -75,6 +77,14 @@ export interface SeatOverrideResultV1 {
   readonly changed_keys: readonly string[];
 }
 
+export interface SeatLaunchOverrideV1 {
+  readonly seat: SeatId;
+  readonly runtime: SeatRuntime;
+  readonly model: string;
+  readonly effort: string | null;
+  readonly authorized_at: string;
+}
+
 export type SeatOverrideValidationCode =
   | 'owner_approval_required'
   | 'seat_override_instruction_invalid'
@@ -82,7 +92,8 @@ export type SeatOverrideValidationCode =
   | 'seat_model_invalid'
   | 'seat_model_retired'
   | 'seat_effort_invalid'
-  | 'seat_tool_not_allowed';
+  | 'seat_tool_not_allowed'
+  | 'seat_fleet_not_allowed';
 
 /** Structured validation failure for override write requests. Never includes submitted free-text values. */
 export class SeatOverrideValidationError extends Error {
@@ -371,8 +382,46 @@ function agyOverrideTools(id: SeatId, baseTools: readonly SeatTool[]): readonly 
   return narrowed;
 }
 
+/**
+ * Reject a runtime override when the target launcher cannot enforce a restriction
+ * that the base seat's launcher enforces (#3641).
+ */
+function assertRuntimePreservesRestrictions(id: SeatId, base: SeatConfigV1, targetRuntime: SeatRuntime): void {
+  if (targetRuntime === base.runtime) return;
+
+  // Claude enforces shell-off (omits Bash/Monitor/TaskStop) and empty fleet (omits Agent).
+  // Codex and Pi downgrade both to instructions_only.
+  if (base.runtime === 'claude' && (targetRuntime === 'codex' || targetRuntime === 'pi')) {
+    if (!base.tools.includes('shell')) {
+      throw new SeatOverrideValidationError(
+        'seat_tool_not_allowed',
+        `seat_overrides.${id}.runtime`,
+        `The ${id} seat enforces shell off on claude, which ${targetRuntime} cannot enforce. Keep claude or update the seat tools in Settings before authorizing a ${targetRuntime} override.`,
+      );
+    }
+    if (base.fleet.length === 0) {
+      throw new SeatOverrideValidationError(
+        'seat_fleet_not_allowed',
+        `seat_overrides.${id}.runtime`,
+        `The ${id} seat enforces an empty sub-agent fleet on claude, which ${targetRuntime} cannot enforce. Keep claude before authorizing a ${targetRuntime} override.`,
+      );
+    }
+  }
+
+  // Claude, Codex, and agy block direct Edit/Write tools when `edit` is omitted.
+  // Pi passes `--exclude-tools edit,write` only for review and council seats.
+  if (targetRuntime === 'pi' && !base.tools.includes('edit') && !isReviewSeat(id) && !isCouncilSeat(id)) {
+    throw new SeatOverrideValidationError(
+      'seat_tool_not_allowed',
+      `seat_overrides.${id}.runtime`,
+      `The ${id} seat omits edit, which pi does not block with --exclude-tools outside review and council seats. Choose a runtime that blocks direct edits or update the seat tools in Settings.`,
+    );
+  }
+}
+
 /** Overlay one owner-authorized route override onto a configured base seat without widening tool or fleet grants. */
 export function applySeatOverrideToConfig(id: SeatId, base: SeatConfigV1, override: SeatRouteOverrideV1): SeatConfigV1 {
+  assertRuntimePreservesRestrictions(id, base, override.runtime);
   const tools = override.runtime === 'agy' ? agyOverrideTools(id, base.tools) : base.tools;
   return Object.freeze({
     runtime: override.runtime,

@@ -1392,7 +1392,10 @@ describe('seat settings routes', () => {
   });
 
   test('owner seat override API sets, exposes, enforces invariants, and revokes an out-of-catalog route (#3641)', async () => {
-    const harness = await startHarness({ agents: PANE_AGENTS });
+    const rawConfig = `${JSON.stringify({ agents: PANE_AGENTS, seats: DEFAULT_SEATS_CONFIG }, null, 2)}\n`
+      .replace('"codex_credit_floor": 0,', '"codex_credit_floor": 0.00,');
+    expect(rawConfig).toContain('"codex_credit_floor": 0.00,');
+    const harness = await startHarness(rawConfig);
     const env = { HOME: harness.home };
     const overrideModel = 'example-provider/custom-model';
     const instruction = 'Owner authorized custom provider for worker-opus';
@@ -1436,6 +1439,7 @@ describe('seat settings routes', () => {
     expect(readFileSync(operatorAuditPath({ REPO_HARNESS_HOME: harness.harnessHome }), 'utf8')).not.toContain(overrideModel);
     const setBody = JSON.parse(setText) as { config_revision: string; seat: string; active: boolean; authorized_at: string; changed_keys: string[] };
     expect(setBody).toMatchObject({ seat: 'worker-opus', active: true, changed_keys: ['seat_overrides.worker-opus'] });
+    expect(readFileSync(harness.configPath, 'utf8')).toContain('"codex_credit_floor": 0.00,');
 
     // GET overrides shows the record; GET /api/v1/settings/seats preserves the valid base catalog route; resolver overlays the override.
     const activeOverrides = decodeSeatOverridesResponse(await (await fetch(`${harness.server.url}/api/v1/settings/seats/overrides`)).json());
@@ -1481,11 +1485,12 @@ describe('seat settings routes', () => {
     }, 'seats');
     expect([disableSeat.status, (await disableSeat.json()).error.code]).toEqual([422, 'seat_override_active']);
 
-    // Revoking both overrides removes top-level seat_overrides and restores the catalog routes.
+    // Revoking both overrides removes top-level seat_overrides, preserves sibling bytes, and restores the catalog routes.
     const revokeLight = await sendOverride('/api/v1/settings/seats/overrides/revoke', {
       expected_revision: lightRev, seat: 'worker-light', owner_approved: true,
     });
     expect(revokeLight.status).toBe(200);
+    expect(readFileSync(harness.configPath, 'utf8')).toContain('"codex_credit_floor": 0.00,');
     const revAfterLight = (await revokeLight.json()).config_revision as string;
     const revokeOpus = await sendOverride('/api/v1/settings/seats/overrides/revoke', {
       expected_revision: revAfterLight, seat: 'worker-opus', owner_approved: true,
@@ -1493,7 +1498,9 @@ describe('seat settings routes', () => {
     expect(revokeOpus.status).toBe(200);
     const revokeBody = await revokeOpus.json() as { config_revision: string; seat: string; active: boolean; authorized_at: null; changed_keys: string[] };
     expect(revokeBody).toMatchObject({ seat: 'worker-opus', active: false, authorized_at: null, changed_keys: ['seat_overrides.worker-opus'] });
-    expect(JSON.parse(readFileSync(harness.configPath, 'utf8')).seat_overrides).toBeUndefined();
+    const afterRevokeRaw = readFileSync(harness.configPath, 'utf8');
+    expect(afterRevokeRaw).toContain('"codex_credit_floor": 0.00,');
+    expect(JSON.parse(afterRevokeRaw).seat_overrides).toBeUndefined();
     expect(readSeatsConfiguration(env).seats['worker-opus']).toMatchObject({ runtime: 'claude', model: 'opus' });
 
     // Revoking a seat without an active override returns 404.
@@ -1582,12 +1589,25 @@ describe('seat settings routes', () => {
     expect(sha256(harness.configPath)).toBe(revision);
   });
 
-  test('owner seat overrides never widen base tool or fleet grants and fail closed when agy requires missing tools (#3641)', async () => {
+  test('owner seat overrides never widen grants or weaken enforced base restrictions (#3641)', async () => {
     const baseSeats = {
       ...DEFAULT_SEATS_CONFIG,
+      council: {
+        runtime: 'claude' as const,
+        model: 'fable',
+        advisor_model: null,
+        effort: null,
+        tools: ['net', 'read', 'shell'] as const,
+        fleet: ['explorer'] as const,
+      },
       'worker-opus': {
         ...DEFAULT_SEATS_CONFIG['worker-opus'],
         advisor_model: 'opus',
+        tools: ['edit', 'net', 'read'] as const,
+        fleet: ['explorer'] as const,
+      },
+      'worker-deep': {
+        ...DEFAULT_SEATS_CONFIG['worker-deep'],
         tools: ['edit', 'net', 'read'] as const,
         fleet: ['explorer'] as const,
       },
@@ -1608,44 +1628,92 @@ describe('seat settings routes', () => {
       body: JSON.stringify({ request_id: randomUUID(), expected_revision: expectedRevision, owner_approved: true, ...body }),
     });
 
-    // Agy override on a seat lacking required shell is refused and writes nothing.
+    // Rejected branches: target runtime cannot enforce base restrictions (422 with next_action, nothing written).
     const rev0 = (await seats(harness)).config.revision;
-    const refusedAgy = await sendSet(rev0, {
-      seat: 'worker-opus', runtime: 'agy', model: 'gemini-4-neon-high', effort: null, instruction: 'Try agy without shell',
-    });
-    expect([refusedAgy.status, (await refusedAgy.json()).error.code]).toEqual([422, 'seat_tool_not_allowed']);
+    const rejectedCases: readonly (readonly [string, Record<string, unknown>, string])[] = [
+      ['claude shell-off -> agy', { seat: 'worker-opus', runtime: 'agy', model: 'gemini-4-neon-high', effort: null, instruction: 'Try agy without shell' }, 'seat_tool_not_allowed'],
+      ['claude shell-off -> codex', { seat: 'worker-opus', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Try codex without shell' }, 'seat_tool_not_allowed'],
+      ['claude shell-off -> pi', { seat: 'worker-opus', runtime: 'pi', model: 'example-provider/custom-model', effort: 'high', instruction: 'Try pi without shell' }, 'seat_tool_not_allowed'],
+      ['claude empty fleet -> codex', { seat: 'reviewer', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Try codex on reviewer' }, 'seat_fleet_not_allowed'],
+      ['claude empty fleet -> pi', { seat: 'reviewer', runtime: 'pi', model: 'example-provider/custom-model', effort: 'high', instruction: 'Try pi on reviewer' }, 'seat_fleet_not_allowed'],
+      ['non-review edit-off -> pi', { seat: 'orchestrator', runtime: 'pi', model: 'example-provider/custom-model', effort: 'high', instruction: 'Try pi on orchestrator' }, 'seat_tool_not_allowed'],
+    ];
+    for (const [label, body, code] of rejectedCases) {
+      const response = await sendSet(rev0, body);
+      const parsed = (await response.json()) as { error: { code: string; next_action: string } };
+      expect([label, response.status, parsed.error.code, parsed.error.next_action.length > 0]).toEqual([label, 422, code, true]);
+    }
     expect(sha256(harness.configPath)).toBe(rev0);
 
-    // Codex override on a seat without shell preserves exact base tools and fleet without adding shell.
-    const codexRes = await sendSet(rev0, {
-      seat: 'worker-opus', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Use codex without adding shell',
+    // Kept branches: enforced restrictions remain enforced without widening base tools or fleet.
+    const claudeSameRes = await sendSet(rev0, {
+      seat: 'worker-opus', runtime: 'claude', model: 'sonnet', effort: 'high', instruction: 'Keep claude shell-off',
     });
-    expect(codexRes.status).toBe(200);
-    const rev1 = (await codexRes.json()).config_revision as string;
-    const afterCodex = readSeatsConfiguration(env).seats['worker-opus'];
-    expect(afterCodex.tools).toEqual(['edit', 'net', 'read']);
-    expect(afterCodex.fleet).toEqual(['explorer']);
-    expect(afterCodex.advisor_model).toBeNull();
+    expect(claudeSameRes.status).toBe(200);
+    const rev1 = (await claudeSameRes.json()).config_revision as string;
+    expect(readSeatsConfiguration(env).seats['worker-opus']).toMatchObject({
+      runtime: 'claude', model: 'sonnet', tools: ['edit', 'net', 'read'], fleet: ['explorer'], advisor_model: 'opus',
+    });
+
+    // Pi base without shell -> codex preserves exact base tools and fleet without adding shell.
+    const codexPiBaseRes = await sendSet(rev1, {
+      seat: 'worker-deep', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Use codex without adding shell',
+    });
+    expect(codexPiBaseRes.status).toBe(200);
+    const rev2 = (await codexPiBaseRes.json()).config_revision as string;
+    expect(readSeatsConfiguration(env).seats['worker-deep']).toMatchObject({
+      runtime: 'codex', tools: ['edit', 'net', 'read'], fleet: ['explorer'], advisor_model: null,
+    });
+
+    // Claude orchestrator (edit off, shell on, explorer fleet) -> codex keeps edit off via read-only sandbox.
+    const orchCodexRes = await sendSet(rev2, {
+      seat: 'orchestrator', runtime: 'codex', model: 'custom-model', effort: 'high', instruction: 'Use codex on orchestrator',
+    });
+    expect(orchCodexRes.status).toBe(200);
+    const rev3 = (await orchCodexRes.json()).config_revision as string;
+    expect(readSeatsConfiguration(env).seats.orchestrator.tools).not.toContain('edit');
+
+    // Claude council (edit off, shell on, explorer fleet) -> pi keeps --exclude-tools edit,write.
+    const councilPiRes = await sendSet(rev3, {
+      seat: 'council', runtime: 'pi', model: 'example-provider/custom-model', effort: 'low', instruction: 'Use pi on council',
+    });
+    expect(councilPiRes.status).toBe(200);
+    const rev4 = (await councilPiRes.json()).config_revision as string;
 
     // Agy override on a seat covering agy requirements narrows fleet to [] and adds no missing tool (gh stays off).
-    const agyRes = await sendSet(rev1, {
+    const agyRes = await sendSet(rev4, {
       seat: 'worker', runtime: 'agy', model: 'gemini-4-neon-high', effort: null, instruction: 'Use agy on worker without gh',
     });
     expect(agyRes.status).toBe(200);
-    const rev2 = (await agyRes.json()).config_revision as string;
-    const afterAgy = readSeatsConfiguration(env).seats.worker;
-    expect(afterAgy.tools).toEqual(['edit', 'net', 'read', 'shell']);
-    expect(afterAgy.fleet).toEqual([]);
-    expect(afterAgy.advisor_model).toBeNull();
+    const rev5 = (await agyRes.json()).config_revision as string;
+    expect(readSeatsConfiguration(env).seats.worker).toMatchObject({
+      runtime: 'agy', tools: ['edit', 'net', 'read', 'shell'], fleet: [], advisor_model: null,
+    });
 
     // Base settings edit removing a tool required by an active agy override is refused cleanly.
     const { revision: _r, ...baseSection } = (await seats(harness)).config;
     const dropShell = await post(harness, {
-      expected_revision: rev2,
+      expected_revision: rev5,
       seats: { ...baseSection, worker: { ...baseSection.worker, tools: ['edit', 'net', 'read'] } },
     }, 'seats');
     expect([dropShell.status, (await dropShell.json()).error.code]).toEqual([422, 'seat_tool_not_allowed']);
-    expect(sha256(harness.configPath)).toBe(rev2);
+    expect(sha256(harness.configPath)).toBe(rev5);
+
+    // Resolver fails closed on stored records that weaken enforced base restrictions.
+    for (const [seatId, runtime, model] of [
+      ['worker-opus', 'codex', 'custom-model'],
+      ['reviewer', 'pi', 'example-provider/custom-model'],
+      ['orchestrator', 'pi', 'example-provider/custom-model'],
+    ] as const) {
+      writeFileSync(harness.configPath, JSON.stringify({
+        agents: PANE_AGENTS,
+        seats: baseSeats,
+        seat_overrides: {
+          [seatId]: { runtime, model, effort: 'high', authorized_at: '2026-11-27T15:30:00.000Z', instruction: 'Tampered override' },
+        },
+      }));
+      expect(() => readSeatsConfiguration(env)).toThrow();
+    }
   });
 
   test('a stale revision and a reused request_id with another body get 409', async () => {

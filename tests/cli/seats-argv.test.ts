@@ -3708,4 +3708,78 @@ describe("rh seats overrides (#3641)", () => {
       expect(runSeats("overrides").stdout.trim()).toBe("No active owner seat overrides.");
     });
   });
+
+  test("seats council uses the resolved council override and active override line, falling back to member catalog routing when absent (#3641)", () => {
+    const councilBase = {
+      runtime: "claude" as const,
+      model: "fable",
+      advisor_model: null,
+      effort: null,
+      tools: ["net", "read", "shell"] as const,
+      fleet: ["explorer"] as const,
+    };
+    const seatsWithCouncil = { ...DEFAULT_SEATS_CONFIG, council: councilBase };
+    const authorizedAt = "2026-11-27T15:30:00.000Z";
+    withHome(seatsWithCouncil, home => withRepository(home, "rh", (_repo, worktree) => {
+      const configPath = join(home, ".repo-harness", "config.json");
+      const env = { ...process.env, ...registryEnv(home) };
+      const runCouncil = (...args: string[]) => spawnSync(
+        process.execPath,
+        [CLI, "seats", "council", "--issue", "42", "--members", "fable", "--dry-run", "--repository-id", "19", ...args],
+        { env, cwd: worktree, encoding: "utf8" },
+      );
+
+      writeFileSync(configPath, JSON.stringify({
+        seats: seatsWithCouncil,
+        seat_overrides: {
+          council: {
+            runtime: "codex",
+            model: "gpt-6.2-sol",
+            effort: "low",
+            authorized_at: authorizedAt,
+            instruction: "Owner authorized codex for council",
+          },
+        },
+      }));
+
+      // Council dry-run honors all three authorized override fields and surfaces the active override line.
+      const overridden = runCouncil();
+      expect(overridden.status, overridden.stderr).toBe(0);
+      expect(JSON.parse(overridden.stdout).members).toEqual([
+        expect.objectContaining({
+          member: "fable",
+          runtime: "codex",
+          model: "gpt-6.2-sol",
+          ownerOverride: {
+            seat: "council",
+            runtime: "codex",
+            model: "gpt-6.2-sol",
+            effort: "low",
+            authorized_at: authorizedAt,
+          },
+        }),
+      ]);
+      expect(overridden.stderr).toContain(`owner override: codex gpt-6.2-sol low (authorized ${authorizedAt})`);
+
+      // Launch argv carries runtime, model, and effort from the override.
+      const argvRun = spawnSync(
+        process.execPath,
+        [CLI, "seats", "argv", "council", "--issue", "42", "--repository-id", "19", "--json"],
+        { env, cwd: worktree, encoding: "utf8" },
+      );
+      expect(argvRun.status, argvRun.stderr).toBe(0);
+      const args = JSON.parse(argvRun.stdout).argv as string[];
+      expect(args.join(" ")).toContain("codex -m gpt-6.2-sol -c");
+      expect(args.join(" ")).toContain('model_reasoning_effort="low"');
+
+      // Without an active override, council uses member catalog routing and prints no override metadata.
+      writeFileSync(configPath, JSON.stringify({ seats: seatsWithCouncil }));
+      const restored = runCouncil();
+      expect(restored.status, restored.stderr).toBe(0);
+      const restoredMember = JSON.parse(restored.stdout).members[0];
+      expect(restoredMember).toMatchObject({ member: "fable", runtime: "claude", model: "fable" });
+      expect(restoredMember.ownerOverride).toBeUndefined();
+      expect(restored.stderr).toBe("");
+    }));
+  });
 });

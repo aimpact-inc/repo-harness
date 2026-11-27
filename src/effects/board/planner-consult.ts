@@ -12,6 +12,7 @@ import {
   type CouncilMember,
 } from '../../core/board/planner-consult';
 import type { SeatLaunchV1 } from '../../core/board/seat-launch';
+import type { SeatLaunchOverrideV1 } from '../../core/board/seat-overrides';
 import { githubRemoteRepository } from '../../core/board/source';
 import { resolveGitCommonDirectory } from '../git/common-directory';
 import { gitExecFileSync, gitSpawnSync, withoutRepositorySelectingGitEnv } from '../git/runner';
@@ -39,7 +40,11 @@ export interface CouncilConsultPorts {
     cwd: string,
     dryRun: boolean,
   ) => Promise<{
-    launch: Pick<SeatLaunchV1, 'argv' | 'runtime'> & { name: string | null; tab: string | null };
+    launch: Pick<SeatLaunchV1, 'argv' | 'runtime'> & {
+      name: string | null;
+      tab: string | null;
+      readonly ownerOverride?: SeatLaunchOverrideV1;
+    };
     model: string | null;
     shell: boolean;
   }>;
@@ -130,7 +135,11 @@ export async function runCouncilConsult(input: CouncilConsultInput, ports: Counc
   const prepared: Array<{
     member: CouncilMember;
     outPath: string;
-    launch: Pick<SeatLaunchV1, 'argv' | 'runtime'> & { name: string | null; tab: string | null };
+    launch: Pick<SeatLaunchV1, 'argv' | 'runtime'> & {
+      name: string | null;
+      tab: string | null;
+      readonly ownerOverride?: SeatLaunchOverrideV1;
+    };
     model: string | null;
   }> = [];
 
@@ -187,6 +196,7 @@ export async function runCouncilConsult(input: CouncilConsultInput, ports: Counc
       member: item.member,
       runtime: item.launch.runtime,
       model: item.model,
+      ...(item.launch.ownerOverride === undefined ? {} : { ownerOverride: item.launch.ownerOverride }),
       pane_name: item.launch.name!,
       tab: item.launch.tab!,
       out_path: item.outPath,

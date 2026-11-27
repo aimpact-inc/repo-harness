@@ -1,4 +1,5 @@
 import { CLAUDE_BUILTIN_AGENT_TYPES, buildSeatLaunch, type SeatLaunchV1 } from '../../core/board/seat-launch';
+import type { SeatLaunchOverrideV1 } from '../../core/board/seat-overrides';
 import { SeatPaneNameError, seatPaneName, seatTabName } from '../../core/board/seat-pane-name';
 import {
   AgySeatSettingsError,
@@ -11,7 +12,6 @@ import {
   type LaunchSeatId,
   type SeatConfigV1,
   type SeatId,
-  type SeatRuntime,
 } from '../../core/board/seats-settings';
 import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
@@ -31,13 +31,7 @@ import { AntigravityHooksPathError } from '../../effects/host-config/gate';
 import { SeatsCommandError, checkOwnerException, panePrefix, seatId, seatLabels, selfLabelingArgv, type SeatLabelInput } from './seats-labels';
 import { checkAgyLaunchTarget, checkedAgyRuntime, configuredSeats, installedPiExtension, plannedGatekeeper, quotaCheckedSeat } from './seats-runtime';
 
-export interface SeatLaunchOverrideV1 {
-  readonly seat: SeatId;
-  readonly runtime: SeatRuntime;
-  readonly model: string;
-  readonly effort: string | null;
-  readonly authorized_at: string;
-}
+export type { SeatLaunchOverrideV1 };
 
 export type SeatLaunchResult = SeatLaunchV1 & {
   readonly labels: readonly string[];
