@@ -2,63 +2,25 @@ import { parseClosingReferences } from '../publication/closing-references';
 import type { AcceptanceMergeSwitch } from '../publication/acceptance-merge-policy';
 import type { PullRequestReadinessV2 } from '../publication/merge-readiness';
 import { isSeatStatusMessage, seatStatusMessage } from './advisor-seat';
-import { isAutopilotEnabled, type AutopilotMergeGateV1, type AutopilotStateV1 } from './autopilot';
-import { CREDENTIALS_LABEL } from './dispatch';
-import { GITHUB_REPOSITORY } from './github-repository';
-import { autopilotParkRequirement, isMergePark, prMergeNotes, readMergeHold, type BoardExternalBlockerV1, type BoardMergeHoldParkV1, type BoardMergeHoldV1 } from './merge';
+import type { AutopilotMergeGateV1, AutopilotStateV1 } from './autopilot';
+import { projectBoardCollections } from './board-projection';
+import { SWITCH_VALUES, validateBoardEnvelope, validateBoardItems, validateBoardPullRequests } from './board-validation';
+import { readMergeHold, type BoardExternalBlockerV1, type BoardMergeHoldParkV1, type BoardMergeHoldV1 } from './merge';
 import { decodePlanBlock, PlanBlockError, PLAN_COMMENT_HEADER, type PlanBlockV3 } from './plan-block';
 import {
-  issueClaim,
-  openQuestions,
-  newestProtocolComment,
-  parseClaimStatus,
-  parseRefs,
-  protocolComments,
-  writerCompletion,
-  type WriterCompletionV1,
-  type BoardCommentPageV1,
-  type BoardParentReadV1,
-  type BoardPullRequestReadV1,
-  type BoardSubIssueReadV1,
-  type ClaimStatusV1,
-  type IssueClaimV1,
-  type OpenQuestionsV1,
+  newestProtocolComment, parseRefs, protocolComments, type WriterCompletionV1,
+  type BoardCommentPageV1, type BoardParentReadV1, type BoardPullRequestReadV1, type BoardSubIssueReadV1,
+  type ClaimStatusV1, type IssueClaimV1, type OpenQuestionsV1,
 } from './source';
-import { isCiRepairIssueBody } from '../ci/test-report';
-import {
-  acceptance,
-  clearedHazardPaths,
-  effectiveTier,
-  gatekeeperReview,
-  requiredCheck,
-  reviewFail,
-  reviewRecords,
-  reviewRule,
-  secondReview,
-  tierOf,
-  writerFamily,
-  type BoardAcceptanceV1,
-  type BoardGatekeeperReviewV1,
-  type BoardRequiredCheckV1,
-  type BoardRequiredContextsV1,
-  type BoardReviewEvidenceV1,
-  type BoardReviewRecordsV1,
-  type BoardSecondReviewV1,
-  type BoardTier,
-  type BoardWriterFamily,
+import type {
+  BoardAcceptanceV1, BoardGatekeeperReviewV1, BoardRequiredCheckV1, BoardRequiredContextsV1,
+  BoardReviewEvidenceV1, BoardReviewRecordsV1, BoardSecondReviewV1, BoardTier, BoardWriterFamily,
 } from './review-rules';
 
 export { ACCEPTANCE_RECORD_HEADER } from './review-rules';
 export type {
-  BoardAcceptanceV1,
-  BoardGatekeeperReviewV1,
-  BoardRequiredCheckV1,
-  BoardRequiredContextV1,
-  BoardRequiredContextsV1,
-  BoardReviewRecordsV1,
-  BoardSecondReviewV1,
-  BoardTier,
-  BoardWriterFamily,
+  BoardAcceptanceV1, BoardGatekeeperReviewV1, BoardRequiredCheckV1, BoardRequiredContextV1, BoardRequiredContextsV1,
+  BoardReviewRecordsV1, BoardSecondReviewV1, BoardTier, BoardWriterFamily,
 } from './review-rules';
 
 /**
@@ -69,9 +31,6 @@ export type {
  */
 export const BOARD_PROTOCOL = 15 as const;
 export const BOARD_KIND = 'repo-harness.board' as const;
-
-const PLAN_HEADER = PLAN_COMMENT_HEADER;
-const CLAIM_STATUS_HEADER = 'repo-harness issue claim status';
 
 export type BoardPlanV1 =
   /** `revision`: the ordinal of this comment among the parent's plan comments (r1 is the first); null when the comment read is truncated. */
@@ -350,12 +309,6 @@ export interface BoardInputV1 {
   readonly hold_comments?: ReadonlyMap<number, BoardCommentPageV1>;
 }
 
-const SECOND_REVIEWS: ReadonlySet<unknown> = new Set<BoardSecondReviewV1>(['not_required', 'pending', 'recorded']);
-
-const GATEKEEPER_REVIEWS: ReadonlySet<unknown> = new Set<BoardGatekeeperReviewV1>(['pass', 'fail', 'none', 'unknown']);
-
-const SWITCH_VALUES: ReadonlySet<unknown> = new Set<BoardAcceptanceMergeV1>(['off', 'on', 'unknown']);
-
 /** The `branch`, `where` and `status_msg` checks of the board and the parent list decoders: an absent value is a refusal, and null is the explicit none. The error never repeats a refused message. */
 export function checkSeatTerminals(terminals: unknown): void {
   if (!Array.isArray(terminals)) throw new Error('board seat terminals are not a list');
@@ -366,93 +319,16 @@ export function checkSeatTerminals(terminals: unknown): void {
   }
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
-const isTime = (value: unknown): boolean => typeof value === 'string' && !Number.isNaN(Date.parse(value));
-
-function isIssueClaim(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.status === 'none' || value.status === 'unknown') return true;
-  return value.status === 'active' && typeof value.url === 'string' && isTime(value.created_at) && (value.role === null || typeof value.role === 'string')
-    && (value.branch === null || typeof value.branch === 'string')
-    && (value.bundle === null || (Array.isArray(value.bundle) && value.bundle.length > 1 && value.bundle.every(number => Number.isSafeInteger(number) && number > 0)));
-}
-
-function isWriterCompletion(value: unknown): boolean {
-  return value === null || (isRecord(value) && Number.isSafeInteger(value.pr) && (value.pr as number) > 0
-    && typeof value.head_sha === 'string' && /^[0-9a-f]{7,40}$/u.test(value.head_sha)
-    && (value.branch === null || typeof value.branch === 'string'));
-}
-
-function isReviewRecords(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.status === 'unknown') return value.reason === 'comments_truncated' || value.reason === 'acceptance_record_unparsed';
-  return value.status === 'observed' && [value.gatekeeper, value.reviewer].every(time => time === null || isTime(time))
-    && isRecord(value.head) && typeof value.head.gatekeeper === 'boolean' && typeof value.head.reviewer === 'boolean';
-}
-
-function isOpenQuestions(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.status === 'unknown') return true;
-  return value.status === 'observed' && Array.isArray(value.questions)
-    && value.questions.every((question: unknown) => isRecord(question) && typeof question.url === 'string' && isTime(question.created_at));
-}
-
-function isSeatLiveness(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.status === 'unavailable') return typeof value.reason === 'string';
-  return value.status === 'observed' && Array.isArray(value.probes) && value.probes.every((probe: unknown) => isRecord(probe) && typeof probe.address === 'string'
-    && (probe.status_ms === null || Number.isSafeInteger(probe.status_ms)) && Number.isSafeInteger(probe.turn) && Number.isSafeInteger(probe.children) && (probe.children as number) >= 0
-    && (probe.screen_hash === null || (typeof probe.screen_hash === 'string' && /^[0-9a-f]{64}$/u.test(probe.screen_hash))));
-}
-
-function isBlockerEdge(value: unknown): boolean {
-  return isRecord(value) && typeof value.number === 'number' && Number.isSafeInteger(value.number) && value.number > 0
-    && (value.state === 'open' || value.state === 'closed')
-    && (value.repository === undefined || (typeof value.repository === 'string' && GITHUB_REPOSITORY.test(value.repository)));
-}
-
-function isExternalBlocker(value: unknown): boolean {
-  return isRecord(value) && isBlockerEdge(value) && typeof value.repository === 'string' && typeof value.parked === 'boolean'
-    && Array.isArray(value.blocked_by) && value.blocked_by.every(isBlockerEdge);
-}
-
 /** Refuse a board of another protocol or kind, or a board without a valid new value, at a process boundary (Surface contract, docs/adr/ADR-0002). */
 export function decodeBoard(value: unknown): BoardV1 {
   const board = value as Partial<BoardV1> | null;
   if (board?.protocol !== BOARD_PROTOCOL) throw new Error(`unsupported board protocol: ${String(board?.protocol)}`);
   if (board.kind !== BOARD_KIND) throw new Error(`unsupported board kind: ${String(board.kind)}`);
   if (!SWITCH_VALUES.has(board.acceptance_merge)) throw new Error(`invalid board acceptance_merge: ${String(board.acceptance_merge)}`);
-  if (board.plan?.status === 'observed') {
-    const { revision } = board.plan;
-    if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) throw new Error(`invalid board plan revision: ${String(revision)}`);
-  }
   if (board.execution?.status === 'observed') checkSeatTerminals(board.execution.terminals);
-  if (!isSeatLiveness(board.seat_liveness)) throw new Error('invalid board seat_liveness');
-  if (board.autopilot !== undefined && (!isRecord(board.autopilot) || typeof board.autopilot.low_tier_skip !== 'boolean')) throw new Error('invalid board autopilot');
-  const external: unknown = board.autopilot_external_blockers;
-  if (external !== undefined && (!Array.isArray(external) || !external.every(isExternalBlocker))) throw new Error('invalid board autopilot_external_blockers');
-  for (const item of board.items ?? []) {
-    if (!isIssueClaim(item.claim)) throw new Error(`invalid board claim on #${item.number}`);
-    if (!isWriterCompletion(item.writer_completion)) throw new Error(`invalid board writer_completion on #${item.number}`);
-    if (!isOpenQuestions(item.open_questions)) throw new Error(`invalid board open_questions on #${item.number}`);
-  }
-  for (const pr of board.pull_requests ?? []) {
-    if (!isOpenQuestions(pr.open_questions)) throw new Error(`invalid board open_questions on PR #${pr.number}`);
-    const merge: unknown = pr.autopilot_merge;
-    if (board.autopilot !== undefined && pr.state === 'open' && !(isRecord(merge) && typeof merge.rollback === 'boolean'
-      && (merge.required_park === null || isMergePark(merge.required_park)))) throw new Error(`invalid board autopilot_merge on PR #${pr.number}`);
-    const fail: unknown = pr.review_fail;
-    if (fail !== null && !(isRecord(fail) && typeof fail.url === 'string' && isTime(fail.recorded_at))) throw new Error(`invalid board review_fail on PR #${pr.number}`);
-    const cleared: unknown = pr.cleared_hazard_paths;
-    if (!Array.isArray(cleared) || !cleared.every(path => typeof path === 'string')) throw new Error(`invalid board cleared_hazard_paths on PR #${pr.number}`);
-    if (!SECOND_REVIEWS.has(pr.second_review)) throw new Error(`invalid board second_review on PR #${pr.number}`);
-    if (!GATEKEEPER_REVIEWS.has(pr.gatekeeper_review)) throw new Error(`invalid board gatekeeper_review on PR #${pr.number}`);
-    if (!isReviewRecords(pr.review_records)) throw new Error(`invalid board review_records on PR #${pr.number}`);
-    const observedAt: unknown = pr.merge_readiness_observed_at;
-    if (pr.merge_readiness === null ? observedAt !== null : typeof observedAt !== 'string' || Number.isNaN(Date.parse(observedAt))) {
-      throw new Error(`invalid board merge_readiness_observed_at on PR #${pr.number}: ${String(observedAt)}`);
-    }
-  }
+  validateBoardEnvelope(board);
+  validateBoardItems(board.items ?? []);
+  validateBoardPullRequests(board.pull_requests ?? [], board.autopilot !== undefined);
   return board as BoardV1;
 }
 
@@ -461,22 +337,15 @@ export function decodeBoard(value: unknown): BoardV1 {
  * The board and `rh board post plan` read it here, so one decoder decides what a plan is.
  */
 export function planFromComments(comments: BoardCommentPageV1): BoardPlanV1 {
-  const comment = newestProtocolComment(comments, PLAN_HEADER);
+  const comment = newestProtocolComment(comments, PLAN_COMMENT_HEADER);
   if (comment === null) return { status: 'absent', truncated: comments.truncated };
   try {
-    const revision = comments.truncated ? null : protocolComments(comments, PLAN_HEADER).length;
+    const revision = comments.truncated ? null : protocolComments(comments, PLAN_COMMENT_HEADER).length;
     return { status: 'observed', comment_url: comment.url, created_at: comment.created_at, revision, block: decodePlanBlock(comment.body) };
   } catch (error) {
     if (!(error instanceof PlanBlockError)) throw error;
     return { status: 'unavailable', comment_url: comment.url, reason: error.message };
   }
-}
-
-function claimStatus(issue: BoardSubIssueReadV1): BoardClaimStatusV1 {
-  const comment = newestProtocolComment(issue.comments, CLAIM_STATUS_HEADER);
-  const status = comment === null ? null : parseClaimStatus(comment);
-  if (status !== null) return { status_kind: 'observed', ...status };
-  return issue.comments.truncated ? { status_kind: 'unknown' } : { status_kind: 'none' };
 }
 
 export function bodyLinks(repository: string, body: string): { readonly closes: number[]; readonly refs: number[] } {
@@ -498,81 +367,9 @@ export function linkedPullRequests(parent: BoardParentReadV1, reads: readonly Bo
 
 export function projectBoard(input: BoardInputV1): BoardV1 {
   const repository = input.parent.repository.name_with_owner;
-  const autopilot: AutopilotMergeGateV1 | undefined = input.autopilot != null && isAutopilotEnabled(input.autopilot)
-    ? Object.freeze({ low_tier_skip: input.autopilot.low_tier_skip }) : undefined;
-  const tiers = new Map(input.parent.sub_issues.map(issue => [issue.number, tierOf(issue.labels)] as const));
-  const pullRequests = linkedPullRequests(input.parent, input.pull_requests).map((read): BoardPullRequestV1 => {
-    const { closes, refs } = bodyLinks(repository, read.body);
-    const required = input.required_contexts.get(read.base_ref);
-    if (required === undefined) throw new Error(`board input has no required contexts for base ${read.base_ref} of PR #${read.number}`);
-    const check = requiredCheck(read, required);
-    const tier = effectiveTier(read, closes, refs, input.parent, tiers, input.review_evidence);
-    const rule = reviewRule(read, tier, autopilot);
-    const second = secondReview(read, tier, autopilot);
-    const notes = autopilot === undefined || read.state !== 'open' ? null : prMergeNotes(read.body);
-    const renameSources = input.review_evidence.pull_requests.get(read.number)?.rename_sources;
-    const requiredPark = notes === null ? null : autopilotParkRequirement(
-      read.files === null || renameSources == null ? null : [...read.files, ...renameSources],
-      input.parent.sub_issues.some(issue => (closes.includes(issue.number) || refs.includes(issue.number)) && issue.labels.includes(CREDENTIALS_LABEL)),
-    );
-    const readiness = read.state === 'open' ? input.readiness.find(entry => entry.readiness.pr_number === read.number) : undefined;
-    if (read.state === 'open' && readiness === undefined) throw new Error(`board input has no merge readiness for open PR #${read.number}`);
-    return Object.freeze({
-      number: read.number,
-      url: read.url,
-      state: read.state,
-      is_draft: read.is_draft,
-      base_ref: read.base_ref,
-      base_sha: read.base_sha,
-      head_ref: read.head_ref,
-      head_sha: read.head_sha,
-      head_committed_at: read.head_committed_at,
-      merged_at: read.merged_at,
-      closes: Object.freeze(closes),
-      refs: Object.freeze(refs),
-      files: read.files,
-      cleared_hazard_paths: Object.freeze([...clearedHazardPaths(read, input.review_evidence)]),
-      required_check: check,
-      // An issue outside this board has no observed tier, so it withholds the Low path; so does any non-Low linked issue.
-      acceptance: acceptance(read, check, [tier], rule, notes?.verification),
-      review_fail: reviewFail(read),
-      review_records: reviewRecords(read),
-      open_questions: openQuestions(read.comments),
-      merge_readiness: readiness?.readiness ?? null,
-      merge_readiness_observed_at: readiness?.observed_at ?? null,
-      tier,
-      second_review: second,
-      gatekeeper_review: gatekeeperReview(read, autopilot === undefined),
-      writer_family: writerFamily(read, closes, refs, input.parent),
-      merge_hold: readMergeHold(input.hold_comments?.get(read.number) ?? read.comments, false),
-      ...(notes === null ? {} : { autopilot_merge: Object.freeze({ required_park: requiredPark, rollback: notes.rollback }) }),
-    });
-  }).sort((left, right) => left.number - right.number);
-  if (input.path_owners.status === 'observed') {
-    const owned = new Set(input.path_owners.owners.map(owner => owner.path));
-    const missing = pullRequests.filter(pr => pr.state === 'open').flatMap(pr => pr.files ?? []).find(path => !owned.has(path));
-    if (missing !== undefined) throw new Error(`board input has no path owner for ${missing}`);
-  }
-  const items = input.parent.sub_issues.map((issue): BoardItemV1 => Object.freeze({
-    number: issue.number,
-    title: issue.title,
-    url: issue.url,
-    state: issue.state,
-    labels: issue.labels,
-    tier: tiers.get(issue.number) ?? null,
-    milestone: issue.milestone,
-    blocked_by: issue.blocked_by,
-    claim: issueClaim(issue.comments, issue.number),
-    claim_status: claimStatus(issue),
-    writer_completion: writerCompletion(issue.comments, issue.number),
-    open_questions: openQuestions(issue.comments),
-    pull_requests: Object.freeze(pullRequests.filter(pr => pr.closes.includes(issue.number) || pr.refs.includes(issue.number)).map(pr => pr.number)),
-    merge_hold: readMergeHold(input.hold_comments?.get(issue.number) ?? issue.comments, false),
-  })).sort((left, right) => left.number - right.number);
-  const daily: BoardDailyRunV1 = input.daily_run.status === 'unavailable' ? input.daily_run : {
-    ...input.daily_run,
-    open_repair_issues: Object.freeze(input.parent.repair_candidates.filter(issue => isCiRepairIssueBody(issue.body)).map(issue => issue.number).sort((left, right) => left - right)),
-  };
+  const { autopilot, pullRequests, items, daily } = projectBoardCollections(
+    input, linkedPullRequests(input.parent, input.pull_requests), read => bodyLinks(repository, read.body),
+  );
   const parent = input.parent.parent;
   return Object.freeze({
     protocol: BOARD_PROTOCOL,

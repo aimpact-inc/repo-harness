@@ -3,6 +3,8 @@ import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
 import type { AutopilotMergeGateV1 } from './autopilot';
 import { pathHighHits, pathSecondReviewHits } from './hazards';
+import { ACCEPTANCE_CLAIM_HEADER, claimedRows, highRuleMet, mediumRuleMet, resolvedFail } from './review-acceptance-predicates';
+import { contextReports, joinStatuses, reportStatus } from './review-required-checks';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
   BoardSourceError,
@@ -13,14 +15,11 @@ import {
   parseAcceptanceDisposition,
   parseAcceptanceRecord,
   parseClaimStatus,
-  parseRecordFindings,
   protocolComments,
   type BoardCommentPageV1,
   type BoardCommentV1,
   type BoardParentReadV1,
   type BoardPullRequestReadV1,
-  type BoardRollupContextV1,
-  type AcceptanceDispositionV1,
   type AcceptanceRowV1,
 } from './source';
 
@@ -31,7 +30,6 @@ export type BoardTier = 'low' | 'medium' | 'high';
 const TIER_LABELS: Readonly<Record<string, BoardTier>> = { 'tier:low': 'low', 'tier:medium': 'medium', 'tier:high': 'high' };
 const CLAIM_HEADER = 'repo-harness issue claim';
 export const ACCEPTANCE_RECORD_HEADER = 'repo-harness acceptance record';
-const ACCEPTANCE_CLAIM_HEADER = 'repo-harness acceptance claim';
 
 /** One required status context of the base protection and the state of its newest check run on the head. */
 export interface BoardRequiredContextV1 {
@@ -86,40 +84,6 @@ export type BoardReviewRecordsV1 =
 /** The model family of a writer, from `modelFamily` on the `Model:` line of its claim. */
 export type BoardWriterFamily = string;
 
-/**
- * The head reports of one required name that `gh pr checks` keeps (cli/cli `pkg/cmd/pr/checks/aggregate.go`, `eliminateDuplicates`):
- * the newest commit status of the context by creation, and the newest check run of each workflow name and event by start. A check
- * run and a commit status of one name both stay.
- */
-function contextReports(read: BoardPullRequestReadV1, name: string): BoardRollupContextV1[] {
-  const kept = new Map<string, BoardRollupContextV1>();
-  for (const report of read.readiness_inputs.rollup.filter(context => context.name === name)) {
-    const key = report.type === 'StatusContext' ? 'status' : JSON.stringify(['run', report.workflow?.name ?? '', report.workflow?.event ?? '']);
-    const current = kept.get(key);
-    if (current === undefined || reportTime(report) > reportTime(current)) kept.set(key, report);
-  }
-  return [...kept.values()];
-}
-
-/** A check run that has not started is the oldest of its group, as in `gh pr checks`. */
-const reportTime = (report: BoardRollupContextV1): string => (report.type === 'StatusContext' ? report.completed_at : report.started_at) ?? '';
-
-/** The commit status states as the `gh pr checks` bucket that publication readiness reads: pass, pending or fail. */
-const STATUS_STATES: ReadonlyMap<string, BoardRequiredContextV1['status']> = new Map([['SUCCESS', 'success'], ['PENDING', 'pending'], ['EXPECTED', 'pending'], ['FAILURE', 'failure'], ['ERROR', 'failure']]);
-
-function reportStatus(report: BoardRollupContextV1): BoardRequiredContextV1['status'] {
-  // GitHub defines no other state; one would fail closed.
-  if (report.type === 'StatusContext') return STATUS_STATES.get(report.status) ?? 'failure';
-  if (report.status !== 'COMPLETED' || report.completed_at === null) return 'pending';
-  return report.conclusion === 'SUCCESS' ? 'success' : 'failure';
-}
-
-/** The join of the reports of a name, and of the names of a required check: `missing` (or no status), then `pending`, then `failure`, else `success`. */
-function joinStatuses(statuses: readonly BoardRequiredContextV1['status'][]): BoardRequiredContextV1['status'] {
-  if (statuses.length === 0) return 'missing';
-  return (['missing', 'pending', 'failure'] as const).find(status => statuses.includes(status)) ?? 'success';
-}
-
 export function requiredCheck(read: BoardPullRequestReadV1, required: BoardRequiredContextsV1): BoardRequiredCheckV1 {
   if (required.status === 'unavailable') return Object.freeze({ status: 'unavailable', reason: required.reason });
   const named = required.contexts.map(name => ({ name, reports: contextReports(read, name) }));
@@ -129,17 +93,6 @@ export function requiredCheck(read: BoardPullRequestReadV1, required: BoardRequi
   const completedAt = named.flatMap(({ reports }) => reports).filter(report => reportStatus(report) === status).map(report => report.completed_at!)
     .reduce((newest, at) => (at > newest ? at : newest));
   return Object.freeze({ status, completed_at: completedAt, contexts });
-}
-
-/**
- * A FAIL row that a disposition resolves: the disposition names the row's record and subject and every finding of the record. A PASS
- * row, a record with an unreadable finding, or one unresolved finding keeps the row failing. No time or round supersedes a FAIL row.
- */
-function resolvedFail(record: BoardCommentV1, row: AcceptanceRowV1, dispositions: readonly AcceptanceDispositionV1[]): boolean {
-  const findings = row.verdict === 'FAIL' ? parseRecordFindings(record) : null;
-  if (findings === null) return false;
-  const resolved = new Set(dispositions.filter(entry => entry.record === commentId(record.url) && entry.subject_sha === row.subject_sha).flatMap(entry => entry.findings));
-  return findings.every(id => resolved.has(id));
 }
 
 /** The newest acceptance record with a FAIL row for the head that no disposition resolves, by the test of `acceptance`. An unparsed record has no row. */
@@ -307,31 +260,6 @@ export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredChe
     return { status: 'accepted', via: 'tier_low', accepted_at: check.completed_at, evidence_url: read.url };
   }
   return { status: 'not_accepted' };
-}
-
-/**
- * The rows of the head whose `Claim:` cites an `acceptance claim` comment of the pull request with the row's `Subject:` and `Round:`
- * (`review publish` writes both); the comment id is the claim identity.
- */
-function claimedRows(read: Pick<BoardPullRequestReadV1, 'comments'>, head: readonly AcceptanceRowV1[]): AcceptanceRowV1[] {
-  const claims = new Map(protocolComments(read.comments, ACCEPTANCE_CLAIM_HEADER).map(claim => [commentId(claim.url), `${field(claim.body, 'Round')} ${field(claim.body, 'Subject')}`] as const));
-  return head.filter(row => row.claim !== null && claims.get(row.claim) === `${row.round} ${row.subject_sha}`);
-}
-
-/**
- * The High rule (`acceptor.md` section 2.2), for High and unknown tiers: claimed PASS rows of the head from two distinct review claims,
- * and at least one of them recorded `Model relation: different-family` to the writer. An unknown writer family records `unknown`,
- * so it fails closed. A head with a `FAIL` row does not meet the rule.
- */
-function highRuleMet(read: BoardPullRequestReadV1, head: readonly AcceptanceRowV1[]): boolean {
-  if (head.some(row => row.verdict === 'FAIL')) return false;
-  const passes = claimedRows(read, head);
-  return new Set(passes.map(row => row.claim)).size >= 2 && passes.some(row => row.different_family);
-}
-
-/** The Medium rule (`acceptor.md` section 2.2): one claimed PASS row of the head recorded `different-family`; `unknown` never counts. `acceptance` has ruled out a `FAIL` row. */
-function mediumRuleMet(read: BoardPullRequestReadV1, head: readonly AcceptanceRowV1[]): boolean {
-  return claimedRows(read, head).some(row => row.different_family);
 }
 
 type ReviewRule = 'high' | 'medium' | 'none' | 'dual' | 'verified_low';

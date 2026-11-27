@@ -10,10 +10,25 @@
 
 import type { Nodes } from 'mdast';
 import { fromMarkdown } from 'mdast-util-from-markdown';
-import { isRecord } from '../evidence/is-record';
-import { GITHUB_NAME_PATTERN, GITHUB_OWNER_PATTERN, GITHUB_REPOSITORY } from './github-repository';
-
-import { BoardSourceError, type BoardCommentPageV1, type BoardCommentV1 } from './protocol-comments';
+import { GITHUB_NAME_PATTERN, GITHUB_OWNER_PATTERN } from './github-repository';
+import { type BoardCommentPageV1, type BoardCommentV1 } from './protocol-comments';
+import {
+  blockedBy,
+  comments,
+  count,
+  fail,
+  int,
+  issue,
+  issueState,
+  nodes,
+  obj,
+  repositoryName,
+  sha,
+  str,
+  time,
+  type Json,
+} from './source-primitives';
+import { pullRequestState, readinessInputs, rollupContexts } from './source-pull-request';
 
 export * from './protocol-comments';
 
@@ -111,104 +126,6 @@ export const BOARD_SUB_ISSUE_PAGES = 20;
 export const BOARD_PARENT_COMMENT_PAGES = 100;
 
 export const BOARD_PAGE = { labels: 50, comments: 50, parent_comments: 100, sub_issues: 50, blocked_by: 50, timeline: 100, files: 100, checks: 100, repairs: 50, reviews: 20, threads: 50 } as const;
-
-type Json = Record<string, unknown>;
-
-function fail(message: string): never {
-  throw new BoardSourceError(message);
-}
-
-function obj(value: unknown, label: string): Json {
-  if (!isRecord(value)) fail(`${label} is not an object`);
-  return value;
-}
-
-function str(value: unknown, label: string): string {
-  if (typeof value !== 'string') fail(`${label} is not a string`);
-  return value;
-}
-
-function nullableStr(value: unknown, label: string): string | null {
-  return value === null ? null : str(value, label);
-}
-
-function int(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1) fail(`${label} is not a positive integer`);
-  return value as number;
-}
-
-function sha(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !/^[0-9a-f]{40}$/u.test(value)) fail(`${label} is not a commit SHA`);
-  return value;
-}
-
-function time(value: unknown, label: string): string {
-  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) fail(`${label} is not a time`);
-  return value;
-}
-
-function nodes(connection: unknown, label: string, more: 'hasNextPage' | 'hasPreviousPage' | null): unknown[] {
-  const value = obj(connection, label);
-  if (more !== null && obj(value.pageInfo, `${label}.pageInfo`)[more] !== false) fail(`${label} has more pages than one read returns`);
-  if (!Array.isArray(value.nodes)) fail(`${label}.nodes is not an array`);
-  return value.nodes;
-}
-
-function issueState(value: unknown, label: string): 'open' | 'closed' {
-  if (value === 'OPEN') return 'open';
-  if (value === 'CLOSED') return 'closed';
-  return fail(`${label} is not OPEN or CLOSED`);
-}
-
-function comments(connection: unknown, label: string): BoardCommentPageV1 {
-  const value = obj(connection, label);
-  const truncated = obj(value.pageInfo, `${label}.pageInfo`).hasPreviousPage;
-  if (typeof truncated !== 'boolean') fail(`${label}.pageInfo.hasPreviousPage is not a boolean`);
-  return Object.freeze({
-    truncated,
-    comments: Object.freeze(nodes(value, label, null).map((entry, index) => {
-      const comment = obj(entry, `${label}[${index}]`);
-      return Object.freeze({
-        url: str(comment.url, `${label}[${index}].url`),
-        created_at: time(comment.createdAt, `${label}[${index}].createdAt`),
-        author_association: str(comment.authorAssociation, `${label}[${index}].authorAssociation`),
-        body: str(comment.body, `${label}[${index}].body`),
-      });
-    })),
-  });
-}
-
-function issue(value: unknown, label: string): BoardIssueReadV1 {
-  const node = obj(value, label);
-  const milestone = node.milestone === null ? null : str(obj(node.milestone, `${label}.milestone`).title, `${label}.milestone.title`);
-  return {
-    number: int(node.number, `${label}.number`),
-    title: str(node.title, `${label}.title`),
-    url: str(node.url, `${label}.url`),
-    state: issueState(node.state, `${label}.state`),
-    labels: Object.freeze(nodes(node.labels, `${label}.labels`, 'hasNextPage')
-      .map((entry, index) => str(obj(entry, `${label}.labels[${index}]`).name, `${label}.labels[${index}].name`))),
-    milestone,
-    comments: comments(node.comments, `${label}.comments`),
-  };
-}
-
-function blockedBy(connection: unknown, label: string, repository: string): readonly BoardIssueDependencyV1[] {
-  return Object.freeze(nodes(connection, label, 'hasNextPage').map((edge, at) => {
-    const blocker = obj(edge, `${label}[${at}]`);
-    const target = blocker.repository === undefined ? repository : repositoryName(blocker.repository, `${label}[${at}].repository`);
-    return Object.freeze({
-      number: int(blocker.number, `${label} number`), state: issueState(blocker.state, `${label} state`),
-      ...(target.toLowerCase() === repository.toLowerCase() ? {} : { repository: target }),
-    });
-  }));
-}
-
-function repositoryName(value: unknown, label: string): string {
-  const name = str(obj(value, label).nameWithOwner, `${label}.nameWithOwner`);
-  if (!GITHUB_REPOSITORY.test(name)) fail(`${label}.nameWithOwner is not owner/name`);
-  return name;
-}
 
 export function decodeExternalBlocker(data: unknown, repository: string, number: number): Pick<BoardSubIssueReadV1, 'state' | 'blocked_by' | 'comments'> {
   const label = `blocker ${repository}#${number}`;
@@ -329,13 +246,6 @@ export function decodeParentRead(pages: readonly unknown[], commentPages: readon
   });
 }
 
-function pullRequestState(value: unknown, label: string): BoardPullRequestReadV1['state'] {
-  if (value === 'OPEN') return 'open';
-  if (value === 'CLOSED') return 'closed';
-  if (value === 'MERGED') return 'merged';
-  return fail(`${label} is not OPEN, CLOSED or MERGED`);
-}
-
 /** `data` of the pull request read: one `pr<number>` alias per requested number. */
 export function decodePullRequestsRead(data: unknown, numbers: readonly number[]): BoardPullRequestReadV1[] {
   const repo = obj(obj(data, 'data').repository, 'repository');
@@ -372,69 +282,6 @@ export function decodePullRequestsRead(data: unknown, numbers: readonly number[]
   });
 }
 
-function rollupContexts(rollup: Json, label: string): BoardRollupContextV1[] {
-  return nodes(rollup.contexts, `${label}.contexts`, 'hasNextPage').map((entry, index) => {
-    const context = obj(entry, `${label}.contexts[${index}]`);
-    const at = `${label}.contexts[${index}]`;
-    if (context.name !== undefined) {
-      return Object.freeze({
-        type: 'CheckRun', name: str(context.name, `${at}.name`), status: str(context.status, `${at}.status`),
-        conclusion: nullableStr(context.conclusion, `${at}.conclusion`),
-        completed_at: context.completedAt === null ? null : time(context.completedAt, `${at}.completedAt`),
-        details_url: nullableStr(context.detailsUrl, `${at}.detailsUrl`),
-        started_at: context.startedAt === null ? null : time(context.startedAt, `${at}.startedAt`),
-        workflow: workflowOf(obj(context.checkSuite, `${at}.checkSuite`).workflowRun, `${at}.checkSuite.workflowRun`),
-      } as const);
-    }
-    if (context.context !== undefined) {
-      return Object.freeze({
-        type: 'StatusContext', name: str(context.context, `${at}.context`), status: str(context.state, `${at}.state`), conclusion: null,
-        completed_at: time(context.createdAt, `${at}.createdAt`), details_url: nullableStr(context.targetUrl, `${at}.targetUrl`),
-        started_at: null, workflow: null,
-      } as const);
-    }
-    return fail(`${at} is neither a check run nor a commit status`);
-  });
-}
-
-function workflowOf(value: unknown, label: string): BoardRollupContextV1['workflow'] {
-  if (value === null) return null;
-  const run = obj(value, label);
-  return Object.freeze({ name: str(obj(run.workflow, `${label}.workflow`).name, `${label}.workflow.name`), event: str(run.event, `${label}.event`) });
-}
-
-function complete(connection: unknown, label: string): unknown[] | null {
-  const value = obj(connection, label);
-  const more = obj(value.pageInfo, `${label}.pageInfo`).hasNextPage;
-  if (typeof more !== 'boolean') fail(`${label}.pageInfo.hasNextPage is not a boolean`);
-  return more ? null : nodes(value, label, null);
-}
-
-function readinessInputs(node: Json, rollup: readonly BoardRollupContextV1[], label: string): BoardReadinessInputsV1 {
-  if (!Number.isSafeInteger(node.changedFiles) || (node.changedFiles as number) < 0) fail(`${label}.changedFiles is not a count`);
-  if (typeof node.isCrossRepository !== 'boolean') fail(`${label}.isCrossRepository is not a boolean`);
-  const reviews = complete(node.latestOpinionatedReviews, `${label}.latestOpinionatedReviews`);
-  const threads = obj(node.reviewThreads, `${label}.reviewThreads`);
-  const threadNodes = complete(threads, `${label}.reviewThreads`);
-  if (!Number.isSafeInteger(threads.totalCount) || (threads.totalCount as number) < 0) fail(`${label}.reviewThreads.totalCount is not a count`);
-  return Object.freeze({
-    changed_files: node.changedFiles as number,
-    mergeable: str(node.mergeable, `${label}.mergeable`),
-    review_decision: nullableStr(node.reviewDecision, `${label}.reviewDecision`),
-    cross_repository: node.isCrossRepository,
-    review_states: reviews === null ? null : Object.freeze(reviews.map((entry, index) => str(obj(entry, `${label}.latestOpinionatedReviews[${index}]`).state, `${label}.latestOpinionatedReviews[${index}].state`))),
-    threads: threadNodes === null ? null : Object.freeze({
-      total: threads.totalCount as number,
-      resolved: Object.freeze(threadNodes.map((entry, index) => {
-        const resolved = obj(entry, `${label}.reviewThreads[${index}]`).isResolved;
-        if (typeof resolved !== 'boolean') fail(`${label}.reviewThreads[${index}].isResolved is not a boolean`);
-        return resolved;
-      })),
-    }),
-    rollup: Object.freeze([...rollup]),
-  });
-}
-
 /** One open issue of the parent list read, with its sub-issue counts. */
 export interface BoardOpenIssueReadV1 {
   readonly number: number;
@@ -447,11 +294,6 @@ export interface BoardOpenIssueReadV1 {
 export interface BoardOpenIssuesReadV1 {
   readonly repository: { readonly database_id: number; readonly name_with_owner: string };
   readonly issues: readonly BoardOpenIssueReadV1[];
-}
-
-function count(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) fail(`${label} is not a count`);
-  return value as number;
 }
 
 /**
