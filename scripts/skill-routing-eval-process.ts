@@ -3,14 +3,13 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import type { ProviderStructuredEvidence } from "./run-skill-evals";
 
-const DEFAULT_PROVIDER_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface ProcessCommandOptions {
   readonly claudeCommand?: string;
   readonly codexCommand?: string;
   readonly claudeArgs?: readonly string[];
   readonly codexArgs?: readonly string[];
-  readonly timeoutMs?: number;
 }
 
 export interface ProcessRouteCandidate {
@@ -121,10 +120,11 @@ export function invokeProcessProvider(
     readonly workspacePath: string;
     readonly candidates: readonly ProcessRouteCandidate[];
     readonly options: ProcessCommandOptions;
+    readonly timeoutMs: number;
   },
   deps: ProcessInvocationDeps,
 ): ProcessInvocationOutcome {
-  const timeoutMs = params.options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
+  const { timeoutMs } = params;
   const startedAt = Date.now();
 
   if (kind === "claude") {

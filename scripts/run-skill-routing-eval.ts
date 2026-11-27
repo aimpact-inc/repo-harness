@@ -237,7 +237,11 @@ import {
   type ProviderStructuredEvidence,
 } from "./run-skill-evals";
 import { executeSkillRoutingCli } from "./skill-routing-eval-cli";
-import { invokeProcessProvider, lastResultLine } from "./skill-routing-eval-process";
+import {
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+  invokeProcessProvider,
+  lastResultLine,
+} from "./skill-routing-eval-process";
 
 export const MANIFEST_PATH = join(REPO_ROOT, "assets", "skill-commands", "manifest.json");
 const ROUTING_EVAL_HOSTS = SKILL_SURFACE_HOSTS.filter(host => host !== "antigravity");
@@ -496,13 +500,14 @@ export function parseClaudeStreamJson(stdout: string): ProviderStructuredEvidenc
  * routing metrics rather than silently retried or coerced to "none").
  */
 export function createProcessProvider(kind: "claude" | "codex", options: ProcessProviderOptions = {}): ProviderAdapter {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
   return {
     kind,
     invoke({ routingCase, workspacePath, discovered, referenceOnly }) {
       const candidates = [...discovered, ...referenceOnly];
       return invokeProcessProvider(
         kind,
-        { prompt: routingCase.prompt, workspacePath, candidates, options },
+        { prompt: routingCase.prompt, workspacePath, candidates, options, timeoutMs },
         {
           extractToolInvokedRoutes: (rawOutput, processCandidates) =>
             extractToolInvokedRoutes(rawOutput, processCandidates as readonly DiscoveredSkillSurfaceEntry[]),
@@ -958,50 +963,6 @@ export function buildAggregateReport(
   };
 }
 
-function evaluateRoutingCase(
-  routingCase: RoutingCase,
-  ctx: {
-    readonly workspaceRoot: string;
-    readonly host: SkillSurfaceHost;
-    readonly provider: ProviderAdapter;
-    readonly discovered: readonly DiscoveredSkillSurfaceEntry[];
-    readonly referenceOnly: readonly DiscoveredSkillSurfaceEntry[];
-    readonly candidates: readonly DiscoveredSkillSurfaceEntry[];
-    readonly reachableRoutes: ReadonlySet<string>;
-  },
-): RoutingRunRecord {
-  const casePath = join(ctx.workspaceRoot, routingCase.id);
-  mkdirSync(casePath, { recursive: true });
-  if (ctx.provider.kind !== "stub") materializeDiscoveredSurface(casePath, ctx.host, ctx.discovered);
-
-  const result = ctx.provider.invoke({
-    routingCase,
-    workspacePath: casePath,
-    host: ctx.host,
-    discovered: ctx.discovered,
-    referenceOnly: ctx.referenceOnly,
-  });
-  const selectedRoutes = result.routes.filter(
-    (route) => ctx.candidates.some((c) => c.name === route) || route === "merge-gate",
-  );
-  const primaryRoute = selectedRoutes[0] ?? "none";
-
-  return {
-    id: routingCase.id,
-    lang: routingCase.lang,
-    kind: routingCase.kind,
-    expected_route: routingCase.expected_route,
-    outcome: result.outcome,
-    selected_routes: selectedRoutes,
-    primary_route: primaryRoute,
-    correct_top1: result.outcome === "routed" && primaryRoute === routingCase.expected_route,
-    double_trigger: result.outcome === "routed" && selectedRoutes.length > 1,
-    excluded_unreachable: routingCase.expected_route !== "none" && !ctx.reachableRoutes.has(routingCase.expected_route),
-    duration_ms: result.durationMs,
-    ...(result.errorReason ? { error_reason: result.errorReason } : {}),
-  };
-}
-
 export function runProviderEval(options: RunOptions): RoutingRunReport {
   const corpus = options.corpus ?? loadCorpus();
   const catalog = options.catalog ?? loadLiveCatalog();
@@ -1022,17 +983,33 @@ export function runProviderEval(options: RunOptions): RoutingRunReport {
 
   const workspaceRoot = options.workspaceRoot ?? mkdtempSync(join(tmpdir(), "repo-harness-routing-run-"));
 
-  const records: RoutingRunRecord[] = corpus.cases.map((routingCase) =>
-    evaluateRoutingCase(routingCase, {
-      workspaceRoot,
-      host: options.host,
-      provider,
-      discovered,
-      referenceOnly,
-      candidates,
-      reachableRoutes,
-    }),
-  );
+  const records: RoutingRunRecord[] = corpus.cases.map((routingCase) => {
+    const casePath = join(workspaceRoot, routingCase.id);
+    mkdirSync(casePath, { recursive: true });
+    if (provider.kind !== "stub") materializeDiscoveredSurface(casePath, options.host, discovered);
+
+    const result = provider.invoke({ routingCase, workspacePath: casePath, host: options.host, discovered, referenceOnly });
+    const selectedRoutes = result.routes.filter(
+      (route) => candidates.some((c) => c.name === route) || route === "merge-gate",
+    );
+    const primaryRoute = selectedRoutes[0] ?? "none";
+
+    const record: RoutingRunRecord = {
+      id: routingCase.id,
+      lang: routingCase.lang,
+      kind: routingCase.kind,
+      expected_route: routingCase.expected_route,
+      outcome: result.outcome,
+      selected_routes: selectedRoutes,
+      primary_route: primaryRoute,
+      correct_top1: result.outcome === "routed" && primaryRoute === routingCase.expected_route,
+      double_trigger: result.outcome === "routed" && selectedRoutes.length > 1,
+      excluded_unreachable: routingCase.expected_route !== "none" && !reachableRoutes.has(routingCase.expected_route),
+      duration_ms: result.durationMs,
+      ...(result.errorReason ? { error_reason: result.errorReason } : {}),
+    };
+    return record;
+  });
 
   const metrics = computeRoutingMetrics(records, canonicalRoutes);
   const thresholds = evaluateThresholds(metrics);
@@ -1245,7 +1222,8 @@ if (import.meta.main) {
   try {
     process.exit(runCli(process.argv.slice(2)));
   } catch (error) {
+    const exitCode = error instanceof CliError ? error.exitCode : 1;
     console.error(`run-skill-routing-eval: ${(error as Error).message}`);
-    process.exit(error instanceof CliError ? error.exitCode : 1);
+    process.exit(exitCode);
   }
 }
