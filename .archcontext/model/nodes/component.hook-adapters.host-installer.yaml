@@ -165,6 +165,14 @@ source:
             - id: sink.hook-adapters.repository-excludes
               path: "src/cli/installer/repository-excludes.ts"
               symbol: "runtimeStateBlock"
+    - id: entrypoint.hook-adapters.selection-lines
+      path: "src/cli/installer/selection-lines.ts"
+      symbols:
+        - name: "commandPluginRepairLines"
+          sinks:
+            - id: sink.hook-adapters.selection-lines
+              path: "src/core/skill-surface/plugin-manifest.ts"
+              symbol: "installSelectionCommand"
     - id: entrypoint.hook-adapters.installer-shared
       path: "src/cli/installer/shared.ts"
       symbols:

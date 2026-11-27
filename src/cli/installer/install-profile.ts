@@ -50,7 +50,6 @@ import {
   type SkillSurfaceCatalog,
 } from '../../core/skill-surface/catalog';
 import {
-  COMMAND_PLUGINS,
   HOST_PROGRAM_PLUGINS,
   installSelectionCommand,
   UPDATE_COMMAND,
@@ -74,6 +73,7 @@ import { piExecutable } from '../../effects/pi-executable';
 import skillSurfaceManifest from '../../../assets/skill-commands/manifest.json';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { pluginRepair } from './architecture-selection';
+import type { KeptPlugin, SkippedPlugin } from './selection-lines';
 import { RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
 import {
   keepMovedRepositoryLedgers, keepOlderParentCopy, lstatExists, movedLedgersKept, readOlderParentCopy,
@@ -147,22 +147,6 @@ export interface InstallStateStatus extends InstallState {
     readonly missing_owners: readonly SurfaceOwner[];
     readonly surface_drift: readonly string[];
   };
-}
-
-/** A host plugin that the `all` selection does not run or record, because its host program or target is absent. */
-export interface SkippedPlugin {
-  readonly id: PluginId;
-  readonly reason: string;
-  /** The command that adds the plugin after the host program is installed. */
-  readonly command: string;
-}
-
-/** A recorded host plugin of the `all` selection whose host program or target is now absent. */
-export interface KeptPlugin {
-  readonly id: PluginId;
-  readonly reason: string;
-  /** The explicit selection that removes the plugin. */
-  readonly command: string;
 }
 
 /**
@@ -1291,28 +1275,6 @@ export function resolveRecordedSelection(
 export function defaultPluginSelection(target: InstallTarget, env: NodeJS.ProcessEnv = process.env): { readonly plugins: readonly PluginId[]; readonly skipped: readonly SkippedPlugin[] } {
   const { run, skipped } = resolveRecordedSelection({ selection: 'all', plugins: [] }, target, env);
   return { plugins: run, skipped };
-}
-
-export function skippedPluginLine(entry: SkippedPlugin): string {
-  const after = entry.command === UPDATE_COMMAND ? 'install the host program, then run' : 'run';
-  return `skipped ${entry.id}: ${entry.reason}; to add it later, ${after}: ${entry.command}`;
-}
-
-export function keptPluginLine(entry: KeptPlugin): string {
-  return `kept ${entry.id}: ${entry.reason}; update keeps the recorded plugin; to remove it, run: ${entry.command}`;
-}
-
-export function notAddedPluginLine(id: PluginId): string {
-  return `not added ${id} in a partial refresh; run: ${UPDATE_COMMAND}`;
-}
-
-/** The O3 repair of an explicit list: one command for every unselected command plugin, because a second command would drop the first id. */
-export function commandPluginRepairLines(selection: PluginSelection): string[] {
-  if (selection === 'all') return [];
-  const missing = COMMAND_PLUGINS.filter(id => !selection.includes(id));
-  if (missing.length === 0) return [];
-  const repair = installSelectionCommand(PLUGIN_IDS.filter(id => selection.includes(id) || isCommandPlugin(id)));
-  return [`[plugins] not selected ${missing.join(', ')}: an explicit list does not grow; to add them, run: ${repair}`];
 }
 
 /**
