@@ -1,9 +1,9 @@
 import { globalConfigurationPath, mutateGlobalConfiguration, restoreGlobalConfiguration } from '../../effects/configuration/global-configuration';
-import { publishFileByRename, retryWindowsSharingRace } from '../../effects/atomic-append';
+import { retryWindowsSharingRace } from '../../effects/atomic-append';
 import wazaRules from "../../core/skill-surface/waza-shared-rules.json";
 import { bunGlobalPackageRoot, expectedSkillProjections } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
-import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, repositoryLedgers, resolveHostPath } from '../../effects/host-config/store';
+import { expectedOf, hostConfigPaths, hostConfigPathsAt, observeFile, putVault, readLedger, removeTarget, replaceTarget, resolveHostPath } from '../../effects/host-config/store';
 import { ensureSelfIgnoringDirectory, isSelfIgnoreGuard, SELF_IGNORE_NAME } from '../../effects/self-ignoring-directory';
 import { antigravityAgentsDirHostPath, antigravityMcpConfigHostPath, AntigravityHooksPathError, antigravitySkillsDirHostPath, openHostConfigGate, piGlobalRulesHostPath, planPathRevert, recoverRetiredPathWrites, rollbackHostConfigTransaction, type AntigravityMcpUndo } from '../../effects/host-config/gate';
 import { AGY_SEAT_AGENT_DIR_PATTERN } from '../../core/board/seat-launch';
@@ -75,6 +75,10 @@ import skillSurfaceManifest from '../../../assets/skill-commands/manifest.json';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { pluginRepair } from './architecture-selection';
 import { RETIRED_CLI_NAME } from '../../core/skill-surface/cli-name';
+import {
+  keepMovedRepositoryLedgers, keepOlderParentCopy, lstatExists, movedLedgersKept, readOlderParentCopy,
+  restoreMovedRepositoryLedgers, restoreOlderParentFiles,
+} from './install-transaction-files';
 import {
   enabledPlugins,
   INSTALL_STATE_PROTOCOL,
@@ -776,15 +780,6 @@ function assertTransactionLock(transaction: InstallHostTransaction, context?: Ru
   }
 }
 
-function lstatExists(path: string): boolean {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function restoreSnapshot(transaction: InstallHostTransaction, snapshot: HostSurfaceSnapshot, runtimeLock?: RuntimeTransactionContext): void {
   if (isGlobalConfigurationSnapshot(snapshot.path)) {
     const context = transactionLocks.get(transaction)?.context ?? runtimeLock;
@@ -872,80 +867,6 @@ function olderParentFiles(env: NodeJS.ProcessEnv): { readonly ledger: string; re
   return { ledger: hostConfigPaths(env).ledger, 'fleet-receipt': fleetReceiptPath(env) };
 }
 
-function keepOlderParentCopy(backupRoot: string, name: string, path: string): void {
-  if (lstatExists(path)) writeFileSync(join(backupRoot, `${name}.json`), readFileSync(path), { mode: 0o600, flag: 'wx' });
-  else writeFileSync(join(backupRoot, `${name}.absent`), '', { mode: 0o600, flag: 'wx' });
-}
-
-function readOlderParentCopy(backupRoot: string, name: string): Buffer | null {
-  const copy = join(backupRoot, `${name}.json`);
-  if (lstatExists(copy)) return readFileSync(copy);
-  if (lstatExists(join(backupRoot, `${name}.absent`))) return null;
-  throw new Error(`runtime transaction of an earlier rh version has no ${name} copy; run rh update`);
-}
-
-/**
- * Every copy is read before the first write, so a missing copy changes no
- * file. A file that still holds its copy's bytes is one that the run did not
- * change (a migration can stop before it), so its entry, link and mode stay.
- */
-function restoreOlderParentFiles(backupRoot: string, env: NodeJS.ProcessEnv): void {
-  const files = Object.entries(olderParentFiles(env)).map(([name, path]) => ({ path, bytes: readOlderParentCopy(backupRoot, `${name}-before-migration`) }));
-  for (const { path, bytes } of files) {
-    // The copy followed a link, so the comparison does too.
-    const current = lstatExists(path) ? readFileSync(path) : null;
-    if (bytes === null ? current === null : current?.equals(bytes) === true) continue;
-    if (bytes === null) rmSync(path, { force: true });
-    else publishFileByRename(path, bytes, `${path}.${randomUUID()}.tmp`);
-  }
-}
-
-const REPOSITORY_LEDGER_COPY = /^repository-ledger-(.+)-after-migration\.json$/;
-
-/**
- * No parent snapshots a repository ledger, and a parent of an older protocol cannot read a moved one. The candidate keeps
- * each ledger that its move changed, before and after the move, in the parent's transaction directory, so the copies
- * leave with the transaction.
- */
-function keepMovedRepositoryLedgers(backupRoot: string, env: NodeJS.ProcessEnv, migrate: () => void): void {
-  const before = repositoryLedgers(env).map(({ ledger }) => ({ ledger, key: basename(dirname(ledger)), bytes: readFileSync(ledger) }));
-  for (const { key, ledger } of before) keepOlderParentCopy(backupRoot, `repository-ledger-${key}-before-migration`, ledger);
-  const keepMoved = () => {
-    for (const { key, ledger, bytes } of before) {
-      if (lstatExists(ledger) && !readFileSync(ledger).equals(bytes)) keepOlderParentCopy(backupRoot, `repository-ledger-${key}-after-migration`, ledger);
-    }
-  };
-  try { migrate(); } catch (error) {
-    // A move that stops part way runs no candidate rollback: the ledgers that it moved go back now.
-    keepMoved();
-    const kept = restoreMovedRepositoryLedgers(backupRoot, env);
-    throw kept.length ? new AggregateError([error], `${error instanceof Error ? error.message : String(error)}; ${movedLedgersKept(kept)}`) : error;
-  }
-  keepMoved();
-}
-
-function movedLedgersKept(kept: readonly string[]): string {
-  return `these repository ledgers changed after their move, so they stay at the current protocol: ${kept.join(', ')}; run rh update`;
-}
-
-/**
- * A failed candidate puts back each repository ledger that still holds the bytes of its move. A ledger that the run
- * also wrote stays as it is; its paths are returned for the report.
- */
-function restoreMovedRepositoryLedgers(backupRoot: string, env: NodeJS.ProcessEnv): string[] {
-  const kept: string[] = [];
-  for (const name of readdirSync(backupRoot)) {
-    const key = REPOSITORY_LEDGER_COPY.exec(name)?.[1];
-    if (key === undefined) continue;
-    const ledger = join(hostConfigPaths(env).harness, 'config', 'repos', key, 'ledger.json');
-    const after = readOlderParentCopy(backupRoot, `repository-ledger-${key}-after-migration`)!;
-    const earlier = readOlderParentCopy(backupRoot, `repository-ledger-${key}-before-migration`)!;
-    if (lstatExists(ledger) && readFileSync(ledger).equals(after)) publishFileByRename(ledger, earlier, `${ledger}.${randomUUID()}.tmp`);
-    else kept.push(ledger);
-  }
-  return kept;
-}
-
 /** The candidate's one-shot migrations in its parent's transaction. A failed move must leave a ledger the parent can read. */
 export function migrateInParentTransaction(backupRoot: string, env: NodeJS.ProcessEnv, migrate: () => void): void {
   if (readTransactionOwner(backupRoot) !== 'none') {
@@ -970,7 +891,7 @@ export function migrateInParentTransaction(backupRoot: string, env: NodeJS.Proce
   }
   for (const [name, path] of Object.entries(olderParentFiles(env))) keepOlderParentCopy(backupRoot, `${name}-before-migration`, path);
   try { keepMovedRepositoryLedgers(backupRoot, env, migrate); } catch (error) {
-    try { restoreOlderParentFiles(backupRoot, env); } catch (restore) { throw new AggregateError([error, restore], 'restore after a failed migration failed'); }
+    try { restoreOlderParentFiles(backupRoot, olderParentFiles(env)); } catch (restore) { throw new AggregateError([error, restore], 'restore after a failed migration failed'); }
     throw error;
   }
   keepOlderParentCopy(backupRoot, 'ledger-after-migration', hostConfigPaths(env).ledger);
@@ -992,7 +913,7 @@ export function rollbackRuntimeHostConfig(backupRoot: string, env: NodeJS.Proces
   const kept = restoreMovedRepositoryLedgers(backupRoot, env);
   const result = rollbackHostConfigTransaction(hostConfigPathsAt(dirname(dirname(ledger))), snapshot, backupRoot, { piRules: piGlobalRulesHostPath(env) });
   if (result.unresolved.length) throw new Error(['host configuration rollback unresolved: ' + result.unresolved.join(', ') + '; run rh update', ...(kept.length ? [movedLedgersKept(kept)] : [])].join('; '));
-  if (owner === 'none') restoreOlderParentFiles(backupRoot, env);
+  if (owner === 'none') restoreOlderParentFiles(backupRoot, olderParentFiles(env));
   if (kept.length) throw new Error(movedLedgersKept(kept));
 }
 

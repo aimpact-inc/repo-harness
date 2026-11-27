@@ -5,6 +5,8 @@
  */
 import { lstatSync, readlinkSync, statSync } from 'fs';
 import { dirname, isAbsolute, join, parse, resolve, sep } from 'path';
+import { BraceLimit, braceAlternatives } from './shell-brace-pattern';
+import { heredocLiteral } from './shell-heredoc-literal';
 
 export const escapePattern = (text: string) => text.replace(/[\\*?[\]{},~]/g, '\\$&');
 export const unescapePattern = (pattern: string) => pattern.replace(/\\(.)/gs, '$1');
@@ -44,47 +46,6 @@ export function globIndex(pattern: string): number {
 }
 
 export const BRACE_LIMIT = 1024;
-class BraceLimit extends Error {}
-
-/** The words of a `{a..b[..step]}` sequence, or null when the text is not one. */
-function braceSequence(inner: string): string[] | null {
-  const match = /^(?:(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z]))(?:\.\.(-?\d+))?$/.exec(inner);
-  if (!match) return null;
-  const [, a, b, c, d, increment] = match;
-  const start = a !== undefined ? Number(a) : c!.charCodeAt(0);
-  const end = a !== undefined ? Number(b) : d!.charCodeAt(0);
-  const step = (Math.abs(Number(increment ?? 1)) || 1) * (start <= end ? 1 : -1);
-  if (![start, end, step].every(Number.isSafeInteger) || Math.abs(end - start) / Math.abs(step) >= BRACE_LIMIT) throw new BraceLimit();
-  // A leading zero pads every number to the wider bound, sign included.
-  const width = a !== undefined && (/^-?0\d/.test(a) || /^-?0\d/.test(b!)) ? Math.max(a.length, b!.length) : 0;
-  const format = (n: number) => a === undefined ? String.fromCharCode(n)
-    : n < 0 ? `-${String(-n).padStart(width - 1, '0')}` : String(n).padStart(width, '0');
-  const items: string[] = [];
-  for (let n = start; step > 0 ? n <= end : n >= end; n += step) items.push(format(n));
-  return items;
-}
-
-/** The patterns from the first expandable unescaped brace pair, or null when the pattern has none. */
-function braceAlternatives(word: string): string[] | null {
-  for (let open = 0; open < word.length; open++) {
-    if (word[open] === '\\') { open++; continue; }
-    if (word[open] !== '{') continue;
-    const commas: number[] = [];
-    let depth = 0, close = -1;
-    for (let i = open; i < word.length && close < 0; i++) {
-      if (word[i] === '\\') i++;
-      else if (word[i] === '{') depth++;
-      else if (word[i] === '}' && --depth === 0) close = i;
-      else if (word[i] === ',' && depth === 1) commas.push(i);
-    }
-    if (close < 0) continue;
-    const items = commas.length
-      ? [open, ...commas].map((at, n) => word.slice(at + 1, [...commas, close][n]))
-      : braceSequence(word.slice(open + 1, close));
-    if (items) return items.map(item => word.slice(0, open) + item + word.slice(close + 1));
-  }
-  return null;
-}
 
 /** Brace expansion of one pattern in the shell's left-to-right order, before tilde and glob expansion; null above the word limit. */
 export function expandBraces(word: string): string[] | null {
@@ -93,7 +54,7 @@ export function expandBraces(word: string): string[] | null {
   try {
     while (pending.length) {
       const current = pending.pop()!;
-      const items = braceAlternatives(current);
+      const items = braceAlternatives(current, BRACE_LIMIT);
       if (items) pending.push(...items.reverse()); else done.push(current);
       if (done.length + pending.length > BRACE_LIMIT) return null;
     }
@@ -155,25 +116,7 @@ type Token = Word | Op;
 /** The top-level token stream first; then the body of each substitution, outermost last. */
 type Streams = Token[][];
 
-const HEREDOC_HEAD = /"\$\(cat <<\s?'([A-Za-z_][A-Za-z0-9_]*)'\n/y;
 const REDIRECT = /^(\d*)(>>|>\||>&|>|<>|<&|<<<|<<-|<<|<|&>>|&>)$/;
-
-/**
- * The `"$(cat <<'D' ... D\n)"` span at `at`, or null. The body has no `$`, backtick, `\`, `"` or delimiter line, so the shell
- * prints it as text, and the lexer reads it as one quoted literal word (a commit or PR body written this way stays one argument).
- */
-function heredocLiteral(text: string, at: number): { end: number; body: string } | null {
-  HEREDOC_HEAD.lastIndex = at;
-  const head = HEREDOC_HEAD.exec(text);
-  if (!head) return null;
-  const close = `\n${head[1]}\n)"`;
-  const start = HEREDOC_HEAD.lastIndex;
-  const end = text.indexOf(close, start - 1);
-  if (end < 0) return null;
-  const body = text.slice(start, end);
-  if (/[$`\\"]/.test(body) || body.split('\n').includes(head[1]!)) return null;
-  return { end: end + close.length, body };
-}
 
 interface Frame { tokens: Token[]; closer: ')' | '`' | null; depth: number; quote: boolean }
 
