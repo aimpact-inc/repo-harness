@@ -17,6 +17,13 @@ import { registryOf } from '../../src/operator-web/fixtures';
 
 const REGISTRY = registryOf(['repo-harness', 'repo-console']);
 import {
+  fetchSeatOverrides,
+  postSeatOverride,
+  postSeatOverrideRevoke,
+  type SeatOverrideRevokePost,
+  type SeatOverrideSetPost,
+} from '../../src/operator-web/seats';
+import {
   fetchAgentsSettings,
   postAgentsSettings,
   type AgentsSettingsPost,
@@ -102,7 +109,7 @@ function props(route: ReturnType<typeof server>, locale: OperatorLocale = 'en'):
     readNotifyStatus: () => new Promise(() => {}),
     readAgentsSettings: route.read, writeAgentsSettings: route.write,
     // The setup check stays pending, so every runtime shows in the agent settings list below Hosts.
-    readSetup: () => new Promise(() => {}), readSeatsSettings: () => new Promise(() => {}), readQuota: () => new Promise(() => {}),
+    readSetup: () => new Promise(() => {}), readSeatsSettings: () => new Promise(() => {}), readSeatOverrides: () => new Promise(() => {}), readQuota: () => new Promise(() => {}),
   };
 }
 
@@ -136,10 +143,14 @@ afterEach(async () => {
 describe('agents page seats section', () => {
   /** The busy fixture's read; writes are recorded and answered as saved. */
   function seatsProps(posts: (SeatsSettingsRequestV1 & { readonly request_id: string })[]): OperatorAppProps {
+    const stores = settingsStores(NOW, 'busy');
     return {
       ...props(server(settings(), [])),
-      readSeatsSettings: settingsStores(NOW, 'busy').seats.read,
+      readSeatsSettings: stores.seats.read,
       writeSeatsSettings: async (body) => { posts.push(body); return { state: 'saved', result: { config_revision: REVISION_B, changed_keys: ['seats.advisor.fleet'] } }; },
+      readSeatOverrides: stores.seatOverrides.read,
+      writeSeatOverride: stores.seatOverrides.write,
+      revokeSeatOverride: stores.seatOverrides.revoke,
     };
   }
   test('the advisor card shows the model for the next launch from the current Gemini quota', async () => {
@@ -843,6 +854,346 @@ describe('agents page seats section', () => {
     await click(seatsSave());
     expect(posts).toHaveLength(0);
   });
+
+  test('seat route rows mark owner overrides, require explicit confirmation with instruction to authorize, and revoke restores catalog', async () => {
+    const setPosts: SeatOverrideSetPost[] = [];
+    const revokePosts: SeatOverrideRevokePost[] = [];
+    const initialAuthAt = '2026-11-27T15:30:00.000Z';
+    const stores = settingsStores(NOW, 'busy', {
+      'worker-opus': {
+        runtime: 'pi',
+        model: 'example-provider/custom-opus',
+        effort: 'high',
+        authorized_at: initialAuthAt,
+        instruction: 'Owner approved custom provider route',
+      },
+    });
+    await mount({
+      ...props(server(settings(), [])),
+      readAgentsSettings: stores.agents.read,
+      writeAgentsSettings: stores.agents.write,
+      readSeatsSettings: stores.seats.read,
+      writeSeatsSettings: stores.seats.write,
+      readSeatOverrides: stores.seatOverrides.read,
+      writeSeatOverride: async (body) => { setPosts.push(body); return stores.seatOverrides.write(body); },
+      revokeSeatOverride: async (body) => { revokePosts.push(body); return stores.seatOverrides.revoke(body); },
+    });
+
+    // Existing override is marked with runtime, provider/model, effort, time and instruction.
+    const opusRow = document.querySelector<HTMLElement>('[data-seat-route-row="worker-opus"]')!;
+    expect(opusRow.getAttribute('data-seat-overridden')).toBe('true');
+    expect(opusRow.querySelector('[data-seat-override-badge="worker-opus"]')?.textContent).toBe('Owner override');
+    expect(opusRow.querySelector('[data-seat-route-runtime]')?.textContent).toBe('pi');
+    expect(opusRow.querySelector('[data-seat-route-model]')?.textContent).toBe('example-provider/custom-opus');
+    expect(opusRow.querySelector('[data-seat-route-effort]')?.textContent).toBe('high');
+    expect(opusRow.querySelector('[data-seat-override-instruction]')?.textContent).toBe('Owner approved custom provider route');
+    expect(opusRow.querySelector('[data-seat-override-time]')?.textContent).toBe(initialAuthAt);
+    expect(opusRow.querySelector('[data-seat-override-revoke="worker-opus"]')).not.toBeNull();
+
+    // Unoverridden configured seat shows catalog badge and no Revoke button.
+    const advisorRow = document.querySelector<HTMLElement>('[data-seat-route-row="advisor"]')!;
+    expect(advisorRow.getAttribute('data-seat-overridden')).toBe('false');
+    expect(advisorRow.querySelector('[data-seat-catalog-badge="advisor"]')?.textContent).toBe('Catalog');
+    expect(advisorRow.querySelector('[data-seat-route-runtime]')?.textContent).toBe('claude');
+    expect(advisorRow.querySelector('[data-seat-route-model]')?.textContent).toBe('opus');
+    expect(advisorRow.querySelector('[data-seat-override-revoke="advisor"]')).toBeNull();
+
+    // Opening "Change route" names the seat, offers catalog choices + free route input, and sends nothing before confirmation.
+    await click(advisorRow.querySelector<HTMLButtonElement>('[data-seat-override-change="advisor"]')!);
+    const dialog = document.querySelector<HTMLElement>('[data-seat-override-dialog="advisor"]')!;
+    expect(dialog.querySelector('h3')?.textContent).toContain('advisor');
+    const confirmButton = () => dialog.querySelector<HTMLButtonElement>('[data-override-confirm]')!;
+    expect(confirmButton().disabled).toBe(true);
+    expect(setPosts).toHaveLength(0);
+
+    // Switch runtime to Codex, enter a free route model, choose effort xhigh, and type owner instruction.
+    await click(all('[role="group"][aria-label="Runtime"] button', dialog).find(button => button.textContent === 'Codex')!);
+    // Catalog choices for Codex on advisor come from ranges, plus the free route text input.
+    expect(all('[role="group"][aria-label="Model"] button', dialog).map(button => button.textContent)).toContain('Host default');
+    await setNumber('[data-seat-override-dialog="advisor"] [data-override-model-input]', 'custom-codex-route');
+    await click(all('[role="group"][aria-label="Effort"] button', dialog).find(button => button.textContent === 'xhigh')!);
+    expect(dialog.querySelector('[data-override-route-preview]')?.textContent).toContain('advisor → codex · custom-codex-route · xhigh');
+    expect(setPosts).toHaveLength(0);
+
+    await setNumber('[data-seat-override-dialog="advisor"] [data-override-instruction]', 'Use custom route for advisor test');
+    expect(confirmButton().disabled).toBe(false);
+    await click(confirmButton());
+
+    expect(setPosts).toHaveLength(1);
+    expect(setPosts[0]).toMatchObject({
+      request_id: expect.stringMatching(UUID),
+      seat: 'advisor',
+      runtime: 'codex',
+      model: 'custom-codex-route',
+      effort: 'xhigh',
+      instruction: 'Use custom route for advisor test',
+      owner_approved: true,
+    });
+    expect(document.querySelector('[data-seat-override-dialog]')).toBeNull();
+    expect(document.querySelector('[data-seat-route-row="advisor"]')?.getAttribute('data-seat-overridden')).toBe('true');
+    expect(document.querySelector('[data-seat-route-row="advisor"] [data-seat-route-model]')?.textContent).toBe('custom-codex-route');
+    expect(document.querySelector('[data-seat-route-row="advisor"] [data-seat-override-instruction]')?.textContent).toBe('Use custom route for advisor test');
+    expect(document.querySelector('[data-seat-card="advisor"] [data-seat-card-override="advisor"]')).not.toBeNull();
+
+    // Revoking requires one explicit confirmation and restores the catalog route.
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-override-revoke="advisor"]')!);
+    const revokeDialog = document.querySelector<HTMLElement>('[data-seat-override-revoke-dialog="advisor"]')!;
+    expect(revokeDialog.querySelector('[data-override-revoke-preview]')?.textContent).toContain('codex · custom-codex-route · xhigh → claude · opus · high');
+    expect(revokePosts).toHaveLength(0);
+    await click(revokeDialog.querySelector<HTMLButtonElement>('[data-override-revoke-confirm]')!);
+
+    expect(revokePosts).toHaveLength(1);
+    expect(revokePosts[0]).toMatchObject({
+      request_id: expect.stringMatching(UUID),
+      seat: 'advisor',
+      owner_approved: true,
+    });
+    expect(document.querySelector('[data-seat-override-revoke-dialog]')).toBeNull();
+    expect(document.querySelector('[data-seat-route-row="advisor"]')?.getAttribute('data-seat-overridden')).toBe('false');
+    expect(document.querySelector('[data-seat-route-row="advisor"] [data-seat-catalog-badge="advisor"]')).not.toBeNull();
+    expect(document.querySelector('[data-seat-route-row="advisor"] [data-seat-route-model]')?.textContent).toBe('opus');
+  });
+
+  test('override confirmation displays 422 field errors, 409 conflicts with reload, and 503 busy with same-request_id retry inline', async () => {
+    const stores = settingsStores(NOW, 'busy');
+    const setPosts: SeatOverrideSetPost[] = [];
+    let currentRevision = REVISION_A;
+    const outcomes: Awaited<ReturnType<typeof stores.seatOverrides.write>>[] = [
+      {
+        state: 'refused',
+        status: 422,
+        error: {
+          code: 'seat_model_invalid',
+          message: 'The model at seat_overrides.worker-opus.model is not valid for pi.',
+          next_action: 'Choose or type a model for the named field, then save again.',
+        },
+      },
+      {
+        state: 'refused',
+        status: 422,
+        error: {
+          code: 'seat_tool_not_allowed',
+          message: 'The worker-opus seat enforces shell off on claude, which pi cannot enforce.',
+          next_action: 'Choose a value that the seat settings page offers, then save again.',
+        },
+      },
+      {
+        state: 'refused',
+        status: 422,
+        error: {
+          code: 'seat_fleet_not_allowed',
+          message: 'The worker-opus seat enforces an empty sub-agent fleet on claude, which codex cannot enforce.',
+          next_action: 'Choose a value that the seat settings page offers, then save again.',
+        },
+      },
+      {
+        state: 'refused',
+        status: 409,
+        error: {
+          code: 'revision_conflict',
+          message: 'The configuration changed after it was read.',
+          next_action: 'Reload the settings, then apply your change again.',
+        },
+      },
+      {
+        state: 'refused',
+        status: 503,
+        error: {
+          code: 'busy',
+          message: 'Another write to this target is running.',
+          next_action: 'Wait for the runtime transaction to end, then send the change with a new request_id.',
+        },
+      },
+      {
+        state: 'ok',
+        value: {
+          config_revision: REVISION_B,
+          seat: 'worker-opus',
+          active: true,
+          authorized_at: '2026-11-27T16:00:00.000Z',
+          changed_keys: ['seat_overrides.worker-opus'],
+        },
+      },
+    ];
+    await mount({
+      ...props(server(settings(), [])),
+      readAgentsSettings: stores.agents.read,
+      readSeatsSettings: stores.seats.read,
+      readSeatOverrides: async () => ({
+        state: 'ok',
+        settings: { protocol: 1, kind: 'operator_seat_overrides', config_revision: currentRevision, overrides: {} },
+      }),
+      writeSeatOverride: async (body) => {
+        setPosts.push(body);
+        const next = outcomes.shift();
+        if (!next) throw new Error('unexpected override write');
+        return next;
+      },
+      revokeSeatOverride: stores.seatOverrides.revoke,
+    });
+
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-override-change="worker-opus"]')!);
+    const dialog = () => document.querySelector<HTMLElement>('[data-seat-override-dialog="worker-opus"]')!;
+    await click(all('[role="group"][aria-label="Runtime"] button', dialog()).find(button => button.textContent === 'Pi')!);
+    await setNumber('[data-seat-override-dialog="worker-opus"] [data-override-model-input]', 'no-slash');
+    await setNumber('[data-seat-override-dialog="worker-opus"] [data-override-instruction]', 'Owner route test');
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-confirm]')!);
+
+    // 422 seat_model_invalid renders inline at the model field with next_action.
+    const modelError = dialog().querySelector('[data-override-field-error="model"]');
+    expect(modelError?.getAttribute('data-override-error-code')).toBe('seat_model_invalid');
+    expect(modelError?.textContent).toContain('Choose or type a model for the named field, then save again.');
+
+    // Fixing the model clears the field error; 422 seat_tool_not_allowed and seat_fleet_not_allowed render inline at runtime with next_action.
+    await setNumber('[data-seat-override-dialog="worker-opus"] [data-override-model-input]', 'example-provider/custom-opus');
+    expect(dialog().querySelector('[data-override-field-error="model"]')).toBeNull();
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-confirm]')!);
+    const toolError = dialog().querySelector('[data-override-field-error="runtime"]');
+    expect(toolError?.getAttribute('data-override-error-code')).toBe('seat_tool_not_allowed');
+    expect(toolError?.textContent).toContain('Choose a value that the seat settings page offers, then save again.');
+
+    await click(all('[role="group"][aria-label="Runtime"] button', dialog()).find(button => button.textContent === 'Codex')!);
+    expect(dialog().querySelector('[data-override-field-error="runtime"]')).toBeNull();
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-confirm]')!);
+    const fleetError = dialog().querySelector('[data-override-field-error="runtime"]');
+    expect(fleetError?.getAttribute('data-override-error-code')).toBe('seat_fleet_not_allowed');
+    expect(fleetError?.textContent).toContain('Choose a value that the seat settings page offers, then save again.');
+
+    // Next submit meets 409 revision_conflict at dialog level with Reload.
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-confirm]')!);
+    const conflictError = dialog().querySelector('[data-override-dialog-error="revision_conflict"]');
+    expect(conflictError?.textContent).toContain('Reload the settings, then apply your change again.');
+
+    // Reloading updates the revision; next submit meets 503 busy and retrying reuses the same request_id.
+    currentRevision = REVISION_B;
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-reload]')!);
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-confirm]')!);
+    const busyError = dialog().querySelector('[data-override-dialog-error="busy"]');
+    expect(busyError?.textContent).toContain('Wait for the runtime transaction to end');
+
+    await click(dialog().querySelector<HTMLButtonElement>('[data-override-confirm]')!);
+    expect(setPosts).toHaveLength(6);
+    expect(setPosts[4]!.expected_revision).toBe(REVISION_B);
+    expect(setPosts[5]!.request_id).toBe(setPosts[4]!.request_id);
+    expect(document.querySelector('[data-seat-override-dialog]')).toBeNull();
+  });
+
+  test('Enter in the free-route or instruction input sends no override request; only explicit Confirm sends owner_approved', async () => {
+    const setPosts: SeatOverrideSetPost[] = [];
+    const stores = settingsStores(NOW, 'busy', {
+      'worker-opus': {
+        runtime: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z',
+        instruction: 'Prior owner instruction',
+      },
+    });
+    await mount({
+      ...props(server(settings(), [])),
+      readAgentsSettings: stores.agents.read,
+      readSeatsSettings: stores.seats.read,
+      readSeatOverrides: stores.seatOverrides.read,
+      writeSeatOverride: async (body) => { setPosts.push(body); return stores.seatOverrides.write(body); },
+      revokeSeatOverride: stores.seatOverrides.revoke,
+    });
+
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-override-change="worker-opus"]')!);
+    const dialog = document.querySelector<HTMLElement>('[data-seat-override-dialog="worker-opus"]')!;
+    const confirm = dialog.querySelector<HTMLButtonElement>('[data-override-confirm]')!;
+    const modelInput = dialog.querySelector<HTMLInputElement>('[data-override-model-input]')!;
+    const instructionInput = dialog.querySelector<HTMLInputElement>('[data-override-instruction]')!;
+    const form = dialog.querySelector<HTMLFormElement>('form')!;
+    expect(confirm.getAttribute('type')).toBe('button');
+
+    const pressEnter = async (target: HTMLInputElement) => {
+      await act(async () => {
+        target.focus();
+        target.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event);
+        target.dispatchEvent(new window.KeyboardEvent('keypress', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event);
+        target.dispatchEvent(new window.KeyboardEvent('keyup', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      await settle();
+    };
+
+    // Edit route while prior instruction is populated and press Enter in free-route input, instruction input, and submit form.
+    await setNumber('[data-seat-override-dialog="worker-opus"] [data-override-model-input]', 'haiku');
+    await pressEnter(modelInput);
+    await pressEnter(instructionInput);
+    await act(async () => {
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    await settle();
+    expect(setPosts).toHaveLength(0);
+    expect(document.querySelector('[data-seat-override-dialog="worker-opus"]')).not.toBeNull();
+
+    // Explicit activation of Confirm override sends owner_approved: true.
+    await click(confirm);
+    expect(setPosts).toHaveLength(1);
+    expect(setPosts[0]).toMatchObject({ seat: 'worker-opus', runtime: 'claude', model: 'haiku', owner_approved: true });
+    expect(document.querySelector('[data-seat-override-dialog="worker-opus"]')).toBeNull();
+  });
+
+  test('when stored base changes under a dirty Seats draft, route rows and Revoke dialog show the latest stored base', async () => {
+    const stores = settingsStores(NOW, 'busy', {
+      'worker-opus': {
+        runtime: 'claude',
+        model: 'sonnet',
+        effort: 'high',
+        authorized_at: '2026-11-27T15:30:00.000Z',
+        instruction: 'Use Sonnet for this run',
+      },
+    });
+    const initialRead = await stores.seats.read();
+    if (initialRead.state !== 'ok') throw new Error('fixture read failed');
+    let currentSeats = initialRead.settings;
+    let currentOverrides = {
+      protocol: 1 as const,
+      kind: 'operator_seat_overrides' as const,
+      config_revision: initialRead.settings.config.revision,
+      overrides: {
+        'worker-opus': {
+          runtime: 'claude' as const,
+          model: 'sonnet',
+          effort: 'high',
+          authorized_at: '2026-11-27T15:30:00.000Z',
+          instruction: 'Use Sonnet for this run',
+        },
+      },
+    };
+    await mount({
+      ...props(server(settings(), [])),
+      readAgentsSettings: stores.agents.read,
+      readSeatsSettings: async () => ({ state: 'ok', settings: currentSeats }),
+      readSeatOverrides: async () => ({ state: 'ok', settings: currentOverrides }),
+      writeSeatOverride: stores.seatOverrides.write,
+      revokeSeatOverride: stores.seatOverrides.revoke,
+    });
+
+    // Make an unrelated Seats draft edit so form.base remains frozen at the old revision.
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-card="advisor"] [aria-label="Allow explorer"]')!);
+
+    // Another window updates worker-opus base model to haiku and advisor base model to sonnet.
+    currentSeats = {
+      ...currentSeats,
+      config: {
+        ...currentSeats.config,
+        revision: REVISION_B,
+        'worker-opus': { ...currentSeats.config['worker-opus'], model: 'haiku' },
+        advisor: { ...currentSeats.config.advisor, model: 'sonnet' },
+      },
+    };
+    currentOverrides = { ...currentOverrides, config_revision: REVISION_B };
+    await click(buttonWithText('Refresh'));
+
+    // Non-overridden route row reflects the latest stored base while the Seats draft stays dirty.
+    expect(document.querySelector('[data-seat-route-row="advisor"] [data-seat-route-model]')?.textContent).toBe('sonnet');
+    expect(document.querySelector('[data-save-result="changed-elsewhere"]')).not.toBeNull();
+
+    // Revoke preview shows the actual stored base destination (haiku), not the stale dirty-form base (opus).
+    await click(document.querySelector<HTMLButtonElement>('[data-seat-override-revoke="worker-opus"]')!);
+    expect(document.querySelector('[data-override-revoke-preview]')?.textContent).toBe('claude · sonnet · high → claude · haiku · high');
+  });
 });
 
 describe('settings page', () => {
@@ -1168,5 +1519,66 @@ describe('settings transport', () => {
       expect(await fetchQuota(signal)).toEqual(expected);
       expect(calls[0]!.url).toBe('/api/v1/quota');
     }
+  });
+
+  test('seat overrides GET and POST use the operator routes and decode typed responses', async () => {
+    const signal = new AbortController().signal;
+    const responsePayload = {
+      protocol: 1,
+      kind: 'operator_seat_overrides',
+      config_revision: REVISION_A,
+      overrides: {
+        'worker-opus': {
+          runtime: 'pi',
+          model: 'example-provider/custom-opus',
+          effort: 'high',
+          authorized_at: '2026-11-27T15:30:00.000Z',
+          instruction: 'Owner approved',
+        },
+      },
+    } as const;
+    const getCall = stub(() => new Response(JSON.stringify(responsePayload), { status: 200 }));
+    expect(await fetchSeatOverrides(signal)).toEqual({ state: 'ok', settings: responsePayload });
+    expect(getCall.calls[0]!.url).toBe('/api/v1/settings/seats/overrides');
+
+    const setResult = {
+      config_revision: REVISION_B,
+      seat: 'worker-opus',
+      active: true,
+      authorized_at: '2026-11-27T15:35:00.000Z',
+      changed_keys: ['seat_overrides.worker-opus'],
+    } as const;
+    const setCall = stub(() => new Response(JSON.stringify(setResult), { status: 200 }));
+    const setBody: SeatOverrideSetPost = {
+      request_id: '00000000-0000-4000-8000-000000000002',
+      expected_revision: REVISION_A,
+      seat: 'worker-opus',
+      runtime: 'pi',
+      model: 'example-provider/custom-opus',
+      effort: 'high',
+      instruction: 'Owner approved',
+      owner_approved: true,
+    };
+    expect(await postSeatOverride(setBody)).toEqual({ state: 'ok', value: setResult });
+    expect(setCall.calls[0]!.url).toBe('/api/v1/settings/seats/overrides');
+    expect(setCall.calls[0]!.init).toMatchObject({ method: 'POST', credentials: 'same-origin' });
+
+    const revokeResult = {
+      config_revision: REVISION_B,
+      seat: 'worker-opus',
+      active: false,
+      authorized_at: null,
+      changed_keys: ['seat_overrides.worker-opus'],
+    } as const;
+    const revokeCall = stub(() => new Response(JSON.stringify(revokeResult), { status: 200 }));
+    const revokeBody: SeatOverrideRevokePost = {
+      request_id: '00000000-0000-4000-8000-000000000003',
+      expected_revision: REVISION_B,
+      seat: 'worker-opus',
+      owner_approved: true,
+    };
+    expect(await postSeatOverrideRevoke(revokeBody)).toEqual({ state: 'ok', value: revokeResult });
+    expect(revokeCall.calls[0]!.url).toBe('/api/v1/settings/seats/overrides/revoke');
+    expect(revokeCall.calls[0]!.init).toMatchObject({ method: 'POST', credentials: 'same-origin' });
   });
 });
