@@ -1,3 +1,14 @@
+import { useCallback, useRef, useState } from 'react';
+import {
+  decodeSeatOverrideResult,
+  decodeSeatOverridesResponse,
+  normalizeOverrideInstruction,
+  type SeatOverrideResultV1,
+  type SeatOverrideRevokeRequestV1,
+  type SeatOverrideSetRequestV1,
+  type SeatOverridesResponseV1,
+  type SeatOverridesV1,
+} from '../core/board/seat-overrides';
 import {
   AGY_READONLY_SEAT_TOOLS,
   COUNCIL_TOOLS,
@@ -30,22 +41,48 @@ import {
 import { agySeatStarter } from '../core/board/recommended-models';
 import { decodeSeatPool } from '../core/board/seat-pool';
 import { isRecord } from '../core/evidence/is-record';
+import { postOperatorWrite, type OperatorWriteAnswer } from './operator-write';
 import {
   fetchSettings,
   postSettings,
   useSettingsForm,
   type SettingsForm,
   type SettingsReader,
+  type SettingsReason,
   type SettingsSection,
   type SettingsWriter,
 } from './settings';
+import { answered, useObservationRefresh } from './useObservationRefresh';
 
 /** Browser side of `GET` and `POST /api/v1/settings/seats`. Save sends the whole section. */
 const SEATS_SETTINGS_PATH = '/api/v1/settings/seats';
+const SEAT_OVERRIDES_PATH = '/api/v1/settings/seats/overrides';
+const SEAT_OVERRIDES_REVOKE_PATH = '/api/v1/settings/seats/overrides/revoke';
 
 export type SeatsSettingsReader = SettingsReader<SeatsSettingsV1>;
 export type SeatsSettingsWriter = SettingsWriter<SeatsSettingsRequestV1>;
 export type SeatsSettingsForm = SettingsForm<SeatsSettingsV1, SeatsSettingsV1['config'], SeatsConfigV1, SeatsSettingsRequestV1>;
+
+export type SeatOverridesReader = SettingsReader<SeatOverridesResponseV1>;
+export type SeatOverrideSetPost = SeatOverrideSetRequestV1 & { readonly request_id: string };
+export type SeatOverrideRevokePost = SeatOverrideRevokeRequestV1 & { readonly request_id: string };
+export type SeatOverrideWrite = OperatorWriteAnswer<SeatOverrideResultV1>;
+export type SeatOverrideSetter = (body: SeatOverrideSetPost) => Promise<SeatOverrideWrite>;
+export type SeatOverrideRevoker = (body: SeatOverrideRevokePost) => Promise<SeatOverrideWrite>;
+
+export type SeatOverridesView =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'unavailable'; readonly reason: SettingsReason }
+  | { readonly kind: 'ready'; readonly response: SeatOverridesResponseV1; readonly refreshFailed: boolean };
+
+export interface SeatOverridesController {
+  readonly view: SeatOverridesView;
+  readonly saves: number;
+  readonly needsReload: boolean;
+  readonly authorize: (request: SeatOverrideSetRequestV1) => Promise<SeatOverrideWrite>;
+  readonly revoke: (request: SeatOverrideRevokeRequestV1) => Promise<SeatOverrideWrite>;
+  readonly reload: () => void;
+}
 
 function decodeSeatsSettingsWithPool(value: unknown): SeatsSettingsV1 {
   if (!isRecord(value)) throw new Error('seats_settings_invalid');
@@ -58,6 +95,129 @@ function decodeSeatsSettingsWithPool(value: unknown): SeatsSettingsV1 {
 
 export const fetchSeatsSettings: SeatsSettingsReader = signal => fetchSettings(SEATS_SETTINGS_PATH, decodeSeatsSettingsWithPool, signal);
 export const postSeatsSettings: SeatsSettingsWriter = body => postSettings(SEATS_SETTINGS_PATH, decodeSeatsSettingsResult, body);
+export const fetchSeatOverrides: SeatOverridesReader = signal => fetchSettings(SEAT_OVERRIDES_PATH, decodeSeatOverridesResponse, signal);
+export const postSeatOverride: SeatOverrideSetter = body => postOperatorWrite(SEAT_OVERRIDES_PATH, body, decodeSeatOverrideResult);
+export const postSeatOverrideRevoke: SeatOverrideRevoker = body => postOperatorWrite(SEAT_OVERRIDES_REVOKE_PATH, body, decodeSeatOverrideResult);
+
+const OVERRIDE_RETRY_SAME_REQUEST: ReadonlySet<string> = new Set(['busy', 'audit_unavailable']);
+
+function withoutOverride(overrides: SeatOverridesV1, seat: SeatId): SeatOverridesV1 {
+  const next: Partial<Record<SeatId, NonNullable<SeatOverridesV1[SeatId]>>> = {};
+  for (const id of SEAT_IDS) {
+    if (id !== seat && overrides[id] !== undefined) next[id] = overrides[id];
+  }
+  return next;
+}
+
+interface SeatOverridesState {
+  readonly view: SeatOverridesView;
+  readonly saves: number;
+  readonly needsReload: boolean;
+}
+
+function nextOverridesAfterWrite(
+  current: SeatOverridesState,
+  revision: string,
+  update: (previous: SeatOverridesV1) => SeatOverridesV1,
+): SeatOverridesState {
+  const previous = current.view.kind === 'ready' ? current.view.response.overrides : {};
+  const response: SeatOverridesResponseV1 = {
+    protocol: 1,
+    kind: 'operator_seat_overrides',
+    config_revision: revision,
+    overrides: update(previous),
+  };
+  return { ...current, view: { kind: 'ready', response, refreshFailed: false }, saves: current.saves + 1 };
+}
+
+export function useSeatOverrides(
+  read: SeatOverridesReader,
+  writeSet: SeatOverrideSetter,
+  writeRevoke: SeatOverrideRevoker,
+  generation: number,
+  sharedSaves: number,
+  enabled: boolean,
+): SeatOverridesController {
+  const [state, setState] = useState<SeatOverridesState>({
+    view: { kind: 'loading' }, saves: 0, needsReload: false,
+  });
+  const pending = useRef<{ readonly key: string; readonly id: string } | null>(null);
+  const readsStarted = useRef(0);
+  const staleReadsThrough = useRef(0);
+
+  const observe = useCallback(async (signal: AbortSignal): Promise<boolean> => {
+    const started = ++readsStarted.current;
+    const result = await read(signal);
+    if (signal.aborted) return false;
+    if (started <= staleReadsThrough.current) return true;
+    if (result.state !== 'ok') {
+      setState((current: SeatOverridesState) => ({
+        ...current,
+        view: current.view.kind === 'ready' ? { ...current.view, refreshFailed: true } : { kind: 'unavailable', reason: result.reason },
+      }));
+      return answered(result);
+    }
+    setState((current: SeatOverridesState) => ({ ...current, view: { kind: 'ready', response: result.settings, refreshFailed: false } }));
+    return true;
+  }, [read]);
+
+  const readNow = useObservationRefresh(observe, JSON.stringify(['seat-overrides', generation, sharedSaves]), { enabled });
+
+  const runWrite = useCallback(async (
+    key: string,
+    send: (requestId: string) => Promise<SeatOverrideWrite>,
+    apply: (previous: SeatOverridesV1, value: SeatOverrideResultV1) => SeatOverridesV1,
+  ): Promise<SeatOverrideWrite> => {
+    const id = pending.current?.key === key ? pending.current.id : crypto.randomUUID();
+    pending.current = { key, id };
+    const outcome = await send(id);
+    if (outcome.state === 'ok') {
+      pending.current = null;
+      staleReadsThrough.current = readsStarted.current;
+      setState((current: SeatOverridesState) => nextOverridesAfterWrite(current, outcome.value.config_revision, previous => apply(previous, outcome.value)));
+      readNow();
+      return outcome;
+    }
+    if (outcome.state === 'reload_required') {
+      pending.current = null;
+      setState((current: SeatOverridesState) => ({ ...current, needsReload: true }));
+    } else if (outcome.state === 'refused' && !OVERRIDE_RETRY_SAME_REQUEST.has(outcome.error.code)) {
+      pending.current = null;
+    }
+    return outcome;
+  }, [readNow]);
+
+  const authorize = useCallback((request: SeatOverrideSetRequestV1): Promise<SeatOverrideWrite> => {
+    const instruction = normalizeOverrideInstruction(request.instruction) ?? request.instruction.trim();
+    return runWrite(
+      `set:${JSON.stringify(request)}`,
+      (request_id: string) => writeSet({ request_id, ...request }),
+      (previous: SeatOverridesV1, value: SeatOverrideResultV1) => ({
+        ...previous,
+        [request.seat]: {
+          runtime: request.runtime,
+          model: request.model,
+          effort: request.effort,
+          authorized_at: value.authorized_at ?? new Date().toISOString(),
+          instruction,
+        },
+      }),
+    );
+  }, [runWrite, writeSet]);
+
+  const revoke = useCallback((request: SeatOverrideRevokeRequestV1): Promise<SeatOverrideWrite> => runWrite(
+    `revoke:${JSON.stringify(request)}`,
+    (request_id: string) => writeRevoke({ request_id, ...request }),
+    (previous: SeatOverridesV1) => withoutOverride(previous, request.seat),
+  ), [runWrite, writeRevoke]);
+
+  const reload = useCallback(() => {
+    pending.current = null;
+    readNow();
+  }, [readNow]);
+
+  return { view: state.view, saves: state.saves, needsReload: state.needsReload, authorize, revoke, reload };
+}
 
 export function seatsDraftOf(config: SeatsSettingsV1['config']): SeatsConfigV1 {
   const { revision: _revision, ...seats } = config;

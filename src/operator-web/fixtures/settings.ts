@@ -1,9 +1,23 @@
 import { AGENT_RUNTIME_CAPABILITIES, decodeAgentsSettings, type AgentsSettingsV1 } from '../../core/board/agents-settings';
+import {
+  SEAT_OVERRIDES_KIND,
+  SEAT_OVERRIDES_PROTOCOL,
+  SeatOverrideValidationError,
+  applySeatOverrideToConfig,
+  applySeatOverrides,
+  decodeSeatOverrideResult,
+  decodeSeatOverrideRevokeRequest,
+  decodeSeatOverrideSetRequest,
+  decodeSeatOverridesResponse,
+  type SeatOverridesResponseV1,
+  type SeatOverridesV1,
+} from '../../core/board/seat-overrides';
 import { isReviewRuntimeId } from '../../core/review/review-runtimes';
 import { ALLOWED_SEAT_FLEET_ROLES, COUNCIL_TOOLS, DEFAULT_SEATS_CONFIG, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS, decodeSeatsSettings, seatHostId, type SeatsConfigV1, type SeatsSettingsRequestV1, type SeatsSettingsV1 } from '../../core/board/seats-settings';
 import { SEAT_RECOMMENDED_MODELS } from '../../core/board/recommended-models';
 import type { DocumentationLanguage, DocumentationLanguageReader, DocumentationLanguageWriter, LanguageRead, LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from '../language-settings';
 import type { OperatorApiErrorV1 } from '../operator-api-error';
+import type { SeatOverrideRevokePost, SeatOverrideSetPost, SeatOverrideWrite } from '../seats';
 import type { AgentsSettingsRead, AgentsSettingsWrite, AgentsSettingsPost, SettingsRead, SettingsWrite } from '../settings';
 
 const REVISION = `sha256:${'4'.repeat(64)}`;
@@ -110,7 +124,120 @@ const CLAUDE_CODEX_SEATS_FIXTURE: SeatsConfigV1 = {
  * degraded: every agents save meets the write channel's `reconcile_required`,
  * the stored worker runtime is not enabled, and a seats save meets a revision conflict.
  */
-export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degraded') {
+function createSeatOverridesFixture(state: {
+  readonly now: number;
+  readonly fixture: 'busy' | 'empty' | 'degraded';
+  readonly conflictError: OperatorApiErrorV1;
+  readonly revision: () => string;
+  readonly enabled: () => readonly string[];
+  readonly seats: () => SeatsConfigV1;
+  readonly overrides: () => SeatOverridesV1;
+  readonly commit: (next: SeatOverridesV1) => string;
+}) {
+  const read = (): Promise<SettingsRead<SeatOverridesResponseV1>> => Promise.resolve({
+    state: 'ok',
+    settings: decodeSeatOverridesResponse({
+      protocol: SEAT_OVERRIDES_PROTOCOL,
+      kind: SEAT_OVERRIDES_KIND,
+      config_revision: state.revision(),
+      overrides: state.overrides(),
+    }),
+  });
+  const write = (body: SeatOverrideSetPost): Promise<SeatOverrideWrite> => {
+    if (state.fixture === 'degraded' || body.expected_revision !== state.revision()) return refusal(409, state.conflictError);
+    const { request_id: _requestId, ...fields } = body;
+    let request;
+    try {
+      request = decodeSeatOverrideSetRequest(fields);
+    } catch (error) {
+      if (error instanceof SeatOverrideValidationError) {
+        return refusal(422, { code: error.code, message: error.message, next_action: 'Correct the override field, then confirm again.' });
+      }
+      return refusal(400, { code: 'invalid_body', message: 'The seat override request body is not valid.', next_action: 'Reload settings and retry.' });
+    }
+    if (!state.enabled().includes(seatHostId(request.runtime))) {
+      return refusal(422, {
+        code: 'seat_runtime_not_enabled',
+        message: `Enable ${request.runtime} under Hosts before authorizing a ${request.seat} override.`,
+        next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.',
+      });
+    }
+    const baseSeat = state.seats()[request.seat];
+    if (baseSeat === null) {
+      return refusal(422, {
+        code: 'seat_not_configured',
+        message: `Configure the ${request.seat} seat before authorizing a route override.`,
+        next_action: 'Configure the seat in Settings before authorizing a route override.',
+      });
+    }
+    const authorized_at = new Date(state.now).toISOString();
+    const candidate = {
+      runtime: request.runtime,
+      model: request.model,
+      effort: request.effort,
+      authorized_at,
+      instruction: request.instruction,
+    };
+    try {
+      applySeatOverrideToConfig(request.seat, baseSeat, candidate);
+    } catch (error) {
+      if (error instanceof SeatOverrideValidationError) {
+        return refusal(422, { code: error.code, message: error.message, next_action: 'Choose a value that the seat settings page offers, then save again.' });
+      }
+      throw error;
+    }
+    const revision = state.commit({
+      ...state.overrides(),
+      [request.seat]: candidate,
+    });
+    return Promise.resolve({
+      state: 'ok',
+      value: decodeSeatOverrideResult({
+        config_revision: revision,
+        seat: request.seat,
+        active: true,
+        authorized_at,
+        changed_keys: [`seat_overrides.${request.seat}`],
+      }),
+    });
+  };
+  const revoke = (body: SeatOverrideRevokePost): Promise<SeatOverrideWrite> => {
+    if (state.fixture === 'degraded' || body.expected_revision !== state.revision()) return refusal(409, state.conflictError);
+    const { request_id: _requestId, ...fields } = body;
+    let request;
+    try {
+      request = decodeSeatOverrideRevokeRequest(fields);
+    } catch (error) {
+      if (error instanceof SeatOverrideValidationError) {
+        return refusal(422, { code: error.code, message: error.message, next_action: 'Confirm explicit owner approval before revoking a seat override.' });
+      }
+      return refusal(400, { code: 'invalid_body', message: 'The seat override revoke body is not valid.', next_action: 'Reload settings and retry.' });
+    }
+    if (state.overrides()[request.seat] === undefined) {
+      return refusal(404, {
+        code: 'seat_override_not_found',
+        message: `No active owner override exists for the ${request.seat} seat.`,
+        next_action: 'Reload the seat overrides and verify the seat has an active override.',
+      });
+    }
+    const revision = state.commit(
+      Object.fromEntries(Object.entries(state.overrides()).filter(([id]) => id !== request.seat)) as SeatOverridesV1,
+    );
+    return Promise.resolve({
+      state: 'ok',
+      value: decodeSeatOverrideResult({
+        config_revision: revision,
+        seat: request.seat,
+        active: false,
+        authorized_at: null,
+        changed_keys: [`seat_overrides.${request.seat}`],
+      }),
+    });
+  };
+  return { read, write, revoke };
+}
+
+export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degraded', initialOverrides: SeatOverridesV1 = {}) {
   let agents = fixture === 'empty'
     ? decodeAgentsSettings({
       protocol: 1, kind: 'operator_agents_settings',
@@ -123,11 +250,13 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
     : fixture === 'degraded'
       ? CLAUDE_CODEX_SEATS_FIXTURE
       : DEFAULT_SEATS_CONFIG;
+  let overrides: SeatOverridesV1 = { ...initialOverrides };
   let serial = 0;
   const nextRevision = () => { serial += 1; return `sha256:${serial.toString(16).padStart(64, '0')}`; };
-  const conflict: SettingsWrite = { state: 'refused', status: 409, error: {
+  const conflictError: OperatorApiErrorV1 = {
     code: 'revision_conflict', message: 'The configuration changed after it was read.', next_action: 'Reload the settings, then apply your change again.',
-  } };
+  };
+  const conflict: SettingsWrite = { state: 'refused', status: 409, error: conflictError };
   const seatsSettings = () => decodeSeatsSettings({
     protocol: 1, kind: 'operator_seats_settings', config: { revision: agents.config.revision, ...seats },
     defaults: DEFAULT_SEATS_CONFIG, ranges: seatsRanges(agents.config.enabled),
@@ -159,8 +288,8 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
       }
     }
     const affected = SEAT_IDS.flatMap(id => {
-      const runtime = seats[id]?.runtime;
-      return runtime !== undefined && config.enabled.includes(runtime) && !enabled.has(runtime) ? [`${id} (${runtime})`] : [];
+      const runtimes = [seats[id]?.runtime, overrides[id]?.runtime].filter((value): value is NonNullable<typeof value> => value !== undefined);
+      return [...new Set(runtimes)].flatMap(runtime => config.enabled.includes(seatHostId(runtime)) && !enabled.has(seatHostId(runtime)) ? [`${id} (${runtime})`] : []);
     });
     if (affected.length > 0) {
       return refusal(422, {
@@ -197,6 +326,22 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
         next_action: 'Change the named seat to an enabled runtime, or enable its runtime under Hosts and save.',
       } });
     }
+    const blockedOverride = SEAT_IDS.find(id => body.seats[id] === null && overrides[id] !== undefined);
+    if (blockedOverride !== undefined) {
+      return refusal(422, {
+        code: 'seat_override_active',
+        message: `Revoke the active owner override on ${blockedOverride} before turning the seat off.`,
+        next_action: 'Revoke the active owner override on the seat before turning it off.',
+      });
+    }
+    try {
+      applySeatOverrides(body.seats, overrides);
+    } catch (error) {
+      if (error instanceof SeatOverrideValidationError) {
+        return refusal(422, { code: error.code, message: error.message, next_action: 'Choose a value that the seat settings page offers, then save again.' });
+      }
+      throw error;
+    }
     const revision = nextRevision();
     const changed = SEAT_IDS.flatMap(id => {
       const before = seats[id], after = body.seats[id];
@@ -208,7 +353,29 @@ export function settingsStores(now: number, fixture: 'busy' | 'empty' | 'degrade
     agents = decodeAgentsSettings({ ...agents, config: { ...agents.config, revision } });
     return Promise.resolve({ state: 'saved', result: { config_revision: revision, changed_keys: changed } });
   };
-  return { agents: { read: readAgents, write: writeAgents }, seats: { read: readSeats, write: writeSeats }, ...languageStores(fixture) };
+
+  const seatOverrides = createSeatOverridesFixture({
+    now,
+    fixture,
+    conflictError,
+    revision: () => agents.config.revision,
+    enabled: () => agents.config.enabled,
+    seats: () => seats,
+    overrides: () => overrides,
+    commit: (next) => {
+      const revision = nextRevision();
+      overrides = next;
+      agents = decodeAgentsSettings({ ...agents, config: { ...agents.config, revision } });
+      return revision;
+    },
+  });
+
+  return {
+    agents: { read: readAgents, write: writeAgents },
+    seats: { read: readSeats, write: writeSeats },
+    seatOverrides,
+    ...languageStores(fixture),
+  };
 }
 
 const refusal = (status: number, error: OperatorApiErrorV1) => Promise.resolve({ state: 'refused' as const, status, error });

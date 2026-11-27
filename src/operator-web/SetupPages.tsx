@@ -38,7 +38,7 @@ import { ReportingLanguage } from './LanguageControls';
 import type { LanguageReader, LanguageWriter, ReportingHost, ReportingPreset } from './language-settings';
 import { SeatsSection } from './SeatsPage';
 import type { AgentsSettingsForm } from './settings';
-import type { SeatsSettingsForm } from './seats';
+import type { SeatOverridesController, SeatsSettingsForm } from './seats';
 import type { QuotaAccountReport, QuotaReport, QuotaWindowReport, QuotaWindowState } from '../core/board/quota';
 import type { QuotaSection as QuotaRead, QuotaView } from './quota';
 
@@ -422,8 +422,8 @@ function QuotaSection({ quota, now, t }: { readonly quota: QuotaRead; readonly n
 }
 
 /** Hosts, then the sub-agents, then the seats that run on both: the order is the dependency order. Quota is per provider account, after them. */
-export function AgentsPage({ agents, seats, quota, readReportingLanguage, writeReportingLanguage, generation, ...props }: PageProps & {
-  readonly agents: AgentsSettingsForm; readonly seats: SeatsSettingsForm; readonly quota: QuotaRead;
+export function AgentsPage({ agents, seats, seatOverrides, quota, readReportingLanguage, writeReportingLanguage, generation, ...props }: PageProps & {
+  readonly agents: AgentsSettingsForm; readonly seats: SeatsSettingsForm; readonly seatOverrides: SeatOverridesController; readonly quota: QuotaRead;
   readonly readReportingLanguage: LanguageReader<readonly ReportingHost[]>; readonly writeReportingLanguage: LanguageWriter<ReportingPreset>; readonly generation: number;
 }) {
   return (
@@ -435,7 +435,7 @@ export function AgentsPage({ agents, seats, quota, readReportingLanguage, writeR
           <ReportingLanguage headingId="setup-language-heading" read={readReportingLanguage} write={writeReportingLanguage} generation={generation} t={props.t} />
         </Card>
         {snapshot && <FleetTable snapshot={snapshot} t={props.t} />}
-        <SeatsSection form={seats} agents={agents} setup={snapshot} quota={quota} t={props.t} />
+        <SeatsSection form={seats} overrides={seatOverrides} agents={agents} setup={snapshot} quota={quota} t={props.t} />
         <QuotaSection quota={quota} now={props.now} t={props.t} />
       </>}
     </SetupFrame>

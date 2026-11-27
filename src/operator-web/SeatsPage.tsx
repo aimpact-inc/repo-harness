@@ -1,14 +1,18 @@
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { Banner, Button, Empty, Loader, Switch, cn } from '@cloudflare/kumo';
+import { XIcon } from '@phosphor-icons/react';
+import { SEAT_OVERRIDE_INSTRUCTION_MAX_LENGTH, type SeatRouteOverrideV1 } from '../core/board/seat-overrides';
 import { effectiveSeatConfig, seatAccountQuotas, seatOnCredits } from '../core/board/seat-routing';
 import { EXHAUSTED_AT_OR_ABOVE_USED_RANGE } from '../core/board/quota';
 import { agySeatLimits, buildSeatLaunch, type SeatLimitLevel } from '../core/board/seat-launch';
-import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isRetiredSeatModel, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, retiredSeatModelField, seatHostId, type OptionalSeatId, type RoutingClass, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
+import { CODEX_CREDIT_MODES, MODEL_FAMILY_LABELS, PI_SUB_AGENT_DEFAULTS, SEAT_IDS, SEAT_SCAFFOLD_SUB_AGENTS, SEAT_TOOLS, decodeSeatsSettingsRequest, isAgyAllowedSeat, isClaudeOrNeonSeat, isCouncilSeat, isOptionalSeat, isRetiredSeatModel, isReviewSeat, isSeatScaffoldSubAgent, neonDeepSeatStarter, piSubAgentModel, retiredSeatModelField, seatHostId, type OptionalSeatId, type RoutingClass, type SeatConfigV1, type SeatId, type SeatRuntime, type SeatsConfigV1, type SeatsSettingsV1 } from '../core/board/seats-settings';
 import type { SetupSnapshotV2 } from '../core/setup/types';
+import { useModalFocus } from './Drawer';
 import type { OperatorTranslate } from './i18n';
+import { WriteReloadBanner, type OperatorWriteFailure } from './operator-write';
 import type { QuotaSection } from './quota';
 import {
-  GATEKEEPER_FALLBACK_STARTER, agyEffortMenu, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatsSettingsForm,
+  GATEKEEPER_FALLBACK_STARTER, agyEffortMenu, agyToolLocked, councilStarter, seatChanges, setExplorer, setOptionalSeat, setPiSubAgentModel, setRoute, setSeatAdvisorModel, setSeatEffort, setSeatModel, setSeatRole, setSeatRuntime, setRoutingValue, setSeatTool, type SeatOverridesController, type SeatsSettingsForm,
 } from './seats';
 import { EnableSwitch, formLocked, runtimeRowOf, SaveResult } from './SettingsPage';
 import type { AgentsSettingsForm } from './settings';
@@ -155,7 +159,7 @@ function InPlaceEnable({ runtime, agents, t }: { readonly runtime: SeatRuntime; 
   );
 }
 
-function SeatHeader({ seat, runtime, t }: { readonly seat: SeatId; readonly runtime: SeatRuntime | null; readonly t: OperatorTranslate }) {
+function SeatHeader({ seat, runtime, overridden = false, t }: { readonly seat: SeatId; readonly runtime: SeatRuntime | null; readonly overridden?: boolean; readonly t: OperatorTranslate }) {
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-kumo-hairline px-4 py-4 sm:px-5">
       <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-lg font-semibold',
@@ -166,6 +170,7 @@ function SeatHeader({ seat, runtime, t }: { readonly seat: SeatId; readonly runt
         <h2 id={`seat-${seat}-title`} className="text-base font-semibold text-kumo-strong">{t(`seats.${seat}.title`)}</h2>
         <span className="text-xs text-kumo-subtle">{t(`seats.${seat}.duty`)}</span>
       </div>
+      {overridden && <span data-seat-card-override={seat}><Badge className="bg-kumo-warning-tint text-kumo-warning">{t('seats.override.badge')}</Badge></span>}
       <Badge className="bg-kumo-fill text-kumo-subtle">{t(`seats.${seat}.count`)}</Badge>
     </div>
   );
@@ -190,15 +195,15 @@ function OptionalSeatSwitch({ seat, form, settings, locked, t }: {
   );
 }
 
-function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
+function SeatCard({ seat, form, agents, settings, setup, quota, locked, overridden, t }: {
   readonly seat: SeatId; readonly form: SeatsSettingsForm; readonly agents: AgentsSettingsForm; readonly settings: SeatsSettingsV1; readonly setup: SetupSnapshotV2 | null;
-  readonly quota: QuotaSection; readonly locked: boolean; readonly t: OperatorTranslate;
+  readonly quota: QuotaSection; readonly locked: boolean; readonly overridden: boolean; readonly t: OperatorTranslate;
 }) {
   const configured = form.draft![seat];
   if (configured === null) {
     return (
       <section aria-labelledby={`seat-${seat}-title`} data-seat-card={seat} className="flex flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-        <SeatHeader seat={seat} runtime={null} t={t} />
+        <SeatHeader seat={seat} runtime={null} overridden={overridden} t={t} />
         {isOptionalSeat(seat) && <OptionalSeatSwitch seat={seat} form={form} settings={settings} locked={locked} t={t} />}
       </section>
     );
@@ -249,7 +254,7 @@ function SeatCard({ seat, form, agents, settings, setup, quota, locked, t }: {
   ];
   return (
     <section aria-labelledby={`seat-${seat}-title`} data-seat-card={seat} className="flex flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-      <SeatHeader seat={seat} runtime={draft.runtime} t={t} />
+      <SeatHeader seat={seat} runtime={draft.runtime} overridden={overridden} t={t} />
       {isOptionalSeat(seat) && <OptionalSeatSwitch seat={seat} form={form} settings={settings} locked={locked} t={t} />}
 
       <Field label={t('seats.field.runtime')}>
@@ -468,14 +473,399 @@ function sectionRefusal(revision: string, seats: SeatsConfigV1): string | null {
   }
 }
 
+type OverrideErrorField = 'runtime' | 'model' | 'effort' | 'instruction';
+
+function overrideErrorField(code: string): OverrideErrorField | null {
+  if (
+    code === 'seat_runtime_not_enabled'
+    || code === 'seat_runtime_not_allowed'
+    || code === 'seat_tool_not_allowed'
+    || code === 'seat_fleet_not_allowed'
+  ) return 'runtime';
+  if (code === 'seat_model_invalid' || code === 'seat_model_retired') return 'model';
+  if (code === 'seat_effort_invalid' || code === 'seat_effort_unverified') return 'effort';
+  if (code === 'seat_override_instruction_invalid') return 'instruction';
+  return null;
+}
+
+function routeSummary(route: { readonly runtime: SeatRuntime; readonly model: string | null; readonly effort: string | null }, t: OperatorTranslate): string {
+  return [route.runtime, route.model ?? t('seats.model.hostDefault'), route.effort ?? t('seats.effort.default')].join(' · ');
+}
+
+function OverrideFailureInline({ failure, field, onReload, t }: {
+  readonly failure: OperatorWriteFailure;
+  readonly field?: OverrideErrorField;
+  readonly onReload: () => void;
+  readonly t: OperatorTranslate;
+}) {
+  if (failure.state === 'reload_required') return <WriteReloadBanner t={t} />;
+  const needsReload = failure.state === 'unreadable'
+    || (failure.state === 'refused' && (failure.error.code === 'revision_conflict' || failure.error.code === 'reconcile_required'));
+  const code = failure.state === 'refused' ? failure.error.code : failure.state;
+  return (
+    <div
+      role="alert"
+      data-override-error-code={code}
+      data-override-field-error={field}
+      data-override-dialog-error={field === undefined ? code : undefined}
+      className="flex flex-col gap-1.5 rounded-lg border border-kumo-danger/40 bg-kumo-danger-tint/40 px-3 py-2 text-xs text-kumo-danger"
+    >
+      {failure.state === 'refused' ? (
+        <>
+          <span className="font-medium">{failure.error.message}</span>
+          <span className="text-kumo-default">{failure.error.next_action}</span>
+        </>
+      ) : (
+        <span>{t(failure.state === 'unreachable' ? 'settings.unreachable' : 'settings.unreadable')}</span>
+      )}
+      {needsReload && (
+        <div>
+          <Button type="button" size="sm" variant="secondary" onClick={onReload} data-override-reload>
+            {t('settings.reload')}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SeatOverrideDialog({ seat, base, current, settings, expectedRevision, overrides, onClose, t }: {
+  readonly seat: SeatId;
+  readonly base: SeatConfigV1;
+  readonly current: SeatRouteOverrideV1 | undefined;
+  readonly settings: SeatsSettingsV1;
+  readonly expectedRevision: string;
+  readonly overrides: SeatOverridesController;
+  readonly onClose: () => void;
+  readonly t: OperatorTranslate;
+}) {
+  const initial = current ?? base;
+  const [runtime, setRuntime] = useState<SeatRuntime>(initial.runtime);
+  const [model, setModel] = useState(initial.model ?? '');
+  const [effort, setEffort] = useState<string | null>(initial.effort);
+  const [instruction, setInstruction] = useState(current?.instruction ?? '');
+  const [submitting, setSubmitting] = useState(false);
+  const [failure, setFailure] = useState<OperatorWriteFailure | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  useModalFocus({ dialogRef, closeRef, identity: `override:${seat}`, onClose: () => { if (!submitting) onClose(); } });
+
+  const { ranges } = settings;
+  const runtimeChoices = ranges.runtimes.filter(entry => entry.id !== 'agy' || isAgyAllowedSeat(seat));
+  const suggested = ranges.seats[seat].models.filter(entry => entry.runtime === runtime).map(entry => entry.model);
+  const trimmedModel = model.trim() === '' ? null : model.trim();
+  const agyMenu = runtime === 'agy' ? agyEffortMenu(trimmedModel, ranges.agy_models) : null;
+  const effortChoices = [
+    { value: null as string | null, label: t('seats.effort.default') },
+    ...(runtime === 'agy' ? agyMenu ?? [] : ranges.efforts).map(value => ({ value: value as string | null, label: value })),
+  ];
+  const modelChoices = [
+    ...(runtime === 'agy' ? [] : [{ value: '', label: t('seats.model.hostDefault') }]),
+    ...suggested.map(value => ({ value, label: value })),
+  ];
+
+  const fieldError = failure?.state === 'refused' ? overrideErrorField(failure.error.code) : null;
+  const dialogError = failure !== null && fieldError === null ? failure : null;
+
+  const pickRuntime = (next: SeatRuntime) => {
+    setFailure(null);
+    setRuntime(next);
+    if (next === 'agy') {
+      const nextModel = trimmedModel ?? ranges.seats[seat].models.find(entry => entry.runtime === 'agy')?.model ?? '';
+      setModel(nextModel);
+      const nextMenu = agyEffortMenu(nextModel === '' ? null : nextModel, ranges.agy_models);
+      if (effort !== null && !nextMenu?.includes(effort)) setEffort(null);
+    }
+  };
+
+  const pickModel = (next: string) => {
+    setFailure(null);
+    setModel(next);
+    if (runtime === 'agy' && effort !== null) {
+      const nextMenu = agyEffortMenu(next.trim() === '' ? null : next.trim(), ranges.agy_models);
+      if (!nextMenu?.includes(effort)) setEffort(null);
+    }
+  };
+
+  const handleSubmit = async (event: { preventDefault(): void }) => {
+    event.preventDefault();
+    if (submitting || instruction.trim().length === 0) return;
+    setSubmitting(true);
+    setFailure(null);
+    const outcome = await overrides.authorize({
+      expected_revision: expectedRevision,
+      seat,
+      runtime,
+      model: trimmedModel,
+      effort,
+      instruction: instruction.trim(),
+      owner_approved: true,
+    });
+    setSubmitting(false);
+    if (outcome.state === 'ok') {
+      onClose();
+      return;
+    }
+    setFailure(outcome);
+  };
+
+  const handleReload = () => {
+    setFailure(null);
+    overrides.reload();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <button type="button" tabIndex={-1} aria-label={t('seats.override.close')} className="fixed inset-0 cursor-default bg-black/35" onClick={() => { if (!submitting) onClose(); }} />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="seat-override-dialog-title"
+        data-seat-override-dialog={seat}
+        className="relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-kumo-default shadow-2xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-kumo-hairline px-4 py-3 sm:px-5">
+          <h3 id="seat-override-dialog-title" className="text-base font-semibold text-kumo-strong">
+            {t('seats.override.dialogTitle', { seat: `${t(`seats.${seat}.short`)} (${seat})` })}
+          </h3>
+          <button ref={closeRef} type="button" aria-label={t('seats.override.close')} disabled={submitting} onClick={onClose} className={ICON_BUTTON}>
+            <XIcon size={14} aria-hidden="true" />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="flex flex-col">
+          <Field label={t('seats.field.runtime')}>
+            <div className="flex min-w-0 flex-col gap-2">
+              <Segmented label={t('seats.field.runtime')} disabled={submitting} value={runtime}
+                options={runtimeChoices.map(entry => ({ value: entry.id, label: t(`seats.runtime.${entry.id}`) }))}
+                onPick={pickRuntime} />
+              {fieldError === 'runtime' && failure && <OverrideFailureInline failure={failure} field="runtime" onReload={handleReload} t={t} />}
+            </div>
+          </Field>
+
+          <Field label={t('seats.field.model')}>
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              {modelChoices.length > 0 && (
+                <Segmented label={t('seats.field.model')} disabled={submitting} value={model} options={modelChoices} onPick={pickModel} />
+              )}
+              <input
+                type="text"
+                value={model}
+                disabled={submitting}
+                aria-label={t('seats.override.routeInput')}
+                placeholder={runtime === 'pi' ? t('seats.override.routePlaceholderPi') : t('seats.override.routePlaceholder')}
+                spellCheck={false}
+                data-override-model-input
+                className={cn(MODEL_INPUT, 'w-full')}
+                onChange={event => pickModel(event.target.value)}
+              />
+              {fieldError === 'model' && failure && <OverrideFailureInline failure={failure} field="model" onReload={handleReload} t={t} />}
+            </div>
+          </Field>
+
+          <Field label={t('seats.field.effort')}>
+            <div className="flex min-w-0 flex-col gap-2">
+              <Segmented label={t('seats.field.effort')} disabled={submitting} value={effort} options={effortChoices}
+                onPick={next => { setFailure(null); setEffort(next); }} />
+              {fieldError === 'effort' && failure && <OverrideFailureInline failure={failure} field="effort" onReload={handleReload} t={t} />}
+            </div>
+          </Field>
+
+          <Field label={t('seats.override.route')}>
+            <span className="font-mono text-xs text-kumo-strong [overflow-wrap:anywhere]" data-override-route-preview>
+              {seat} → {routeSummary({ runtime, model: trimmedModel, effort }, t)}
+            </span>
+          </Field>
+
+          <Field label={t('seats.override.instruction')}>
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <input
+                type="text"
+                value={instruction}
+                maxLength={SEAT_OVERRIDE_INSTRUCTION_MAX_LENGTH}
+                disabled={submitting}
+                aria-label={t('seats.override.instruction')}
+                placeholder={t('seats.override.instructionPlaceholder')}
+                data-override-instruction
+                className={cn(MODEL_INPUT, 'w-full font-sans')}
+                onChange={event => { setFailure(null); setInstruction(event.target.value); }}
+              />
+              {fieldError === 'instruction' && failure && <OverrideFailureInline failure={failure} field="instruction" onReload={handleReload} t={t} />}
+            </div>
+          </Field>
+
+          {dialogError !== null && (
+            <div className="border-t border-kumo-hairline px-4 py-3 sm:px-5">
+              <OverrideFailureInline failure={dialogError} onReload={handleReload} t={t} />
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 border-t border-kumo-hairline px-4 py-3 sm:px-5">
+            <Button type="button" variant="ghost" disabled={submitting} onClick={onClose}>{t('seats.override.cancel')}</Button>
+            <Button type="submit" variant="primary" disabled={submitting || instruction.trim().length === 0} data-override-confirm>
+              {submitting ? t('seats.override.submitting') : t('seats.override.confirm')}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function SeatOverrideRevokeDialog({ seat, base, current, expectedRevision, overrides, onClose, t }: {
+  readonly seat: SeatId;
+  readonly base: SeatConfigV1;
+  readonly current: SeatRouteOverrideV1;
+  readonly expectedRevision: string;
+  readonly overrides: SeatOverridesController;
+  readonly onClose: () => void;
+  readonly t: OperatorTranslate;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [failure, setFailure] = useState<OperatorWriteFailure | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  useModalFocus({ dialogRef, closeRef, identity: `revoke:${seat}`, onClose: () => { if (!submitting) onClose(); } });
+
+  const handleRevoke = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setFailure(null);
+    const outcome = await overrides.revoke({
+      expected_revision: expectedRevision,
+      seat,
+      owner_approved: true,
+    });
+    setSubmitting(false);
+    if (outcome.state === 'ok') {
+      onClose();
+      return;
+    }
+    setFailure(outcome);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <button type="button" tabIndex={-1} aria-label={t('seats.override.close')} className="fixed inset-0 cursor-default bg-black/35" onClick={() => { if (!submitting) onClose(); }} />
+      <div
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="seat-override-revoke-title"
+        data-seat-override-revoke-dialog={seat}
+        className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-kumo-default shadow-2xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-kumo-hairline px-4 py-3 sm:px-5">
+          <h3 id="seat-override-revoke-title" className="text-base font-semibold text-kumo-strong">
+            {t('seats.override.revokeTitle', { seat: `${t(`seats.${seat}.short`)} (${seat})` })}
+          </h3>
+          <button ref={closeRef} type="button" aria-label={t('seats.override.close')} disabled={submitting} onClick={onClose} className={ICON_BUTTON}>
+            <XIcon size={14} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="flex flex-col gap-3 px-4 py-4 sm:px-5">
+          <p className="font-mono text-xs text-kumo-strong [overflow-wrap:anywhere]" data-override-revoke-preview>
+            {routeSummary(current, t)} → {routeSummary(base, t)}
+          </p>
+          {failure !== null && <OverrideFailureInline failure={failure} onReload={() => { setFailure(null); overrides.reload(); }} t={t} />}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-kumo-hairline px-4 py-3 sm:px-5">
+          <Button type="button" variant="ghost" disabled={submitting} onClick={onClose}>{t('seats.override.cancel')}</Button>
+          <Button type="button" variant="primary" disabled={submitting} onClick={handleRevoke} data-override-revoke-confirm>
+            {submitting ? t('seats.override.revoking') : t('seats.override.revokeConfirm')}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SeatRoutesSection({ baseSeats, overrides, onChangeRoute, onRevokeRoute, t }: {
+  readonly baseSeats: SeatsConfigV1;
+  readonly overrides: SeatOverridesController;
+  readonly onChangeRoute: (seat: SeatId) => void;
+  readonly onRevokeRoute: (seat: SeatId) => void;
+  readonly t: OperatorTranslate;
+}) {
+  const activeOverrides = overrides.view.kind === 'ready' ? overrides.view.response.overrides : {};
+  const overridesLocked = overrides.needsReload || overrides.view.kind !== 'ready';
+  return (
+    <section aria-labelledby="seats-routes-heading" className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base" data-seat-routes>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-kumo-hairline px-4 py-3 sm:px-5">
+        <h2 id="seats-routes-heading" className="text-base font-semibold text-kumo-strong">{t('seats.routes.title')}</h2>
+      </div>
+      {overrides.needsReload && <div className="border-b border-kumo-hairline p-3"><WriteReloadBanner t={t} /></div>}
+      {overrides.view.kind === 'unavailable' && (
+        <div className="border-b border-kumo-hairline p-3">
+          <Banner variant="error" data-seat-overrides-unavailable={overrides.view.reason}
+            title={t('seats.override.unavailable')} description={t(`settings.reason.${overrides.view.reason}`)} />
+        </div>
+      )}
+      <ul className="divide-y divide-kumo-hairline">
+        {SEAT_IDS.map((id) => {
+          const base = baseSeats[id];
+          const override = activeOverrides[id];
+          const effective = override ?? base;
+          return (
+            <li key={id} data-seat-route-row={id} data-seat-overridden={String(override !== undefined)}
+              className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5 sm:px-5">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-kumo-strong">{t(`seats.${id}.short`)}</span>
+                  <span className="font-mono text-xs text-kumo-subtle">{id}</span>
+                  {override !== undefined
+                    ? <span data-seat-override-badge={id}><Badge className="bg-kumo-warning-tint text-kumo-warning">{t('seats.override.badge')}</Badge></span>
+                    : base !== null
+                      ? <span data-seat-catalog-badge={id}><Badge className="bg-kumo-fill text-kumo-subtle">{t('seats.override.catalog')}</Badge></span>
+                      : null}
+                </div>
+                {effective === null ? (
+                  <span className="text-xs text-kumo-subtle">{t('seats.routes.unconfigured')}</span>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-xs text-kumo-default">
+                    <span data-seat-route-runtime>{effective.runtime}</span>
+                    <span className="text-kumo-subtle">·</span>
+                    <span className="[overflow-wrap:anywhere]" data-seat-route-model>{effective.model ?? t('seats.model.hostDefault')}</span>
+                    <span className="text-kumo-subtle">·</span>
+                    <span data-seat-route-effort>{effective.effort ?? t('seats.effort.default')}</span>
+                  </div>
+                )}
+                {override !== undefined && (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-kumo-subtle" data-seat-override-meta={id}>
+                    <span className="text-kumo-default [overflow-wrap:anywhere]" data-seat-override-instruction>{override.instruction}</span>
+                    <span>·</span>
+                    <time dateTime={override.authorized_at} className="font-mono" data-seat-override-time>{override.authorized_at}</time>
+                  </div>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button type="button" size="sm" variant="secondary" disabled={base === null || overridesLocked}
+                  onClick={() => onChangeRoute(id)} data-seat-override-change={id}>
+                  {t('seats.override.change')}
+                </Button>
+                {override !== undefined && (
+                  <Button type="button" size="sm" variant="ghost" disabled={overridesLocked}
+                    onClick={() => onRevokeRoute(id)} data-seat-override-revoke={id}>
+                    {t('seats.override.revoke')}
+                  </Button>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 /** The seats section of the Agents page. `agents` is the Hosts form, whose switch shows in place for a runtime that is not enabled. */
-export function SeatsSection({ form, agents, setup, quota, t }: {
-  readonly form: SeatsSettingsForm; readonly agents: AgentsSettingsForm; readonly setup: SetupSnapshotV2 | null; readonly quota: QuotaSection; readonly t: OperatorTranslate;
+export function SeatsSection({ form, overrides, agents, setup, quota, t }: {
+  readonly form: SeatsSettingsForm; readonly overrides: SeatOverridesController; readonly agents: AgentsSettingsForm; readonly setup: SetupSnapshotV2 | null; readonly quota: QuotaSection; readonly t: OperatorTranslate;
 }) {
   return (
     <section aria-labelledby="agents-seats-heading" className="flex min-w-0 flex-col gap-4" data-agents-section="seats">
       <SectionTitle id="agents-seats-heading">{t('seats.title')}</SectionTitle>
-      <SeatsBody form={form} agents={agents} setup={setup} quota={quota} t={t} />
+      <SeatsBody form={form} overrides={overrides} agents={agents} setup={setup} quota={quota} t={t} />
     </section>
   );
 }
@@ -512,10 +902,12 @@ function SeatModelPool({ cache, seat, t }: {
   );
 }
 
-function SeatsBody({ form, agents, setup, quota, t }: {
-  readonly form: SeatsSettingsForm; readonly agents: AgentsSettingsForm; readonly setup: SetupSnapshotV2 | null; readonly quota: QuotaSection; readonly t: OperatorTranslate;
+function SeatsBody({ form, overrides, agents, setup, quota, t }: {
+  readonly form: SeatsSettingsForm; readonly overrides: SeatOverridesController; readonly agents: AgentsSettingsForm; readonly setup: SetupSnapshotV2 | null; readonly quota: QuotaSection; readonly t: OperatorTranslate;
 }) {
   const [seat, setSeat] = useState<SeatId>('advisor');
+  const [overrideTarget, setOverrideTarget] = useState<SeatId | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<SeatId | null>(null);
   const { view, draft, base } = form;
   if (view.kind === 'loading') return <Empty size="sm" icon={<Loader />} title={t('settings.pending.title')} />;
   if (view.kind === 'unavailable') {
@@ -523,6 +915,9 @@ function SeatsBody({ form, agents, setup, quota, t }: {
   }
   const { settings } = view;
   const locked = formLocked(form);
+  const activeOverrides = overrides.view.kind === 'ready' ? overrides.view.response.overrides : {};
+  const overrideRevision = overrides.view.kind === 'ready' ? overrides.view.response.config_revision : settings.config.revision;
+  const storedBase = base ?? settings.config;
   const changedElsewhere = base !== null && form.request !== null && form.save.kind !== 'saving' && settings.config.revision !== base.revision;
   const changes = base !== null && draft !== null ? seatChanges(base, draft) : 0;
   const notEnabled = draft === null ? [] : SEAT_IDS.flatMap((id) => {
@@ -531,6 +926,9 @@ function SeatsBody({ form, agents, setup, quota, t }: {
   });
   const refused = draft === null ? null : sectionRefusal(settings.config.revision, draft);
   const retiredField = draft === null ? null : retiredSeatModelField(draft);
+  const dialogBase = overrideTarget === null ? null : storedBase[overrideTarget];
+  const revokeBase = revokeTarget === null ? null : storedBase[revokeTarget];
+  const revokeCurrent = revokeTarget === null ? undefined : activeOverrides[revokeTarget];
   return (
     <div className="flex flex-col gap-5" data-seats-page>
       <p className="text-sm text-kumo-subtle">{t('seats.lead')}</p>
@@ -544,14 +942,17 @@ function SeatsBody({ form, agents, setup, quota, t }: {
             <div key={tab} className="flex min-w-0 flex-[1_1_300px] flex-col gap-2 rounded-xl border border-kumo-line bg-kumo-base p-2.5">
               <span className="font-mono text-xs text-kumo-subtle">{t('seats.layout.tab', { n: tab + 1 })}</span>
               <div className="flex gap-1.5">
-                {panes.map((id, index) => (
-                  <button key={index} type="button" aria-pressed={id === seat} onClick={() => setSeat(id)} data-pane={id}
-                    className={cn('flex min-w-0 flex-1 cursor-pointer flex-col items-start gap-0.5 rounded-lg border px-2.5 py-2 text-left',
-                      id === seat ? 'border-(--rh-accent) bg-(--rh-accent-tint)' : 'border-kumo-line bg-kumo-recessed hover:border-kumo-subtle')}>
-                    <b className="text-sm font-semibold text-kumo-strong">{t(`seats.${id}.short`)}</b>
-                    {draft && <span className="w-full truncate text-xs text-kumo-subtle">{[draft[id].runtime, draft[id].model ?? t('seats.model.hostDefault')].join(' · ')}</span>}
-                  </button>
-                ))}
+                {panes.map((id, index) => {
+                  const effective = activeOverrides[id] ?? draft?.[id];
+                  return (
+                    <button key={index} type="button" aria-pressed={id === seat} onClick={() => setSeat(id)} data-pane={id}
+                      className={cn('flex min-w-0 flex-1 cursor-pointer flex-col items-start gap-0.5 rounded-lg border px-2.5 py-2 text-left',
+                        id === seat ? 'border-(--rh-accent) bg-(--rh-accent-tint)' : 'border-kumo-line bg-kumo-recessed hover:border-kumo-subtle')}>
+                      <b className="text-sm font-semibold text-kumo-strong">{t(`seats.${id}.short`)}</b>
+                      {effective && <span className="w-full truncate text-xs text-kumo-subtle">{[effective.runtime, effective.model ?? t('seats.model.hostDefault')].join(' · ')}</span>}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -559,9 +960,17 @@ function SeatsBody({ form, agents, setup, quota, t }: {
         <p className="flex flex-wrap items-center gap-2 text-xs text-kumo-subtle"><Badge className="bg-kumo-fill text-kumo-subtle">{t('seats.layout.ruleBadge')}</Badge>{t('seats.layout.rule')}</p>
       </section>
 
+      <SeatRoutesSection
+        baseSeats={storedBase}
+        overrides={overrides}
+        onChangeRoute={setOverrideTarget}
+        onRevokeRoute={setRevokeTarget}
+        t={t}
+      />
+
       {draft !== null && <>
         <Segmented label={t('seats.pick')} disabled={false} value={seat} options={SEAT_IDS.map(id => ({ value: id, label: t(`seats.${id}.short`) }))} onPick={setSeat} />
-        <SeatCard seat={seat} form={form} agents={agents} settings={settings} setup={setup} quota={quota} locked={locked} t={t} />
+        <SeatCard seat={seat} form={form} agents={agents} settings={settings} setup={setup} quota={quota} locked={locked} overridden={activeOverrides[seat] !== undefined} t={t} />
         <SeatModelPool seat={seat} cache={settings.model_pool} t={t} />
         <section aria-labelledby="seats-pi-models-heading" className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
           <h2 id="seats-pi-models-heading" className="border-b border-kumo-hairline px-4 py-3 text-base font-semibold text-kumo-strong sm:px-5">{t('seats.piModels.title')}</h2>
@@ -605,6 +1014,29 @@ function SeatsBody({ form, agents, setup, quota, t }: {
         </Button>
       </div>
       <p className="text-xs text-kumo-subtle">{t('seats.footnote')}</p>
+      {overrideTarget !== null && dialogBase !== null && (
+        <SeatOverrideDialog
+          seat={overrideTarget}
+          base={dialogBase}
+          current={activeOverrides[overrideTarget]}
+          settings={settings}
+          expectedRevision={overrideRevision}
+          overrides={overrides}
+          onClose={() => setOverrideTarget(null)}
+          t={t}
+        />
+      )}
+      {revokeTarget !== null && revokeBase !== null && revokeCurrent !== undefined && (
+        <SeatOverrideRevokeDialog
+          seat={revokeTarget}
+          base={revokeBase}
+          current={revokeCurrent}
+          expectedRevision={overrideRevision}
+          overrides={overrides}
+          onClose={() => setRevokeTarget(null)}
+          t={t}
+        />
+      )}
     </div>
   );
 }

@@ -13,7 +13,20 @@ import { fetchBoard, fetchBoardParents, fetchBoardSeats, useBoard, useBoardParen
 import { fetchBotAccess, fetchBotReviews, useBotAccess, useBotReviews, type BotAccessReader, type BotReviewsReader } from './bots';
 import { BotsFreshness, BotsPage } from './BotsPage';
 import { fetchAgentsSettings, postAgentsSettings, useAgentsSettingsForm, type AgentsSettingsReader, type AgentsSettingsWriter } from './settings';
-import { fetchSeatsSettings, postSeatsSettings, useSeatsSettingsForm, type SeatsSettingsReader, type SeatsSettingsWriter } from './seats';
+import {
+  fetchSeatOverrides,
+  fetchSeatsSettings,
+  postSeatOverride,
+  postSeatOverrideRevoke,
+  postSeatsSettings,
+  useSeatOverrides,
+  useSeatsSettingsForm,
+  type SeatOverrideRevoker,
+  type SeatOverrideSetter,
+  type SeatOverridesReader,
+  type SeatsSettingsReader,
+  type SeatsSettingsWriter,
+} from './seats';
 import { fetchQuota, useQuota, type QuotaReader } from './quota';
 import {
   fetchDevActivity,
@@ -140,6 +153,10 @@ export interface OperatorAppProps {
   /** The seats section and its ranges behind the Agents page Seats section, and its one write. */
   readonly readSeatsSettings?: SeatsSettingsReader;
   readonly writeSeatsSettings?: SeatsSettingsWriter;
+  /** Owner-authorized seat route overrides behind the Agents page Seats section (#3643). */
+  readonly readSeatOverrides?: SeatOverridesReader;
+  readonly writeSeatOverride?: SeatOverrideSetter;
+  readonly revokeSeatOverride?: SeatOverrideRevoker;
   /** The quota read model behind the Agents page Quota section and the Board attention rows: read when either page opens and on Refresh. */
   readonly readQuota?: QuotaReader;
   /** The read-only tests page's snapshot read, injectable on the same terms. */
@@ -355,6 +372,9 @@ export function OperatorApp({
   writeDocumentationLanguage = postDocumentationLanguage,
   readSeatsSettings = fetchSeatsSettings,
   writeSeatsSettings = postSeatsSettings,
+  readSeatOverrides = fetchSeatOverrides,
+  writeSeatOverride = postSeatOverride,
+  revokeSeatOverride = postSeatOverrideRevoke,
   readQuota = fetchQuota,
   readTests = fetchTestsSnapshot,
   readRules = fetchRulesSnapshot,
@@ -413,9 +433,12 @@ export function OperatorApp({
   const botReviews = useBotReviews(readBotReviews, refreshGeneration, workspace === 'bots');
   // Both sections are one file with one revision: a save of either one makes the other read again.
   const [agentsSaves, setAgentsSaves] = useState(0);
-  const seatsSettings = useSeatsSettingsForm(readSeatsSettings, writeSeatsSettings, refreshGeneration, agentsSaves, workspace === 'agents');
-  const agentsSettings = useAgentsSettingsForm(readAgentsSettings, writeAgentsSettings, refreshGeneration, seatsSettings.saves, workspace === 'agents');
+  const [overrideSaves, setOverrideSaves] = useState(0);
+  const seatsSettings = useSeatsSettingsForm(readSeatsSettings, writeSeatsSettings, refreshGeneration, agentsSaves + overrideSaves, workspace === 'agents');
+  const agentsSettings = useAgentsSettingsForm(readAgentsSettings, writeAgentsSettings, refreshGeneration, seatsSettings.saves + overrideSaves, workspace === 'agents');
+  const seatOverrides = useSeatOverrides(readSeatOverrides, writeSeatOverride, revokeSeatOverride, refreshGeneration, agentsSettings.saves + seatsSettings.saves, workspace === 'agents');
   if (agentsSettings.saves !== agentsSaves) setAgentsSaves(agentsSettings.saves);
+  if (seatOverrides.saves !== overrideSaves) setOverrideSaves(seatOverrides.saves);
   // Agents, Skills and Hooks share one cached setup check result; it is read only while one of them shows.
   const setup = useSetup(readSetup, initialSetup, refreshGeneration, (SETUP_WORKSPACES as readonly Workspace[]).includes(workspace));
   const cliInventory = useCliInventory(readCliInventory, initialCliInventory, refreshGeneration, workspace === 'cli');
@@ -569,7 +592,7 @@ export function OperatorApp({
           {worktreesMounted && <div hidden={workspace !== 'worktrees'}>
             <WorktreesPage view={worktrees} cleanup={worktreeCleanup} plan={worktreeCleanupPlan} now={now} t={t} />
           </div>}
-          {workspace === 'agents' && <AgentsPage view={setup} agents={agentsSettings} seats={seatsSettings} quota={quota} readReportingLanguage={readReportingLanguage} writeReportingLanguage={writeReportingLanguage} generation={refreshGeneration} now={now} t={t} />}
+          {workspace === 'agents' && <AgentsPage view={setup} agents={agentsSettings} seats={seatsSettings} seatOverrides={seatOverrides} quota={quota} readReportingLanguage={readReportingLanguage} writeReportingLanguage={writeReportingLanguage} generation={refreshGeneration} now={now} t={t} />}
           {workspace === 'skills' && <SkillsPage view={setup} now={now} t={t} onOpenTool={id => openPlace({ workspace: 'tools', module: null, item: id })} />}
           {workspace === 'hooks' && <HooksPage view={setup} now={now} t={t} />}
           {workspace === 'cli' && <CliPage view={cliInventory} now={now} t={t} onOpenTool={id => openPlace({ workspace: 'tools', module: null, item: id })} />}

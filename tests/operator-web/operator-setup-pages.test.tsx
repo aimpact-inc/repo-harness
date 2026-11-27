@@ -53,6 +53,7 @@ function props(setup: SetupSnapshotV2 | null, overrides: Partial<OperatorAppProp
     readBotAccess: () => new Promise(() => {}),
     readAgentsSettings: () => new Promise(() => {}),
     readSeatsSettings: () => new Promise(() => {}),
+    readSeatOverrides: () => new Promise(() => {}),
     readQuota: () => new Promise(() => {}),
     readTests: async () => ({ state: 'unavailable', reason: 'tests_pending' }),
     ...(setup ? { initialSetup: setup, readSetup: async () => setup } : {}),
