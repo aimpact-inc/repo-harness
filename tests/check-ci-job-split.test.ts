@@ -1495,8 +1495,8 @@ describe('released CHANGELOG sections', () => {
     expect(sections.has('Unreleased')).toBe(false);
   });
 
-  // A section counts as released only with its `v<version>` tag: a version heading that no tag holds is
-  // still unreleased, so both fixture sections are tagged here.
+  // A section counts as released in the rule's own sense: the set is an input, and the fixtures tag the
+  // newest one where the case needs it. Every older section is in the set.
   const TAGGED = new Set(['0.31.0', '0.30.0']);
 
   test('an entry that a merge placed inside a released section is drift', () => {
@@ -1512,33 +1512,40 @@ describe('released CHANGELOG sections', () => {
   test('a removed released section is drift, and a duplicate version heading fails closed', () => {
     const removed = CHANGELOG.replace(/## \[0\.30\.0\][\s\S]*$/, '');
     expect(sectionDrift(CHANGELOG, removed, TAGGED)).toEqual([{ version: '0.30.0', reason: 'removed' }]);
-    // The same removal with no tag on that section is free, because the section is not released yet.
+    // Only the versions the caller lists are guarded, so the newest untagged section is left out.
     expect(sectionDrift(CHANGELOG, removed, new Set(['0.31.0']))).toEqual([]);
     expect(() => releasedSections(`${CHANGELOG}\n## [0.31.0] - 2026-11-13\n`)).toThrow('two sections for version 0.31.0');
   });
 
-  // #3639 prepared an `[0.38.0]` section above a tagged release, the owner withdrew it, and the withdrawing
-  // revert could not pass a check that read the untagged heading as released. (#3642)
-  test('a base section counts as released only with its version tag, and a checkout without tags fails closed', () => {
-    const { repo, git, write, commit } = cutoverRepository('rh-changelog-tags-');
+  // #3639 prepared an `[0.38.0]` section above the tagged 0.37.5 one, the owner withdrew it, and the withdrawing
+  // revert could not pass a check that read the untagged newest heading as released. (#3642)
+  test('the newest base section is unreleased without its tag, every older section stays released, and a tagless checkout fails closed', () => {
+    const { repo, git, write, commit } = cutoverRepository('rh-changelog-newest-section-');
     try {
       write('docs/CHANGELOG.md', CUT);
       const base = commit('the base');
-      // The base holds two version headings and no tag. Passing here would leave both sections unprotected.
+      // The base holds two version headings and no tag, so the newest one cannot be shown as released.
       expect(() => checkReleasedSections(base, base, repo)).toThrow('holds no v<x.y.z> release tag');
-      git('tag', 'v0.30.0', base);
       git('checkout', '-q', '-b', 'withdraw');
-      // The untagged section is withdrawn, as the 0.38.0 revert does with its unreleased section.
+      // The newest section is withdrawn, as the 0.38.0 revert does with its unreleased section.
       write('docs/CHANGELOG.md', CUT.replace(/## \[0\.31\.0\][\s\S]*?(?=## \[0\.30\.0\])/u, ''));
-      const head = commit('withdraw the untagged section');
-      const report = checkReleasedSections(base, head, repo);
-      expect(report.drift).toEqual([]);
-      expect(report.fragmentFaults).toEqual([]);
-      expect(report.untaggedSections).toEqual(['0.31.0']);
-      expect(report.sectionsAtBase).toBe(1);
-      // The same head drifts once that version holds its tag, so the tag is the only difference.
+      const withdrawn = commit('withdraw the newest section');
+      git('checkout', '-q', '-b', 'edit', base);
+      write('docs/CHANGELOG.md', CUT.replace('- Older entry. (#2)', '- Older entry. (#2) and a second sentence.'));
+      const edited = commit('edit the older section');
+      // One tag exists and it names no section: the newest heading is still open, and the older one is guarded.
+      git('tag', 'v0.25.0', base);
+      const open = checkReleasedSections(base, withdrawn, repo);
+      expect(open.drift).toEqual([]);
+      expect(open.unreleasedSections).toEqual(['0.31.0']);
+      expect(open.sectionsAtBase).toBe(1);
+      expect(checkReleasedSections(base, edited, repo).drift).toEqual([{ version: '0.30.0', reason: 'changed' }]);
+      // A tag on the newest section releases it, so the same withdrawal drifts and nothing stays open.
       git('tag', 'v0.31.0', base);
-      expect(checkReleasedSections(base, head, repo).drift).toEqual([{ version: '0.31.0', reason: 'removed' }]);
+      const tagged = checkReleasedSections(base, withdrawn, repo);
+      expect(tagged.unreleasedSections).toEqual([]);
+      expect(tagged.sectionsAtBase).toBe(2);
+      expect(tagged.drift).toEqual([{ version: '0.31.0', reason: 'removed' }]);
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
@@ -1567,13 +1574,11 @@ describe('released CHANGELOG sections', () => {
       git('checkout', '-q', 'main');
       const base = commit('docs/CHANGELOG.md', RELEASE, 'release 0.32.0');
       // git places the branch hunk by its context lines, so the entry lands inside the released 0.32.0 section.
-      // Each section is released only with its tag, so tag the three versions the fixture holds.
-      git('tag', 'v0.31.0', before);
-      git('tag', 'v0.30.0', before);
+      // The newest section is released only with its tag; the older sections stay released without one.
       git('tag', 'v0.32.0', base);
       const report = checkReleasedSections(base, head, repo);
       expect(report.sectionsAtBase).toBe(3);
-      expect(report.untaggedSections).toEqual([]);
+      expect(report.unreleasedSections).toEqual([]);
       expect(report.drift).toEqual([{ version: '0.32.0', reason: 'changed' }]);
       // The same head against the pre-release base keeps the entry under [Unreleased], so there is no drift:
       // the release commit, not the branch, moved the entry into a released section.

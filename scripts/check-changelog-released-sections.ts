@@ -2,10 +2,11 @@
 /**
  * Fails when a PR changes the bytes of a released `docs/CHANGELOG.md` section. (#2622)
  *
- * A base section counts as released only when the repository holds its `refs/tags/v<version>` tag, so a
- * version heading that no tag holds yet is an unreleased section that may still change or be withdrawn.
- * A repository that holds base sections and no `v<x.y.z>` tag fails closed instead of passing with every
- * section unprotected.
+ * A base section counts as released unless it is the newest version heading of the base and the repository
+ * holds no `refs/tags/v<version>` tag for it. Release prep adds that newest section, so between its merge
+ * and the tag it may still change or be withdrawn; every older section stays released, tagged or not. A
+ * checkout that holds base sections and no `v<x.y.z>` tag at all fails closed, because then the newest
+ * section cannot be shown as released.
  *
  * The check reads the merge result of the PR base and the head, not the merge
  * base of the branch. A branch that started before a release commit keeps its
@@ -64,10 +65,10 @@ export interface ReleasedSectionReport {
   readonly baseSha: string;
   readonly headSha: string;
   readonly mergeTree: string;
-  /** The base sections that hold a `v<version>` tag, so the merge result must keep their bytes. */
+  /** The base sections that the merge result must keep their bytes: every section but an untagged newest one. */
   readonly sectionsAtBase: number;
-  /** The base sections with no `v<version>` tag: they are unreleased and may still change or be withdrawn. */
-  readonly untaggedSections: readonly string[];
+  /** The case the merge result may still change: the newest base section when no `v<version>` tag holds it. */
+  readonly unreleasedSections: readonly string[];
   readonly drift: readonly SectionDrift[];
   /** Text above the first released section other than the preamble, or a path under the fragment directory that does not parse. */
   readonly fragmentFaults: readonly string[];
@@ -111,8 +112,18 @@ export function releasedSections(text: string): ReleasedSections {
 }
 
 /**
- * The base sections that the merge result does not hold with the same bytes. Only a tagged section is
- * released: an untagged base section is unreleased, so a merge result may change or remove it.
+ * The base sections that the merge result must keep: every section except the newest one while no
+ * `v<version>` tag holds it. The newest heading is the section that release prep adds, and the older
+ * sections stay released whether or not the repository holds their tag.
+ */
+export function releasedBaseSections(sections: ReleasedSections, tags: ReadonlySet<string>): ReadonlySet<string> {
+  const versions = [...sections.keys()];
+  return new Set(versions.filter((version, index) => index > 0 || tags.has(version)));
+}
+
+/**
+ * The base sections that the merge result does not hold with the same bytes. A section that
+ * `releasedBaseSections` leaves out is still unreleased, so a merge result may change or remove it.
  */
 export function sectionDrift(baseText: string, mergedText: string, released: ReadonlySet<string>): SectionDrift[] {
   const merged = releasedSections(mergedText);
@@ -192,23 +203,24 @@ export function checkReleasedSections(base: string, head = 'HEAD', repoRoot = pr
   const mergedText = fileAt(repoRoot, tree, CHANGELOG) ?? '';
   const baseText = fileAt(repoRoot, baseSha, CHANGELOG);
   const faults = fragmentFaults(repoRoot, tree, mergedText, baseText);
-  if (baseText === null) return { baseSha, headSha, mergeTree: tree, sectionsAtBase: 0, untaggedSections: [], drift: [], fragmentFaults: faults };
+  if (baseText === null) return { baseSha, headSha, mergeTree: tree, sectionsAtBase: 0, unreleasedSections: [], drift: [], fragmentFaults: faults };
+  const baseSections = releasedSections(baseText);
   const tags = releaseTags(repoRoot);
-  const versions = [...releasedSections(baseText).keys()];
-  // A checkout without the tags would count every section as unreleased and pass without protecting one.
-  if (versions.length > 0 && tags.size === 0) {
-    throw new Error(`${repoRoot} holds no v<x.y.z> release tag, so no section of ${CHANGELOG} counts as released and this check would pass without protecting one; fetch the tags before this check`);
+  // A checkout without the tags would read the newest section as never released and leave it unprotected.
+  if (baseSections.size > 0 && tags.size === 0) {
+    throw new Error(`${repoRoot} holds no v<x.y.z> release tag, so this check cannot tell whether the newest section of ${CHANGELOG} is released and would leave it unprotected; fetch the tags before this check`);
   }
-  const untaggedSections = versions.filter((version) => !tags.has(version));
-  const drift = sectionDrift(baseText, mergedText, tags);
-  return { baseSha, headSha, mergeTree: tree, sectionsAtBase: versions.length - untaggedSections.length, untaggedSections, drift, fragmentFaults: faults };
+  const released = releasedBaseSections(baseSections, tags);
+  const unreleasedSections = [...baseSections.keys()].filter((version) => !released.has(version));
+  const drift = sectionDrift(baseText, mergedText, released);
+  return { baseSha, headSha, mergeTree: tree, sectionsAtBase: released.size, unreleasedSections, drift, fragmentFaults: faults };
 }
 
 /** The error text that names the fault and the fix. */
 export function driftMessage(report: ReleasedSectionReport): string {
   const sections = report.drift.map(({ version, reason }) => `${version} (${reason})`).join(', ');
   return `the merge result of ${report.baseSha} and ${report.headSha} does not keep the bytes of the ${CHANGELOG} section(s) released at the base: ${sections}.`
-    + ' A base section counts as released when the repository holds its `refs/tags/v<version>` tag.'
+    + ' A base section counts as released unless it is the newest one and no `refs/tags/v<version>` tag holds it.'
     + ' A git merge placed an entry inside a released section, most often an [Unreleased] entry of a branch that started before a release commit.'
     + ` Rebase the branch on the base and move the entry into ${FRAGMENT_PATH_FORM}. A correction of released notes goes through a release PR or a fragment that names the correction.`;
 }
@@ -242,7 +254,7 @@ if (import.meta.main) {
     if (report.fragmentFaults.length > 0) process.stderr.write(`[changelog] ${fragmentMessage(report)}\n`);
     if (report.drift.length > 0 || report.fragmentFaults.length > 0) process.exit(1);
     console.log(`[changelog] all ${report.sectionsAtBase} released sections of ${CHANGELOG} keep their bytes in the merge result ${report.mergeTree}, and its fragments follow ${FRAGMENT_PATH_FORM}.`
-      + (report.untaggedSections.length === 0 ? '' : ` The base holds ${report.untaggedSections.length} section(s) with no v<version> tag, so they may still change: ${report.untaggedSections.join(', ')}.`));
+      + (report.unreleasedSections.length === 0 ? '' : ` The newest base section ${report.unreleasedSections.join(', ')} holds no v<version> tag, so it may still change.`));
   } catch (thrown) {
     process.stderr.write(`[changelog] ${thrown instanceof Error ? thrown.message : String(thrown)}\n`);
     process.exit(1);
