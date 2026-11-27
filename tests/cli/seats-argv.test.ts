@@ -688,6 +688,33 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
     rmSync(dirname(out.members[0].out_path), { recursive: true, force: true });
   }));
 
+  test("seats council honors stored seats.council.runtime=agy for carbon while pi and magpie are installed, keeping fable and astra on their routes (#3587)", withAgySeat(f => {
+    mkdirSync(join(f.home, ".pi", "agent", "extensions"), { recursive: true });
+    writeFileSync(join(f.home, ".pi", "agent", "extensions", "magpie.ts"), "");
+    writeFileSync(join(f.home, "bin", "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+    // Without seats.council on agy, pi + magpie still selects the magpie route for carbon.
+    const magpieDry = f.run(["council", "--issue", "3587", "--members", "fable,carbon,astra", "--repository-id", "1186405141", "--dry-run", "--json"]);
+    expect(magpieDry.status, magpieDry.stderr).toBe(0);
+    expect(JSON.parse(magpieDry.stdout).members).toEqual([
+      expect.objectContaining({ member: "fable", runtime: "claude", model: "fable" }),
+      expect.objectContaining({ member: "carbon", runtime: "pi", model: "magpie/agy-cli/gemini-4-carbon" }),
+      expect.objectContaining({ member: "astra", runtime: "pi", model: "magpie/codex/gpt-6.2-astra" }),
+    ]);
+
+    // With seats.council.runtime=agy, carbon honors native agy while fable and astra keep their routes.
+    f.configure(AGY_ADVISOR, true, {
+      council: { runtime: "agy", model: "gemini-4-carbon-high", advisor_model: null, effort: null, tools: ["net", "read", "shell"], fleet: [] },
+    });
+    const agyDry = f.run(["council", "--issue", "3587", "--members", "fable,carbon,astra", "--repository-id", "1186405141", "--dry-run", "--json"]);
+    expect(agyDry.status, agyDry.stderr).toBe(0);
+    expect(JSON.parse(agyDry.stdout).members).toEqual([
+      expect.objectContaining({ member: "fable", runtime: "claude", model: "fable" }),
+      expect.objectContaining({ member: "carbon", runtime: "agy", model: "gemini-4-carbon-high" }),
+      expect.objectContaining({ member: "astra", runtime: "pi", model: "magpie/codex/gpt-6.2-astra" }),
+    ]);
+  }));
+
   test("an uncertain tab request stays uncertain and keeps the first task private", withAgySeat(f => {
     const task = "Private first turn";
     const result = f.run(agyTabArgs(f.cwd, task), { AGY_HERDR_FAIL: "1" });
