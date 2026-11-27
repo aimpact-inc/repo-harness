@@ -15,7 +15,6 @@ source:
     - src/cli/commands/herdr-skill-render.d.mts
     - src/cli/index.ts
     - src/cli/commands/global-runtime.ts
-    - src/cli/commands/candidate-reconciliation.ts
     - src/cli/tty-prompt.ts
     - src/cli/commands/validators.ts
     - src/cli/commands/doctor.ts
@@ -26,7 +25,6 @@ source:
   exclude:
     - src/cli/commands/architecture-configuration.ts
     - src/cli/commands/architecture-projection.ts
-    - src/cli/commands/candidate-reconciliation.ts
     - src/cli/commands/doctor.ts
     - src/cli/commands/global-runtime.ts
     - src/cli/commands/setup-check.ts
