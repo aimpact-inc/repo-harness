@@ -28,3 +28,19 @@ source:
             - id: sink.hook-adapters.stop-handler
               path: "src/cli/hook/stop-handler.ts"
               symbol: "runStopHandler"
+    - id: entrypoint.hook-adapters.runtime
+      path: "src/cli/hook/runtime.ts"
+      symbols:
+        - name: "runHook"
+          sinks:
+            - id: sink.hook-adapters.runtime-handler
+              path: "src/cli/hook/handler-registry.ts"
+              symbol: "getHandlerForRoute"
+    - id: entrypoint.hook-adapters.event-telemetry
+      path: "src/cli/hook/event-telemetry.ts"
+      symbols:
+        - name: "createHookEventTelemetry"
+          sinks:
+            - id: sink.hook-adapters.telemetry-log
+              path: "src/effects/segmented-log.ts"
+              symbol: "appendSegmentedLog"
