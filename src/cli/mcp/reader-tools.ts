@@ -11,6 +11,8 @@ import type { GeneralRepoCodeGraphAdapter } from '../tools/codegraph-reader';
 import { repoHarnessRepoIdFor } from '../../effects/repo-registry';
 import type { McpPolicy } from './types';
 
+export { numberArg };
+
 export interface ReaderToolDefinition {
   name: string;
   description: string;

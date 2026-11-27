@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.ea3947f033c55a55",
+  "fingerprint": "sha256:f74f53e56a88500b75e5509d357e89d8c7c1e9ebd999be9b253bd938650ed82e",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "entrypoint-bypass",
+  "subject": {
+    "selectorKind": "node",
+    "stableKey": "node:capability.workflow-engine.execution-primitives",
+    "subjectSelectorId": "subject.node.92361d274a72e0fe"
+  },
+  "affectedNodeIds": [
+    "capability.workflow-engine.execution-primitives"
+  ],
+  "affectedNodeCount": 1,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "entrypointBypassCount": 26
+  },
+  "reason": "Assigned src/effects/path-containment.ts to component.execution-primitives.checkout-filesystem and src/core/shell-quote.ts to component.execution-primitives.shell-quote (#3580).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-27T08:40:04.000Z",
+  "provenance": {
+    "headSha": "62d830741f43be8d22a766c97d86bc6db4ea12e2",
+    "assessmentDigest": "sha256:5db1ab19c42a25bc397f8d87d50597c7b42d57d366ae7336b156ec1a72a94d23",
+    "baselineSnapshotDigest": "sha256:e99070e10df1e806e38311d41da187a3d0dfca3f418a1c745e4118eac9582032"
+  },
+  "snapshotDigest": "sha256:e99070e10df1e806e38311d41da187a3d0dfca3f418a1c745e4118eac9582032",
+  "evidenceDigest": "sha256:5db1ab19c42a25bc397f8d87d50597c7b42d57d366ae7336b156ec1a72a94d23",
+  "resolutionDigest": "sha256:f739e607a9cd3fdad41c151fd243a8d0adf290e2fca4cf957713280397c3648e",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "module.entrypointBypassCount",
+      "subjectSelectorId": "subject.node.92361d274a72e0fe",
+      "nodeId": "capability.workflow-engine.execution-primitives",
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.96b69be7e20c5280"
+    }
+  ]
+}
