@@ -367,7 +367,7 @@ describe("refactor v2 archctx provider", () => {
   });
 });
 
-describe("real archctx 0.18.4 pure-Git refactor lifecycle (end-to-end)", () => {
+describe("real archctx 0.18.5 pure-Git refactor lifecycle (end-to-end)", () => {
   function runGit(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv): string {
     return execFileSync("git", [...args], { cwd, env, encoding: "utf8" }).trim();
   }

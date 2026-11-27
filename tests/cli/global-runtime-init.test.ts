@@ -15,7 +15,7 @@ import { applySeatsSettings, readSeatsConfiguration } from '../../src/effects/bo
 import { runCli } from '../../src/cli/index';
 import { registerArchitecturePlugin, resolveOptionalRuntimeDeps, runTransactionalRuntimeRefresh } from '../../src/cli/runtime-transaction';
 import { bunStubPath, copyPackageRuntimeFixture, writeBunWrapper, writeShellExecutableFixture } from '../helpers/repo-fixture';
-import { ARCHITECTURE_DOCS_RENDERER_VERSION } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DOCS_RENDERER_VERSION } from 'archctx-contracts';
 import { dependencies, devDependencies } from '../../package.json';
 import { installStateFixturePath, recordInstallOwnership, recordPluginSelection, RETIRED_CLI_LINES, seedGlobalPackageFixture, seedPathRecords } from '../helpers/install-ownership';
 import { writeFakeHc } from '../helpers/fake-hc';
@@ -690,7 +690,7 @@ function setupManagedRuntimeReadback(temporaryRoot: string, home: string, fakeBi
   writeFileSync(join(archctx, 'package.json'), JSON.stringify({
     name: 'archctx',
     version: ARCHCTX_PIN,
-    engines: { node: '>=22.22 <26' },
+    engines: { node: ARCHCONTEXT_NODE_RANGE },
     bin: { archctx: './bin/archctx.mjs' },
     dependencies: { '@colbymchenry/codegraph': CODEGRAPH_PIN },
   }));
@@ -2315,7 +2315,7 @@ exit 0
       });
 
       expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(1);
-      expect(result.stderr).toContain('must satisfy Node >=22.22 <26');
+      expect(result.stderr).toContain(`must satisfy Node ${ARCHCONTEXT_NODE_RANGE}`);
       expect(existsSync(codexSkills)).toBe(false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });

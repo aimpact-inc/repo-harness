@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ARCHITECTURE_DEBT_DELTA_SCHEMA_VERSION, digestJson, errorEnvelope, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type Json } from 'archctx-contracts';
+import { ARCHCONTEXT_NODE_RANGE, ARCHITECTURE_DEBT_DELTA_SCHEMA_VERSION, digestJson, errorEnvelope, type ArchitectureDebtDeltaReportV1, type ArchitectureDebtReportV1, type Json } from 'archctx-contracts';
 import { ARCHCTX_REQUIRED_VERSION, ArchctxClientError, decodeArchitectureDebtReport } from '../src/core/architecture/projection';
 import type { ArchctxProcessResult, ArchitectureProjectionPolicy, RunArchctxProcess } from '../src/core/architecture/contracts';
 import { completeArchitectureDebt, checkpointArchitectureDebt } from '../src/effects/architecture/archctx-provider';
@@ -54,7 +54,7 @@ function fixture() {
   const consumerRoot = join(root, 'consumer');
   const archctxRoot = join(consumerRoot, 'node_modules', 'archctx');
   mkdirSync(join(archctxRoot, 'bin'), { recursive: true });
-  writeFileSync(join(archctxRoot, 'package.json'), JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } }));
+  writeFileSync(join(archctxRoot, 'package.json'), JSON.stringify({ name: 'archctx', version: ARCHCTX_REQUIRED_VERSION, engines: { node: ARCHCONTEXT_NODE_RANGE }, bin: { archctx: './bin/archctx' } }));
   writeFileSync(join(archctxRoot, 'bin', 'archctx'), '#!/bin/sh\nexit 99\n');
   chmodSync(join(archctxRoot, 'bin', 'archctx'), 0o755);
   const repoRoot = join(root, 'repo');
