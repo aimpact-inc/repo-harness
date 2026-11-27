@@ -72,7 +72,9 @@ interface MigrateDependenciesOptions extends BoardOptions {
 
 interface PostOptions extends BoardOptions {
   readonly target: string;
-  readonly fieldsFile: string;
+  readonly fieldsFile?: string;
+  readonly park?: string;
+  readonly reason?: string;
   readonly dryRun?: boolean;
 }
 
@@ -119,7 +121,7 @@ function guarded<T extends BoardOptions>(action: (options: T) => void): (options
     try {
       action(options);
     } catch (error) {
-      if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof AttentionWatchError)) throw error;
+      if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof AttentionWatchError || error instanceof AutopilotError)) throw error;
       process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
       process.exitCode = 1;
     }
@@ -459,7 +461,7 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.stdout.write(reviewText(result));
         if (options.dryRun !== true) recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), reviewEvents(result), process.env);
       } catch (error) {
-        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof SeatProviderUnavailableError)) throw error;
+        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof SeatProviderUnavailableError || error instanceof AutopilotError)) throw error;
         recordLifecycleEvents(() => readRepositoryId({ repo_root: process.cwd() }), [friction('board_review', { error_code: boardErrorCode(error) })], process.env);
         process.stderr.write(`${JSON.stringify({ ok: false, error: error instanceof SeatProviderUnavailableError ? error.code : error.name, message: error.message })}\n`);
         process.exitCode = 1;
@@ -477,7 +479,7 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
         process.stdout.write(mergeText(result, pr, options.dryRun === true));
         process.exitCode = result.exit_code;
       } catch (error) {
-        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError)) throw error;
+        if (!(error instanceof BoardCollectError || error instanceof BoardSourceError || error instanceof AutopilotError)) throw error;
         process.stderr.write(`${JSON.stringify({ ok: false, error: error.name, message: error.message })}\n`);
         process.exitCode = 1;
       }
@@ -550,21 +552,33 @@ export function buildBoardCommand(host: BoardHostPortsV1, attentionHost: Attenti
   board.command('post <kind>')
     .description(`Write one protocol comment that the board parses (${BOARD_POST_KINDS.join(', ')}), checked with its parser before it is posted`)
     .requiredOption('--target <number>', 'The issue or pull request number that receives the comment')
-    .requiredOption('--fields-file <path>', 'A JSON object of the field names of the matching template in templates.md; plan also takes block, the plan block object')
+    .option('--fields-file <path>', 'A JSON object of the fields for the comment')
+    .option('--park <category>', 'Park one issue or pull request with a hold comment')
+    .option('--reason <text>', 'The one-line decision needed on a parked item')
     .option('--dry-run', 'Print the checked comment and post nothing')
     .action((kind: string, _options: PostOptions, command: Command) => {
       const options = command.optsWithGlobals<PostOptions>();
       try {
         if (!/^[1-9][0-9]*$/u.test(options.target)) throw new BoardPostFieldsError('target', 'not an issue or pull request number');
-        const result = runBoardPost({ target: Number(options.target), kind, fields: readFieldsFile(options.fieldsFile), dry_run: options.dryRun === true }, postPorts(process.cwd()));
+        let fields: Readonly<Record<string, unknown>>;
+        if (options.park !== undefined || options.reason !== undefined) {
+          if (kind !== 'hold' || options.park === undefined || options.fieldsFile !== undefined) {
+            throw new BoardPostFieldsError('park', 'use hold --park <category> --reason <text> with one --target');
+          }
+          fields = { park: options.park, reason: options.reason };
+        } else {
+          if (options.fieldsFile === undefined) throw new BoardPostFieldsError('fields-file', 'required');
+          fields = readFieldsFile(options.fieldsFile);
+        }
+        const result = runBoardPost({ target: Number(options.target), kind, fields, dry_run: options.dryRun === true }, postPorts(process.cwd()));
         if (options.json === true) process.stdout.write(`${JSON.stringify({ ok: true, kind: result.kind, url: result.url })}\n`);
         else process.stdout.write(result.url === null ? `${result.body}\n` : `${result.url}\n`);
       } catch (error) {
         if (!(error instanceof BoardPostFieldsError || error instanceof BoardPostRoundtripError || error instanceof BoardPostSupersedesError
-          || error instanceof BoardCollectError)) throw error;
+          || error instanceof BoardCollectError || error instanceof BoardSourceError)) throw error;
         // Refused fields and a plan without supersedes are refused input (exit 2); a parser that refuses the rendered text, or a failed
         // GitHub read or write, is a failure (exit 1). Neither case posted a comment.
-        const code = error instanceof BoardCollectError ? null : error.code;
+        const code = error instanceof BoardCollectError || error instanceof BoardSourceError ? null : error.code;
         process.stderr.write(`${JSON.stringify({ ok: false, error: code ?? error.name, message: code === null ? error.message : `${code}: ${error.message}` })}\n`);
         process.exitCode = error instanceof BoardPostFieldsError || error instanceof BoardPostSupersedesError ? 2 : 1;
       }

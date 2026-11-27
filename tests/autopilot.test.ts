@@ -29,6 +29,8 @@ import {
   runAttentionWindow,
 } from '../src/effects/board/attention-watch';
 import { BoardCollectError, readGhJson } from '../src/effects/board/collect';
+import { readParkedItems } from '../src/effects/board/post';
+import { renderMergeHoldComment, renderMergeHoldReleaseComment } from '../src/core/board/merge';
 import {
   autopilotStatePath,
   readAutopilotState,
@@ -491,7 +493,19 @@ test('shorter cadence fires mid-window with advancing clock and deliver=false ne
 test('CLI rh autopilot start|stop|status handles cadence, stop reason, JSON/text output, and parked list', async () => {
   const repo = createTempGitRepo();
   let clock = new Date('2026-11-27T12:00:00.000Z');
-  const ports: AutopilotCommandPorts = { cwd: () => repo, now: () => clock };
+  let openItems: { number: number; comments: number; pull_request?: object }[] = [];
+  const parked = renderMergeHoldComment({ issues: null, park: 'high_security_uncertain', reason: 'Confirm I1 scope' });
+  const entry = (body: string, at: string) => ({ html_url: `https://github.com/o/r/issues/1#issuecomment-${Date.parse(at)}`,
+    created_at: at, author_association: 'OWNER', body });
+  const hold = entry(parked, '2026-11-27T12:01:00Z');
+  const release = entry(renderMergeHoldReleaseComment({ reason: 'Decided' }), '2026-11-27T12:02:00Z');
+  const ports: AutopilotCommandPorts = { cwd: () => repo, now: () => clock, readParked: repo_root => readParkedItems({ repo_root, gh_runner: args => {
+    const path = args.at(-1);
+    if (path === 'repos/{owner}/{repo}/issues?state=open&per_page=100') return { status: 0, stdout: JSON.stringify([openItems]) };
+    if (/^repos\/\{owner\}\/\{repo\}\/issues\/3590\/comments\?per_page=\d+&page=1$/u.test(path ?? '')) return { status: 0, stdout: JSON.stringify([hold]) };
+    if (/^repos\/\{owner\}\/\{repo\}\/issues\/3591\/comments\?per_page=\d+&page=1$/u.test(path ?? '')) return { status: 0, stdout: JSON.stringify([hold, release]) };
+    throw new Error(`unexpected gh query: ${path}`);
+  } }) };
 
   const initialJson = await runAutopilotCli(['autopilot', 'status', '--json'], ports);
   expect(initialJson.exitCode).toBe(0);
@@ -521,15 +535,19 @@ test('CLI rh autopilot start|stop|status handles cadence, stop reason, JSON/text
     parked: [],
   });
 
-  const statusText = await runAutopilotCli(['autopilot', 'status'], {
-    ...ports,
-    readParked: () => [{ kind: 'pull_request', number: 3590, category: 'high_security_uncertain', reason: 'Confirm I1 scope' }],
-  });
+  openItems = [{ number: 3590, comments: 1, pull_request: {} }, { number: 3591, comments: 2 }];
+  const statusText = await runAutopilotCli(['autopilot', 'status'], ports);
   expect(statusText.exitCode).toBe(0);
   expect(statusText.stdout).toContain('Auto-pilot: ON (owner_local)');
   expect(statusText.stdout).toContain('Activated at: 2026-11-27T12:00:00.000Z');
   expect(statusText.stdout).toContain('Last advisor tick: none');
   expect(statusText.stdout).toContain('pull_request #3590 [high_security_uncertain]: Confirm I1 scope');
+  expect(statusText.stdout).not.toContain('#3591');
+  const offline = await runAutopilotCli(['autopilot', 'status', '--json'], {
+    ...ports, readParked: () => { throw new AutopilotError('autopilot_parked_read_failed', 'GitHub unavailable'); },
+  });
+  expect(offline.exitCode).toBe(0);
+  expect(JSON.parse(offline.stdout)).toMatchObject({ enabled: true, parked_unavailable: 'GitHub unavailable' });
 
   clock = new Date('2026-11-27T13:00:00.000Z');
   const stopped = await runAutopilotCli(['autopilot', 'stop', '--reason', 'manual check', '--json'], ports);

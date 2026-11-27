@@ -2,7 +2,10 @@ import { parseClosingReferences } from '../publication/closing-references';
 import type { AcceptanceMergeSwitch } from '../publication/acceptance-merge-policy';
 import type { PullRequestReadinessV2 } from '../publication/merge-readiness';
 import { isSeatStatusMessage, seatStatusMessage } from './advisor-seat';
-import { readMergeHold, type BoardMergeHoldV1 } from './merge';
+import { isAutopilotEnabled, type AutopilotMergeGateV1, type AutopilotStateV1 } from './autopilot';
+import { CREDENTIALS_LABEL } from './dispatch';
+import { GITHUB_REPOSITORY } from './github-repository';
+import { autopilotParkRequirement, isMergePark, prMergeNotes, readMergeHold, type BoardExternalBlockerV1, type BoardMergeHoldParkV1, type BoardMergeHoldV1 } from './merge';
 import { decodePlanBlock, PlanBlockError, PLAN_COMMENT_HEADER, type PlanBlockV3 } from './plan-block';
 import {
   issueClaim,
@@ -90,7 +93,7 @@ export interface BoardItemV1 {
   readonly labels: readonly string[];
   readonly tier: BoardTier | null;
   readonly milestone: string | null;
-  readonly blocked_by: readonly { readonly number: number; readonly state: 'open' | 'closed' }[];
+  readonly blocked_by: BoardSubIssueReadV1['blocked_by'];
   readonly claim: IssueClaimV1;
   readonly claim_status: BoardClaimStatusV1;
   /** A ready or done status bound to the issue's latest writer claim and the PR and head it reports. */
@@ -143,6 +146,8 @@ export interface BoardPullRequestV1 {
    */
   readonly writer_family: BoardWriterFamily | null;
   readonly merge_hold: BoardMergeHoldV1;
+  /** Evidence for the enabled auto-pilot merge gate, derived from this PR read. */
+  readonly autopilot_merge?: { readonly required_park: BoardMergeHoldParkV1 | null; readonly rollback: boolean };
 }
 
 export type BoardTerminalV1 = {
@@ -308,6 +313,9 @@ export interface BoardV1 {
   readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunV1;
   readonly tooling: BoardToolingV1;
+  /** Present only while local auto-pilot is enabled; omitted when off so the board document stays unchanged. */
+  readonly autopilot?: AutopilotMergeGateV1;
+  readonly autopilot_external_blockers?: readonly BoardExternalBlockerV1[];
 }
 
 export type BoardDailyRunInputV1 =
@@ -335,6 +343,11 @@ export interface BoardInputV1 {
   readonly seat_liveness: BoardSeatLivenessV1;
   readonly daily_run: BoardDailyRunInputV1;
   readonly tooling: BoardToolingV1;
+  /** Local auto-pilot state when observed for this repository; null or omitted means off. */
+  readonly autopilot?: AutopilotStateV1 | null;
+  readonly autopilot_external_blockers?: readonly BoardExternalBlockerV1[];
+  /** Complete thread reads when the short window cannot establish a visible merge hold. */
+  readonly hold_comments?: ReadonlyMap<number, BoardCommentPageV1>;
 }
 
 const SECOND_REVIEWS: ReadonlySet<unknown> = new Set<BoardSecondReviewV1>(['not_required', 'pending', 'recorded']);
@@ -392,6 +405,17 @@ function isSeatLiveness(value: unknown): boolean {
     && (probe.screen_hash === null || (typeof probe.screen_hash === 'string' && /^[0-9a-f]{64}$/u.test(probe.screen_hash))));
 }
 
+function isBlockerEdge(value: unknown): boolean {
+  return isRecord(value) && typeof value.number === 'number' && Number.isSafeInteger(value.number) && value.number > 0
+    && (value.state === 'open' || value.state === 'closed')
+    && (value.repository === undefined || (typeof value.repository === 'string' && GITHUB_REPOSITORY.test(value.repository)));
+}
+
+function isExternalBlocker(value: unknown): boolean {
+  return isRecord(value) && isBlockerEdge(value) && typeof value.repository === 'string' && typeof value.parked === 'boolean'
+    && Array.isArray(value.blocked_by) && value.blocked_by.every(isBlockerEdge);
+}
+
 /** Refuse a board of another protocol or kind, or a board without a valid new value, at a process boundary (Surface contract, docs/adr/ADR-0002). */
 export function decodeBoard(value: unknown): BoardV1 {
   const board = value as Partial<BoardV1> | null;
@@ -404,6 +428,9 @@ export function decodeBoard(value: unknown): BoardV1 {
   }
   if (board.execution?.status === 'observed') checkSeatTerminals(board.execution.terminals);
   if (!isSeatLiveness(board.seat_liveness)) throw new Error('invalid board seat_liveness');
+  if (board.autopilot !== undefined && (!isRecord(board.autopilot) || typeof board.autopilot.low_tier_skip !== 'boolean')) throw new Error('invalid board autopilot');
+  const external: unknown = board.autopilot_external_blockers;
+  if (external !== undefined && (!Array.isArray(external) || !external.every(isExternalBlocker))) throw new Error('invalid board autopilot_external_blockers');
   for (const item of board.items ?? []) {
     if (!isIssueClaim(item.claim)) throw new Error(`invalid board claim on #${item.number}`);
     if (!isWriterCompletion(item.writer_completion)) throw new Error(`invalid board writer_completion on #${item.number}`);
@@ -411,6 +438,9 @@ export function decodeBoard(value: unknown): BoardV1 {
   }
   for (const pr of board.pull_requests ?? []) {
     if (!isOpenQuestions(pr.open_questions)) throw new Error(`invalid board open_questions on PR #${pr.number}`);
+    const merge: unknown = pr.autopilot_merge;
+    if (board.autopilot !== undefined && pr.state === 'open' && !(isRecord(merge) && typeof merge.rollback === 'boolean'
+      && (merge.required_park === null || isMergePark(merge.required_park)))) throw new Error(`invalid board autopilot_merge on PR #${pr.number}`);
     const fail: unknown = pr.review_fail;
     if (fail !== null && !(isRecord(fail) && typeof fail.url === 'string' && isTime(fail.recorded_at))) throw new Error(`invalid board review_fail on PR #${pr.number}`);
     const cleared: unknown = pr.cleared_hazard_paths;
@@ -468,6 +498,8 @@ export function linkedPullRequests(parent: BoardParentReadV1, reads: readonly Bo
 
 export function projectBoard(input: BoardInputV1): BoardV1 {
   const repository = input.parent.repository.name_with_owner;
+  const autopilot: AutopilotMergeGateV1 | undefined = input.autopilot != null && isAutopilotEnabled(input.autopilot)
+    ? Object.freeze({ low_tier_skip: input.autopilot.low_tier_skip }) : undefined;
   const tiers = new Map(input.parent.sub_issues.map(issue => [issue.number, tierOf(issue.labels)] as const));
   const pullRequests = linkedPullRequests(input.parent, input.pull_requests).map((read): BoardPullRequestV1 => {
     const { closes, refs } = bodyLinks(repository, read.body);
@@ -475,7 +507,14 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     if (required === undefined) throw new Error(`board input has no required contexts for base ${read.base_ref} of PR #${read.number}`);
     const check = requiredCheck(read, required);
     const tier = effectiveTier(read, closes, refs, input.parent, tiers, input.review_evidence);
-    const second = secondReview(read, tier);
+    const rule = reviewRule(read, tier, autopilot);
+    const second = secondReview(read, tier, autopilot);
+    const notes = autopilot === undefined || read.state !== 'open' ? null : prMergeNotes(read.body);
+    const renameSources = input.review_evidence.pull_requests.get(read.number)?.rename_sources;
+    const requiredPark = notes === null ? null : autopilotParkRequirement(
+      read.files === null || renameSources == null ? null : [...read.files, ...renameSources],
+      input.parent.sub_issues.some(issue => (closes.includes(issue.number) || refs.includes(issue.number)) && issue.labels.includes(CREDENTIALS_LABEL)),
+    );
     const readiness = read.state === 'open' ? input.readiness.find(entry => entry.readiness.pr_number === read.number) : undefined;
     if (read.state === 'open' && readiness === undefined) throw new Error(`board input has no merge readiness for open PR #${read.number}`);
     return Object.freeze({
@@ -495,7 +534,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
       cleared_hazard_paths: Object.freeze([...clearedHazardPaths(read, input.review_evidence)]),
       required_check: check,
       // An issue outside this board has no observed tier, so it withholds the Low path; so does any non-Low linked issue.
-      acceptance: acceptance(read, check, [tier], reviewRule(read, tier)),
+      acceptance: acceptance(read, check, [tier], rule, notes?.verification),
       review_fail: reviewFail(read),
       review_records: reviewRecords(read),
       open_questions: openQuestions(read.comments),
@@ -503,9 +542,10 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
       merge_readiness_observed_at: readiness?.observed_at ?? null,
       tier,
       second_review: second,
-      gatekeeper_review: gatekeeperReview(read),
+      gatekeeper_review: gatekeeperReview(read, autopilot === undefined),
       writer_family: writerFamily(read, closes, refs, input.parent),
-      merge_hold: readMergeHold(read.comments, false),
+      merge_hold: readMergeHold(input.hold_comments?.get(read.number) ?? read.comments, false),
+      ...(notes === null ? {} : { autopilot_merge: Object.freeze({ required_park: requiredPark, rollback: notes.rollback }) }),
     });
   }).sort((left, right) => left.number - right.number);
   if (input.path_owners.status === 'observed') {
@@ -527,7 +567,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     writer_completion: writerCompletion(issue.comments, issue.number),
     open_questions: openQuestions(issue.comments),
     pull_requests: Object.freeze(pullRequests.filter(pr => pr.closes.includes(issue.number) || pr.refs.includes(issue.number)).map(pr => pr.number)),
-    merge_hold: readMergeHold(issue.comments, false),
+    merge_hold: readMergeHold(input.hold_comments?.get(issue.number) ?? issue.comments, false),
   })).sort((left, right) => left.number - right.number);
   const daily: BoardDailyRunV1 = input.daily_run.status === 'unavailable' ? input.daily_run : {
     ...input.daily_run,
@@ -551,5 +591,7 @@ export function projectBoard(input: BoardInputV1): BoardV1 {
     seat_liveness: input.seat_liveness,
     daily_run: daily,
     tooling: input.tooling,
+    ...(autopilot === undefined ? {} : { autopilot }),
+    ...(input.autopilot_external_blockers === undefined ? {} : { autopilot_external_blockers: input.autopilot_external_blockers }),
   });
 }

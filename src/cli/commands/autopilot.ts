@@ -8,6 +8,7 @@ import {
   type AutopilotParkedItemV1,
 } from '../../core/board/autopilot';
 import { readAutopilotState, startAutopilot, stopAutopilot } from '../../effects/board/autopilot-store';
+import { readParkedItems } from '../../effects/board/post';
 
 export interface AutopilotCommandPorts {
   readonly cwd?: () => string;
@@ -25,7 +26,15 @@ function handleAutopilotError(error: unknown): void {
 export function buildAutopilotCommand(ports: AutopilotCommandPorts = {}): Command {
   const cwd = ports.cwd ?? (() => process.cwd());
   const now = ports.now ?? (() => new Date());
-  const readParked = ports.readParked ?? (() => []);
+  const readParked = ports.readParked ?? (repo_root => readParkedItems({ repo_root }));
+  const parkedStatus = (repoRoot: string) => {
+    try {
+      return { parked: readParked(repoRoot) };
+    } catch (error) {
+      if (!(error instanceof AutopilotError) || error.code !== 'autopilot_parked_read_failed') throw error;
+      return { parked_unavailable: error.message };
+    }
+  };
 
   const autopilot = new Command('autopilot')
     .description('Manage local repository auto-pilot state and inspect status');
@@ -44,7 +53,7 @@ export function buildAutopilotCommand(ports: AutopilotCommandPorts = {}): Comman
           cadence_minutes,
           now: now(),
         });
-        const doc = buildAutopilotStatusDocument({ ...read, parked: readParked(repoRoot) });
+        const doc = buildAutopilotStatusDocument(read);
         process.stdout.write(options.json === true ? `${JSON.stringify(doc)}\n` : `${formatAutopilotStatusText(doc)}\n`);
       } catch (error) {
         handleAutopilotError(error);
@@ -63,7 +72,7 @@ export function buildAutopilotCommand(ports: AutopilotCommandPorts = {}): Comman
           reason: options.reason ?? null,
           now: now(),
         });
-        const doc = buildAutopilotStatusDocument({ ...read, parked: readParked(repoRoot) });
+        const doc = buildAutopilotStatusDocument(read);
         process.stdout.write(options.json === true ? `${JSON.stringify(doc)}\n` : `${formatAutopilotStatusText(doc)}\n`);
       } catch (error) {
         handleAutopilotError(error);
@@ -77,7 +86,7 @@ export function buildAutopilotCommand(ports: AutopilotCommandPorts = {}): Comman
       try {
         const repoRoot = cwd();
         const read = readAutopilotState(repoRoot);
-        const doc = buildAutopilotStatusDocument({ ...read, parked: readParked(repoRoot) });
+        const doc = buildAutopilotStatusDocument({ ...read, ...parkedStatus(repoRoot) });
         process.stdout.write(options.json === true ? `${JSON.stringify(doc)}\n` : `${formatAutopilotStatusText(doc)}\n`);
       } catch (error) {
         handleAutopilotError(error);

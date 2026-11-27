@@ -14,7 +14,7 @@ import { parseAcceptanceRecord, renderAcceptanceDispositionComment } from '../sr
 import { labeledSeatArgv, SeatProviderUnavailableError } from '../src/cli/commands/seats';
 import type { SeatRouteV1 } from '../src/core/board/seat-routing';
 import { DEFAULT_SEATS_CONFIG, type SeatConfigV1, type SeatId } from '../src/core/board/seats-settings';
-import { acceptance, gatekeeperReview, secondReview } from '../src/core/board/review-rules';
+import { acceptance, gatekeeperReview, reviewRule, secondReview } from '../src/core/board/review-rules';
 import { renderAcceptanceClaim, renderAcceptanceRecord, type ReviewPublishReceipt } from '../src/core/review/review-publish';
 
 const SHA = 'a'.repeat(40);
@@ -67,6 +67,9 @@ test('a Medium head prefers the gatekeeper unless the writer shares its family; 
   expect(medium('deepseek')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'gatekeeper' }] });
   expect(medium('openai')[0]).toMatchObject({ action: 'start', seats: [{ seat: 'reviewer' }] });
   expect(label(medium(null))).toEqual(['1:writer_family_unknown']);
+  const pull = pr(1, { tier: 'medium', writer_family: 'anthropic', second_review: 'pending' });
+  const active = { ...board([pull]), autopilot: { low_tier_skip: true } };
+  expect(seatsOf(planReview({ board: active, comments: new Map([[1, page()]]), gatekeeper: GATEKEEPER })[0])).toEqual(['gatekeeper', 'reviewer']);
 });
 
 test('a pull request that links a plan-held issue is skipped; the others still start', () => {
@@ -454,6 +457,9 @@ test('a round-1 PASS carries only to the fix head of the claimed FAIL, in either
   expect(view(FIX, [...agyPass, ['claude', FIX, 2, 'PASS']])).toEqual(['pass', 'recorded', 'accepted']);
   // The reviewer's round-2 PASS of the fix head meets the High rule with the carried row.
   expect(view(FIX, [...failThenPass, ['claude', FIX, 2, 'PASS']])).toEqual(['pass', 'recorded', 'accepted']);
+  const fixed = read(FIX, [...failThenPass, ['claude', FIX, 2, 'PASS']]);
+  const dual = reviewRule(fixed, 'high', { low_tier_skip: true });
+  expect(acceptance(fixed, { status: 'pending', contexts: [] }, ['high'], dual).status).toBe('not_accepted');
   // A later head after round 2 gets no carry: both seats review it.
   expect(view(LATER, [...passThenFail, ['claude', FIX, 2, 'PASS']])).toEqual(['none', 'pending', 'not_accepted']);
   // Unclaimed rows carry nothing.

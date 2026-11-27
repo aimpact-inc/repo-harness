@@ -253,6 +253,14 @@ describe('rh board post', () => {
     expect(fake.writes).toEqual([]);
   });
 
+  test('park flags write one typed hold for the target', async () => {
+    const fake = fakePorts();
+    const result = await run(['board', 'post', 'hold', '--target', '100', '--park', 'owner_question', '--reason', 'Approve the next step?'], fake.ports);
+    expect(result.exitCode).toBe(0);
+    const read = readMergeHold(page([{ url: 'https://github.com/o/r/issues/100#issuecomment-99', body: fake.writes[0]! }]), false);
+    expect(read).toMatchObject({ status: 'held', holds: [{ issues: null, park: { category: 'owner_question', reason: 'Approve the next step?' } }] });
+  });
+
   test('a post prints the comment URL, and --json prints the document', async () => {
     const fake = fakePorts();
     const file = fieldsFile({ reason: 'owner said stop' });

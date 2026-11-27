@@ -1,6 +1,7 @@
 import { PROJECTION_WRITER_DEFAULT_BRANCH } from 'archctx-contracts';
 import { documentationOnly } from '../ci/documentation-path';
 import { modelFamily } from '../review/model-family';
+import type { AutopilotMergeGateV1 } from './autopilot';
 import { pathHighHits, pathSecondReviewHits } from './hazards';
 import {
   ACCEPTANCE_DISPOSITION_HEADER,
@@ -192,7 +193,7 @@ export function acceptanceRowSeat(
  * A `PASS` row opens the relay only when `acceptanceRowSeat(row, read.comments) === 'gatekeeper'` and any named model has a known family (#3250).
  * With no row of the head, a carried `PASS` attributed to `gatekeeper` (`carriedPasses`) opens the relay, so a fix round starts only the seat that failed.
  */
-export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>): {
+export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'head_sha' | 'comments'>, carry = true): {
   readonly verdict: BoardGatekeeperReviewV1; readonly passFamilies: readonly string[];
 } {
   if (read.comments.truncated) return { verdict: 'unknown', passFamilies: [] };
@@ -218,7 +219,7 @@ export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'hea
     }
   }
   if (passed) return { verdict: 'pass', passFamilies };
-  for (const row of carriedPasses(read)) {
+  for (const row of carry ? carriedPasses(read) : []) {
     if (acceptanceRowSeat(row, read.comments) !== 'gatekeeper') continue;
     const family = row.model === null ? null : modelFamily(row.model);
     if (family !== null) passFamilies.push(family);
@@ -226,8 +227,8 @@ export function gatekeeperReviewEvidence(read: Pick<BoardPullRequestReadV1, 'hea
   return { verdict: passFamilies.length === 0 ? 'none' : 'pass', passFamilies };
 }
 
-export function gatekeeperReview(read: BoardPullRequestReadV1): BoardGatekeeperReviewV1 {
-  return gatekeeperReviewEvidence(read).verdict;
+export function gatekeeperReview(read: BoardPullRequestReadV1, carry = true): BoardGatekeeperReviewV1 {
+  return gatekeeperReviewEvidence(read, carry).verdict;
 }
 
 /** Only a known family differs from another family: an unknown family, such as a custom model id (#3250), is never the other family. */
@@ -275,7 +276,7 @@ export function reviewRecords(read: BoardPullRequestReadV1): BoardReviewRecordsV
   return Object.freeze({ status: 'observed', gatekeeper: newest.gatekeeper || null, reviewer: newest.reviewer || null, head: Object.freeze(head) });
 }
 
-export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredCheckV1, closedTiers: readonly (BoardTier | null)[], rule: ReviewRule): BoardAcceptanceV1 {
+export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredCheckV1, closedTiers: readonly (BoardTier | null)[], rule: ReviewRule, verified = false): BoardAcceptanceV1 {
   // One round is one subject SHA, and a High round has two reviews of it (`acceptor.md`, section 2): every record counts.
   const records = protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER);
   const passes: BoardCommentV1[] = [];
@@ -293,14 +294,16 @@ export function acceptance(read: BoardPullRequestReadV1, check: BoardRequiredChe
   if (!failed && passes.length > 0) {
     // An older comment outside the read can hold a FAIL on the head.
     if (read.comments.truncated) return { status: 'unknown', reason: 'comments_truncated', evidence_url: null };
-    if (rule === 'none' || (rule === 'medium' ? mediumRuleMet(read, head) : highRuleMet(read, [...head, ...carriedPasses(read)]))) {
+    if (rule === 'none' || (rule === 'medium' ? mediumRuleMet(read, head)
+      : highRuleMet(read, rule === 'high' ? [...head, ...carriedPasses(read)] : head))) {
       const newest = passes.reduce((latest, record) => (record.created_at >= latest.created_at ? record : latest));
       return { status: 'accepted', via: 'record', accepted_at: newest.created_at, evidence_url: newest.url };
     }
   }
   if (records.length === 0 && read.comments.truncated) return { status: 'unknown', reason: 'comments_truncated', evidence_url: null };
   // A Low pull request has no accept seat (`agentic-development-flow.md`, Review by risk).
-  if (check.status === 'success' && closedTiers.length > 0 && closedTiers.every(tier => tier === 'low')) {
+  const skipAllowed = rule === 'verified_low' ? verified && !failed && !read.comments.truncated : rule !== 'dual';
+  if (skipAllowed && check.status === 'success' && closedTiers.length > 0 && closedTiers.every(tier => tier === 'low')) {
     return { status: 'accepted', via: 'tier_low', accepted_at: check.completed_at, evidence_url: read.url };
   }
   return { status: 'not_accepted' };
@@ -331,11 +334,14 @@ function mediumRuleMet(read: BoardPullRequestReadV1, head: readonly AcceptanceRo
   return claimedRows(read, head).some(row => row.different_family);
 }
 
-/** The review rule of a pull request: `high` for an open pull request of High or unknown tier, `medium` for an open Medium one, `none` otherwise. */
-type ReviewRule = 'high' | 'medium' | 'none';
-export function reviewRule(read: BoardPullRequestReadV1, tier: BoardTier | null): ReviewRule {
+type ReviewRule = 'high' | 'medium' | 'none' | 'dual' | 'verified_low';
+
+/** Auto-pilot requires both PASS rows on the current head. The ordinary High rule permits a round-1 carry. */
+export function reviewRule(read: Pick<BoardPullRequestReadV1, 'state'>, tier: BoardTier | null, autopilot?: AutopilotMergeGateV1): ReviewRule {
   if (read.state !== 'open') return 'none';
-  return tier === null || tier === 'high' ? 'high' : tier === 'medium' ? 'medium' : 'none';
+  if (autopilot !== undefined) return tier === 'low' && autopilot.low_tier_skip ? 'verified_low' : 'dual';
+  if (tier === null || tier === 'high') return 'high';
+  return tier === 'medium' ? 'medium' : 'none';
 }
 
 /** The Low bound of a fix in added plus deleted lines (`agentic-development-flow.md`, Review by risk). */
@@ -402,10 +408,12 @@ export function effectiveTier(read: BoardPullRequestReadV1, closes: readonly num
  * (`acceptanceRowSeat(row, read.comments) === 'reviewer'`) exists for the head, or carries to it (`carriedPasses`). `pending`: the High rule is
  * not met for the head and no such row exists, so the reviewer seat supplies the missing review.
  */
-export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null): BoardSecondReviewV1 {
-  if (reviewRule(read, tier) !== 'high') return 'not_required';
-  const head = [...protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
-    .filter(row => row.subject_sha === read.head_sha), ...carriedPasses(read)];
+export function secondReview(read: BoardPullRequestReadV1, tier: BoardTier | null, autopilot?: AutopilotMergeGateV1): BoardSecondReviewV1 {
+  const rule = reviewRule(read, tier, autopilot);
+  if (rule !== 'high' && rule !== 'dual') return 'not_required';
+  const head = protocolComments(read.comments, ACCEPTANCE_RECORD_HEADER).flatMap(record => parseAcceptanceRecord(record) ?? [])
+    .filter(row => row.subject_sha === read.head_sha);
+  if (rule === 'high') head.push(...carriedPasses(read));
   if (head.some(row => acceptanceRowSeat(row, read.comments) === 'reviewer' && (row.model === null || modelFamily(row.model) !== null))) return 'recorded';
   return highRuleMet(read, head) ? 'not_required' : 'pending';
 }
