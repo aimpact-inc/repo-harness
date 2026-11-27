@@ -4,7 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { listHelpers, listInternalHelperIds, protectedChildEnv, resolveHelper, runHelper, runInternalHelper } from "../../src/effects/runtime/helper-runner";
+import { selectCompatibleNode } from "../../src/effects/runtime/node-runtime";
 import { INTERNAL_HELPER_COMMANDS, RUN_HELP_GROUPS, RUN_HELP_MAX_HELPERS, RUN_HELP_MAX_LINES } from "../../src/cli/commands/run";
+import { engines } from "../../package.json";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -296,6 +298,22 @@ describe("run command", () => {
       expect(env.REPO_HARNESS_NODE_BIN).not.toBe(realpathSync(node));
       expect(existsSync(marker), "caller PATH Node must not execute during protected environment construction").toBe(false);
       expect(env.PATH?.split(":"), "caller PATH must not become a general command authority").not.toContain(fakeBin);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // Node 26 is the current LTS. The packaged range decides which Node a
+  // protected helper runs, so it must admit that line (#3573).
+  test("the packaged Node range selects a Node 26 runtime", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-node-26-"));
+    try {
+      const node = join(tmp, "node");
+      writeFileSync(node, "#!/bin/sh\necho v26.10.0\n");
+      chmodSync(node, 0o755);
+
+      expect(selectCompatibleNode({ range: engines.node, candidates: [node], versionOf: () => "26.10.0" }))
+        .toEqual({ status: "selected", path: realpathSync(node) });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
