@@ -4,7 +4,6 @@ import {
   AgySeatSettingsError,
   RETIRED_SEAT_FLEET_ROLES,
   SEAT_IDS,
-  SeatsConfigMigrationRequiredError,
   isCouncilSeat,
   isReviewSeat,
   isWorkerSeat,
@@ -13,6 +12,7 @@ import {
   type SeatConfigV1,
   type SeatId,
 } from '../../core/board/seats-settings';
+import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { shownModel, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { readAgyQuota } from '../../effects/board/quota';
 import { ClaudeAgentTypesError, claudeHostAgentTypes } from '../../effects/board/claude-agent-types';

@@ -7,7 +7,6 @@ import {
   ALLOWED_SEAT_FLEET_ROLES,
   AgySeatSettingsError,
   COUNCIL_TOOLS,
-  SeatsConfigMigrationRequiredError,
   decodeSeatsConfig,
   isAgyAllowedSeat,
   isCouncilSeat,
@@ -21,6 +20,7 @@ import {
   type SeatId,
   type SeatsConfigV1,
 } from '../../core/board/seats-settings';
+import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { resolveCatalogRoute } from '../../core/board/model-catalog';
 import { agyReserved, claudeReserved, effectiveGatekeeper, effectiveSeatConfig, seatAccount, seatAccountQuotas, seatState, type SeatRouteV1 } from '../../core/board/seat-routing';
 import { AGY_QUOTA_ACCOUNTS, classifyQuotaReading, type QuotaAccount, type QuotaReading } from '../../core/board/quota';

@@ -8,10 +8,11 @@ import { agySeatAgentTools } from '../../core/board/seat-launch-agy-tools';
 import { MAGPIE_EXTENSION_PATH, SEAT_POOL_STALE_MS, buildSeatPool, catalogProbeModelIds, decodeSeatPool, decodeSeatPoolProbe, emptySeatPoolProbe, type SeatPoolCacheV1, type SeatPoolProbe, type SeatPoolV1 } from '../../core/board/seat-pool';
 import {
   AgySeatSettingsError, FRONTEND_SEAT_IDS, ROUTING_CLASSES, SEAT_IDS, SEAT_RUNTIMES, SEAT_SCAFFOLD_SUB_AGENTS, WORKER_SEAT_IDS,
-  SeatsConfigMigrationRequiredError, decodeSeatsConfig, retiredSeatModelField, seatsConfigInvalidMessage, seatHostId, seatTakesFleet,
+  decodeSeatsConfig, retiredSeatModelField, seatsConfigInvalidMessage, seatHostId, seatTakesFleet,
   type AgyCatalogModel, type LaunchSeatId, type SeatConfigV1, type SeatId, type SeatModelV1, type SeatRoutingV1, type SeatRuntime,
   type SeatsConfigV1, type SeatsRangesV1, type SeatsSettingsResultV1,
 } from '../../core/board/seats-settings';
+import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { isRecord } from '../../core/evidence/is-record';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError } from '../../core/host-config/types';

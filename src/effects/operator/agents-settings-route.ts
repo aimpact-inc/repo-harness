@@ -7,7 +7,7 @@ import {
   type AgentRuntimesCacheV1,
   type AgentsSettingsV1,
 } from '../../core/board/agents-settings';
-import { SEATS_CONFIG_UPDATE_ACTION } from '../../core/board/seats-settings';
+import { SEATS_CONFIG_UPDATE_ACTION } from '../../core/board/seats-settings-migration';
 import { isDocsHostRuntimeId } from '../../core/operator/docs-host-runtimes';
 import { isReviewRuntimeId, REVIEW_RUNTIME_IDS } from '../../core/review/review-runtimes';
 import {
