@@ -5,7 +5,7 @@
   "layoutVersion": "archcontext.docs-layout/v1",
   "generatedFrom": {"codeGraphPackage":"@colbymchenry/codegraph","codeGraphVersion":"1.6.4"},
   "semanticBaseline": {
-    "modelDigest": "sha256:5c25de5d7298d5450863bc4f9d83c3a335a2122c44d4466ff98607a71386837f",
+    "modelDigest": "sha256:daec7a021cb3df6ae3b7fb9470db96ec035b8c63336d033e533f16bd584bef6c",
     "capabilities": [
       {
         "capabilityId": "capability.organization.board",
@@ -330,7 +330,7 @@
           "component.hook-adapters.session-lifecycle",
           "component.hook-adapters.session-lifecycle-effects"
         ],
-        "semanticFingerprint": "sha256:24823e31b126711205c5df19842b7f6a2d704d97ad2e5bd636e3148885794dd2",
+        "semanticFingerprint": "sha256:5b3cf55c3dd4ffb3c9530fcc8fda49835ebddb5376f68bc28b64450e539276a2",
         "flowProofFingerprint": "sha256:fb92607a7ce0410873a0e7b283c4696ff00c3df7b8e88dfb1d98bf27df1b1964",
         "proofStatus": {
           "p1": "proven",
@@ -338,7 +338,7 @@
         },
         "facets": {
           "constraints": "sha256:be8dd33c0e7c64801fc6113bf1f41c797c3a989bc511002c0a3326226b32792b",
-          "entrypoints": "sha256:e19048f03ae0e387e5b001be2bea214110ab0f6b28b9f580f72c09e04a3b6e92",
+          "entrypoints": "sha256:3c193f7c7880d7b7f928d9d44d9c03ebdf7880ead0be820625e0118736ab3cf5",
           "interfaces": "sha256:24263ba1bdc24e554b7b8a4a4d4501104d58fc0b0c36c5aa46e2f8bc2c8d1919",
           "lifecycle": "sha256:3e025a5ef8169e58a6b29695b7715687b621b7d110521c2f2e5dbebe242105d8",
           "names": "sha256:74c1a5743eb99b34735e4c38e1452e684bb081e8a2ae09bc16e5be86425f4c1d",
@@ -789,7 +789,7 @@
     "projection_target.entity.capability-runtime-harness-global-runtime-reconciliation":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.global-runtime-reconciliation","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/global-runtime-reconciliation.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:fa98cddaee3478d229012dea2c1a8fac64d7b567521e3afebb5a5e3b50311fa3"},
     "projection_target.entity.capability-runtime-harness-hook-adapters":
-      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.hook-adapters","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/hook-adapters.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:a71ffed85b87be266a1a9f56b0a847ddd6282e2af799115c24476ccc38d31db6"},
+      {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.hook-adapters","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/hook-adapters.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:1500f71377105768bef7c9b27a1e234daee5faaf1df79b86d35f0e38a12c9a16"},
     "projection_target.entity.capability-runtime-harness-mcp-sidecar":
       {"type":"entity-summary","scope":{"kind":"entity","id":"capability.runtime-harness.mcp-sidecar","entityKind":"capability"},"path":"docs/architecture/modules/runtime-harness/mcp-sidecar.md","ownership":"mixed","format":"markdown","outputDigest":"sha256:e92882cd3b433d528cf4d6cf15de181f35324cb317dda677066a65f2c080ab07"},
     "projection_target.entity.capability-runtime-harness-operator":
