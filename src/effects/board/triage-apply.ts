@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import type { AutopilotStateV1 } from '../../core/board/autopilot';
 import { checkPlanSupersedes, checkPostBody } from '../../core/board/post';
 import { withSeatLine } from '../../core/board/seat-line';
 import type { BoardCommentPageV1 } from '../../core/board/source';
@@ -11,6 +12,7 @@ import {
   type TriageOperation,
 } from '../../core/board/triage-apply';
 import { isRecord } from '../../core/evidence/is-record';
+import { readAutopilotStateIfGitRepo } from './autopilot-store';
 import { BoardCollectError, readGhJson, type GhCallResult, type GhInput } from './collect';
 
 const GH_TIMEOUT_MS = 30_000;
@@ -200,8 +202,12 @@ export function runTriageApply(input: {
   readonly dry_run: boolean;
   readonly ports?: TriageApplyPorts;
   readonly env?: NodeJS.ProcessEnv;
+  readonly autopilot?: AutopilotStateV1 | null;
 }): TriageApplyResultV1 {
-  const plan = planTriageApply(input.manifest);
+  const autopilot = input.autopilot !== undefined
+    ? input.autopilot
+    : readAutopilotStateIfGitRepo(input.repo_root)?.state ?? null;
+  const plan = planTriageApply(input.manifest, { autopilot });
   const env = input.env ?? process.env;
   const rendered = withSeatLine(plan.rendered_plan, env);
   checkPostBody({ kind: 'plan', fields: plan.post_fields }, rendered);

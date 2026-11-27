@@ -4,10 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { buildBoardCommand } from '../src/cli/commands/board';
+import { AUTOPILOT_LOCAL_AUTHORITY } from '../src/core/board/autopilot';
+import { ISSUE_FLOW_WORKER_LIMIT } from '../src/core/board/desk';
 import { decodePlanBlock } from '../src/core/board/plan-block';
-import { decodeTriageManifest, planTriageApply, TRIAGE_MANIFEST_SCHEMA_VERSION, TriageApplyValidationError } from '../src/core/board/triage-apply';
+import { decodeTriageManifest, DEFAULT_MAX_PARALLEL_WRITERS, planTriageApply, TRIAGE_MANIFEST_SCHEMA_VERSION, TriageApplyValidationError } from '../src/core/board/triage-apply';
+import { startAutopilot } from '../src/effects/board/autopilot-store';
 import { gitHubTriageApplyPorts, runTriageApply, type TriageApplyPorts } from '../src/effects/board/triage-apply';
 import { attentionHostPorts, boardHostPorts } from '../src/effects/terminal/herdr-core';
+import { commitAll, initGitRepo, tmpWorkspace } from './helpers/repo-fixture';
 
 const COORDINATOR = 'https://github.com/aimpact-inc/repo-harness/issues/3343#issuecomment-1';
 const PLAN_URL = 'https://github.com/aimpact-inc/repo-harness/issues/3343#issuecomment-2';
@@ -279,4 +283,57 @@ test('triage-apply validates refactor_ids format, blocks cross-unit refactor_ids
   expect(boundCalls).toHaveLength(1);
   expect(boundCalls[0]).toContain(`aimpact-inc/repo-harness#101:repo-harness refactor binding\nRefactor IDs: ${recA}, ${recB}`);
   expect(boundCalls[0]).toContain('Seat: advisor t1ad');
+});
+
+test('triage under auto-pilot scales omitted max_parallel_writers up to target_parallel_workers within ISSUE_FLOW_WORKER_LIMIT without synthetic issues', () => {
+  const repo = tmpWorkspace('rh-triage-autopilot-');
+  roots.push(repo);
+  initGitRepo(repo);
+  writeFileSync(join(repo, 'README.md'), 'triage autopilot fixture\n');
+  commitAll(repo, 'init');
+
+  const disjointManifest = (count: number, explicitMax?: number) => {
+    const issues = Array.from({ length: count }, (_, idx) => ({
+      number: 200 + idx,
+      module: 'organization/board',
+      tier: 'medium' as const,
+      route: 'simple_fast' as const,
+      target_files: [`src/file-${idx}.ts`],
+    }));
+    const raw: Record<string, unknown> = {
+      ...baseManifest({
+        issues,
+        duplicates: [],
+        merge_order: issues.map(issue => issue.number),
+      }),
+    };
+    if (explicitMax === undefined) delete raw.max_parallel_writers;
+    else raw.max_parallel_writers = explicitMax;
+    return raw;
+  };
+
+  // Auto-pilot OFF: keeps DEFAULT_MAX_PARALLEL_WRITERS (3) even with 6 disjoint units.
+  const offRun = runTriageApply({ repo_root: repo, manifest: disjointManifest(6), dry_run: true, env: {} });
+  expect(decodePlanBlock(offRun.rendered_plan).seat_limits.worker).toBe(DEFAULT_MAX_PARALLEL_WRITERS);
+
+  // Auto-pilot ON (default target_parallel_workers = 5): scales smoothly with disjoint units up to 5.
+  startAutopilot({ repo_root: repo, source: AUTOPILOT_LOCAL_AUTHORITY, now: new Date('2026-11-27T10:00:00.000Z') });
+
+  const sixUnits = runTriageApply({ repo_root: repo, manifest: disjointManifest(6), dry_run: true, env: {} });
+  expect(decodePlanBlock(sixUnits.rendered_plan).seat_limits.worker).toBe(5);
+  expect(decodePlanBlock(sixUnits.rendered_plan).merge_order).toHaveLength(6);
+
+  const fourUnits = runTriageApply({ repo_root: repo, manifest: disjointManifest(4), dry_run: true, env: {} });
+  expect(decodePlanBlock(fourUnits.rendered_plan).seat_limits.worker).toBe(4);
+  expect(decodePlanBlock(fourUnits.rendered_plan).merge_order).toHaveLength(4);
+
+  const twoUnits = runTriageApply({ repo_root: repo, manifest: disjointManifest(2), dry_run: true, env: {} });
+  expect(decodePlanBlock(twoUnits.rendered_plan).seat_limits.worker).toBe(DEFAULT_MAX_PARALLEL_WRITERS);
+  expect(decodePlanBlock(twoUnits.rendered_plan).merge_order).toHaveLength(2);
+
+  // Explicit max_parallel_writers stays respected, and exceeding ISSUE_FLOW_WORKER_LIMIT is refused.
+  const explicitTwo = runTriageApply({ repo_root: repo, manifest: disjointManifest(6, 2), dry_run: true, env: {} });
+  expect(decodePlanBlock(explicitTwo.rendered_plan).seat_limits.worker).toBe(2);
+
+  expect(() => planTriageApply(disjointManifest(6, ISSUE_FLOW_WORKER_LIMIT + 1))).toThrow(TriageApplyValidationError);
 });

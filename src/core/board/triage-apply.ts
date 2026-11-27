@@ -1,3 +1,5 @@
+import { autopilotTriageWriterLimit, type AutopilotStateV1 } from './autopilot';
+import { ISSUE_FLOW_WORKER_LIMIT } from './desk';
 import { GITHUB_REPOSITORY } from './github-repository';
 import { decodePlanBlock, decodePlanBlockValue, PLAN_BLOCK_KIND, PLAN_BLOCK_PROTOCOL, renderPlanComment, type PlanBlockV3, type PlanOrderEntryV3 } from './plan-block';
 import { BoardPostFieldsError, checkPlanSupersedes, checkPostBody, decodePostFields, renderPostBody, type BoardPostFieldsV1 } from './post';
@@ -219,6 +221,9 @@ export function decodeTriageManifest(value: unknown): TriageManifestV1 {
   let maxParallel = DEFAULT_MAX_PARALLEL_WRITERS;
   if (value.max_parallel_writers !== undefined) {
     maxParallel = positiveInt(value.max_parallel_writers, 'max_parallel_writers');
+    if (maxParallel > ISSUE_FLOW_WORKER_LIMIT) {
+      fail(`max_parallel_writers cannot exceed ISSUE_FLOW_WORKER_LIMIT (${ISSUE_FLOW_WORKER_LIMIT})`);
+    }
   }
 
   let planBlock: PlanBlockV3;
@@ -318,15 +323,17 @@ export function issueLabelsForTriage(issue: TriageManifestIssue): string[] {
 
 export function planTriageApply(
   rawManifest: unknown,
-  options: { readonly thread?: BoardCommentPageV1 } = {},
+  options: { readonly thread?: BoardCommentPageV1; readonly autopilot?: AutopilotStateV1 | null } = {},
 ): TriageApplyPlanV1 {
   const manifest = decodeTriageManifest(rawManifest);
+  const workerLimit = manifest.max_parallel_writers
+    ?? autopilotTriageWriterLimit(manifest.merge_order.length, DEFAULT_MAX_PARALLEL_WRITERS, options.autopilot);
   const block: PlanBlockV3 = {
     protocol: PLAN_BLOCK_PROTOCOL,
     kind: PLAN_BLOCK_KIND,
     merge_order: manifest.merge_order,
     holds: [],
-    seat_limits: { worker: manifest.max_parallel_writers ?? DEFAULT_MAX_PARALLEL_WRITERS },
+    seat_limits: { worker: workerLimit },
   };
   let post: Extract<BoardPostFieldsV1, { readonly kind: 'plan' }>;
   try {
