@@ -25,12 +25,12 @@ import {
   createProcessProvider,
   evaluateThresholds,
   runProviderEval,
-  perfectEchoRouteFor,
   buildAggregateReport,
   AGGREGATE_ADVISORY_REASON,
   buildSubjectFreeze,
   filterPathsPresentAtHead,
   type DiscoveredSkillSurfaceEntry,
+  type RoutingCase,
   type RoutingRunRecord,
   type RoutingRunReport,
 } from "../scripts/run-skill-routing-eval";
@@ -53,6 +53,11 @@ function runCli(args: string[]) {
     encoding: "utf-8",
     env: { ...process.env, FORCE_COLOR: "0" },
   });
+}
+
+/** Perfect-echo stub for deterministic pipeline tests: returns the case's expected_route (empty array for "none"). */
+function perfectEchoRouteFor(routingCase: RoutingCase): readonly string[] {
+  return routingCase.expected_route === "none" ? [] : [routingCase.expected_route];
 }
 
 describe("skill-routing corpus (evals/skill-routing/routing-corpus.json)", () => {
