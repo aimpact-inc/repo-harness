@@ -39,3 +39,11 @@ source:
             - id: sink.global-runtime-reconciliation.setup
               path: "src/cli/commands/global-runtime.ts"
               symbol: "runGlobalRuntimeSetup"
+    - id: entrypoint.global-runtime-reconciliation.cli-root-program
+      path: "src/cli/index.ts"
+      symbols:
+        - name: "buildProgram"
+          sinks:
+            - id: sink.global-runtime-reconciliation.cli-root-setup
+              path: "src/cli/commands/setup-check.ts"
+              symbol: "buildSetupCommand"
