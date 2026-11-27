@@ -1293,17 +1293,13 @@ export function defaultPluginSelection(target: InstallTarget, env: NodeJS.Proces
   return { plugins: run, skipped };
 }
 
-function pluginStatusLine(status: 'skipped' | 'kept', entry: SkippedPlugin | KeptPlugin, action: string): string {
-  return `${status} ${entry.id}: ${entry.reason}; ${action}: ${entry.command}`;
-}
-
 export function skippedPluginLine(entry: SkippedPlugin): string {
   const after = entry.command === UPDATE_COMMAND ? 'install the host program, then run' : 'run';
-  return pluginStatusLine('skipped', entry, `to add it later, ${after}`);
+  return `skipped ${entry.id}: ${entry.reason}; to add it later, ${after}: ${entry.command}`;
 }
 
 export function keptPluginLine(entry: KeptPlugin): string {
-  return pluginStatusLine('kept', entry, 'update keeps the recorded plugin; to remove it, run');
+  return `kept ${entry.id}: ${entry.reason}; update keeps the recorded plugin; to remove it, run: ${entry.command}`;
 }
 
 export function notAddedPluginLine(id: PluginId): string {
