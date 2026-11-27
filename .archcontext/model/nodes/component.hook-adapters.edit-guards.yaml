@@ -5,10 +5,11 @@ name: "Edit Guard Handlers"
 status: active
 parent: capability.runtime-harness.hook-adapters
 layer: "cli"
-summary: "The typed edit and Bash safety guards, and the circuit breaker store."
+summary: "The typed edit, Bash and orchestrator question safety guards, and the circuit breaker store."
 responsibilities:
   - Decide PreToolUse.edit with the mutation guard from the repository, _ref, _ops and target path boundaries.
   - Check literal Bash write targets on Claude and Pi with the same private path boundaries and a repository-only scope.
+  - Deny blocking question modals in the orchestrator seat on PreToolUse.question.
   - Check credential reads and writes to existing user files.
   - Keep the semantic review circuit breaker that the review command records attempts in.
 source:
@@ -16,5 +17,6 @@ source:
     - src/cli/hook/circuit-breaker.ts
     - src/cli/hook/mutation-bash.ts
     - src/cli/hook/mutation-guard.ts
+    - src/cli/hook/question-guard.ts
     - src/cli/hook/safety-hook.ts
     - src/cli/hook/shell-words.ts

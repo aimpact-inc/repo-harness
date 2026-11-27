@@ -18,6 +18,7 @@ source:
   include:
     - src/cli/installer/**
     - src/pi/**
+    - src/cli/hook/bridge-client.ts
     - src/cli/commands/install.ts
     - src/cli/commands/config.ts
     - src/cli/commands/status.ts
