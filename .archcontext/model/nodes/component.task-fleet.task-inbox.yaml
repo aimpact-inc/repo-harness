@@ -10,8 +10,10 @@ responsibilities:
   - "Write immutable TaskMessageEventV2 records under the shared task mutex."
   - "Reobserve the selected session and live approval; fence current messages to admission SHA and exact claim reference and revision."
   - "Retain historical message codecs and explicit historical activity/layout reads without current-authority fallback."
+  - "Define the single browser-safe newest-first task message comparator shared by inbox readers and operator views."
 source:
   include:
     - src/core/fleet/task-message.ts
     - src/core/fleet/task-inbox-layout.ts
     - src/core/fleet/admitted-task-message.ts
+    - src/core/fleet/task-message-order.ts
