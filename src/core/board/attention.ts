@@ -3,6 +3,7 @@ import { boardMergeDecisions, planSkipReason, prHasCommentHold } from './merge';
 import type { BoardItemV1, BoardPullRequestV1, BoardTerminalV1, BoardV1 } from './board';
 import { moduleOf } from './cluster';
 import { hcStatusClass, liveSeats, seatItem, seatPullRequest } from './desk';
+import { branchPullRequests } from './pull-requests';
 import { pathHazardHits, pathHighHits } from './hazards';
 import { compareHcVersions } from '../terminal/herdr-pin';
 import { SEAT_IDS, WORKER_SEAT_IDS, isReviewSeat } from './seats-settings';
@@ -333,7 +334,7 @@ function a21(context: Context): void {
 function workerA22PullRequest(board: BoardV1, seat: SeatTerminal, item: BoardItemV1 | undefined): BoardPullRequestV1 | undefined {
   if (seat.pr !== null) return board.pull_requests.find(pr => pr.number === seat.pr);
   if (seat.branch === null) return undefined;
-  const matches = board.pull_requests.filter(pr => pr.head_ref === seat.branch);
+  const matches = branchPullRequests(board, seat.branch);
   const items = item === undefined ? null : bundleItems(board, item);
   const linked = (pr: BoardPullRequestV1): boolean => items === null || items.some(entry => entry.pull_requests.includes(pr.number));
   const open = matches.filter(pr => pr.state === 'open' && linked(pr));

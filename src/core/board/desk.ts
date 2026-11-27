@@ -1,5 +1,5 @@
 import type { BoardItemV1, BoardPullRequestV1, BoardTerminalV1, BoardV1 } from './board';
-import { primaryPullRequest } from './pull-requests';
+import { branchPullRequests, itemPullRequests, newestActivePullRequest } from './pull-requests';
 
 /**
  * The room rules of one board: which seats have a desk, the state of a desk,
@@ -40,9 +40,18 @@ export function seatItem(board: BoardV1, terminal: BoardSeatTerminal): BoardItem
     ?? null;
 }
 
+/**
+ * The pull request of one seat: its direct `pr` label, else the item's newest open or merged pull request bound to this seat.
+ * An observed seat branch binds only to pull requests on that head branch (`branchPullRequests`, matching `workerA22PullRequest`
+ * and closeout `paneBinding`). Without an observed branch, a `Refs`-only merged pull request does not bind.
+ */
 export function seatPullRequest(board: BoardV1, terminal: BoardSeatTerminal, item: BoardItemV1 | null): BoardPullRequestV1 | null {
   if (terminal.pr !== null) return board.pull_requests.find(pr => pr.number === terminal.pr) ?? null;
-  return item === null ? null : primaryPullRequest(board, item);
+  if (item === null) return null;
+  const prs = terminal.branch !== null
+    ? branchPullRequests(board, terminal.branch).filter(pr => item.pull_requests.includes(pr.number))
+    : itemPullRequests(board, item).filter(pr => pr.state !== 'merged' || pr.closes.includes(item.number));
+  return newestActivePullRequest(prs);
 }
 
 /** The acceptance queue: an open pull request whose required check passed and that is not accepted. */

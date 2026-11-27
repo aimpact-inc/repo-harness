@@ -1701,6 +1701,57 @@ test('one hit for each rule that the recorded state does not trigger', () => {
   expect(merged.findings.filter(finding => finding.rule === 'A9').map(finding => [finding.terminals, finding.pull_requests])).toEqual([[['t2'], [1494]]]);
 });
 
+test('A9 binds an issue-labeled seat to a merged pull request only when its branch or closing link matches', () => {
+  const recorded = replay();
+  if (recorded.execution.status !== 'observed') throw new Error('the replay observes the seats');
+  const baseSeat = recorded.execution.terminals[0]!;
+  const worker = (address: string, patch: Partial<Extract<BoardTerminalV1, { readonly seat_status: 'observed' }>>): BoardTerminalV1 =>
+    ({ ...baseSeat, address, seat: 'worker', status: 'working', issue: 1479, pr: null, branch: null, ...patch });
+  const a9Hits = (board: BoardV1) => evaluateBoardAttention(board).findings
+    .filter(finding => finding.rule === 'A9')
+    .map(finding => [finding.terminals, finding.pull_requests]);
+
+  const nextBranchWorker = worker('t10', { branch: 'feat/1479-part2' }) as Extract<BoardTerminalV1, { readonly seat_status: 'observed' }>;
+  // Open issue #1479 with an earlier merged Refs-only PR #1494 on feat/1479-part1.
+  const refsMergedBoard: BoardV1 = {
+    ...recorded,
+    items: recorded.items.map(item => (item.number === 1479 ? { ...item, state: 'open' as const } : item)),
+    pull_requests: recorded.pull_requests.map(pr => (pr.number === 1494
+      ? { ...pr, state: 'merged' as const, head_ref: 'feat/1479-part1', closes: [], refs: [1479] }
+      : pr)),
+    execution: {
+      status: 'observed',
+      terminals: [
+        // False-positive regression: new worker on a different branch and branchless worker on open issue stay silent.
+        nextBranchWorker,
+        worker('t11', { branch: null }),
+        // True-positive preservation: worker still on the merged Refs-only PR branch and direct PR-labeled seat still fire.
+        worker('t12', { branch: 'feat/1479-part1' }),
+        worker('t13', { seat: 'gatekeeper', issue: null, pr: 1494, branch: 'feat/unrelated' }),
+      ],
+    },
+  };
+  expect(a9Hits(refsMergedBoard)).toEqual([[['t12'], [1494]], [['t13'], [1494]]]);
+  expect(seatPullRequest(refsMergedBoard, nextBranchWorker, seatItem(refsMergedBoard, nextBranchWorker))).toBeNull();
+
+  // Merged closing PR #1494: fires for matching branch or unreadable branch (null), but not for a different observed branch.
+  const closingMergedBoard: BoardV1 = {
+    ...recorded,
+    pull_requests: recorded.pull_requests.map(pr => (pr.number === 1494
+      ? { ...pr, state: 'merged' as const, head_ref: 'feat/1479-final', closes: [1479], refs: [] }
+      : pr)),
+    execution: {
+      status: 'observed',
+      terminals: [
+        worker('t14', { branch: 'feat/1479-followup' }),
+        worker('t15', { branch: 'feat/1479-final' }),
+        worker('t16', { branch: null }),
+      ],
+    },
+  };
+  expect(a9Hits(closingMergedBoard)).toEqual([[['t15'], [1494]], [['t16'], [1494]]]);
+});
+
 test('R5 and the effective tier read the High list: board record-writing code is Medium on one PASS row; an I1/I2, I3 or change hazard path is High and needs two', () => {
   const [hook, boardWriter] = ['src/cli/installer/uninstall.ts', 'src/effects/board/review.ts'];
   const receipt = (subject_sha: string): ReviewPublishReceipt => ({

@@ -993,6 +993,13 @@ describe('board office (#1755)', () => {
     // The seat branch is the terminal's, with or without a pull request; the pull request head is not a second source.
     const branches = room(boardWith({ terminals: [{ ...seat('t1', 'worker', 1299, null, 'working'), branch: 'feat/1299-dsh-companion' }, seat('t2', 'worker', null, 1491, null)] })).desks;
     expect(branches.map(desk => desk.branch)).toEqual(['feat/1299-dsh-companion', null]);
+    // A worker starting a follow-up branch on an open issue does not inherit an earlier merged Refs-only PR on the desk.
+    const followUp = room(boardWith({
+      prs: { 1494: { state: 'merged', head_ref: 'feat/1479-part1', closes: [], refs: [1479] } },
+      items: { 1479: { state: 'open', claim_status: observedClaim } },
+      terminals: [{ ...seat('t1', 'worker', 1479, null, 'working'), branch: 'feat/1479-part2' }],
+    })).desks;
+    expect(followUp.map(desk => [desk.issue, desk.pr, desk.state, desk.branch])).toEqual([[1479, null, 'coding', 'feat/1479-part2']]);
   });
 
   test('without an observed plan: the issue-flow limit; with a plan the limit and the holds come from the block; the tray holds what nobody works on', () => {
