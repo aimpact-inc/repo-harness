@@ -1,10 +1,11 @@
 import { parseJsonText } from '../../core/evidence/file-syntax';
+import { renderJsonObjectUpdate } from '../../core/evidence/json-object-update';
 import { randomUUID } from 'node:crypto';
 import { retryWindowsSharingRace } from '../atomic-append';
 import { closeSync, constants, fchmodSync, fstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { JsonValue } from '../../core/evidence/types';
-import { renderJsonObjectUpdate, requireDocumentationLanguage } from '../adoption/standard-plan';
+import { requireDocumentationLanguage } from '../adoption/standard-plan';
 import { readRepoHarnessRegistryStrictSnapshot, RepoHarnessRegistryStrictError } from '../repo-registry';
 import type { OperatorWriteRoute } from './write-channel';
 import { OperatorWriteRefusal } from './write-run';

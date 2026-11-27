@@ -29,9 +29,9 @@ import {
 } from '../../core/board/seats-settings';
 import { SeatsConfigMigrationRequiredError } from '../../core/board/seats-settings-migration';
 import { isRecord } from '../../core/evidence/is-record';
+import { renderJsonObjectUpdate } from '../../core/evidence/json-object-update';
 import { sha256Hex, sha256Prefixed } from '../../core/evidence/sha256';
 import { HostConfigError } from '../../core/host-config/types';
-import { renderJsonObjectUpdate } from '../adoption/standard-plan';
 import { GlobalConfigurationError, mutateGlobalConfiguration, readGlobalConfiguration } from '../configuration/global-configuration';
 import { antigravityAgentsDirHostPath, checkAntigravityPath, openHostConfigGate } from '../host-config/gate';
 import { hostConfigPaths, hostPathKey, readLedger } from '../host-config/store';
