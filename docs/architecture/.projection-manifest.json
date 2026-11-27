@@ -5,7 +5,7 @@
   "layoutVersion": "archcontext.docs-layout/v1",
   "generatedFrom": {"codeGraphPackage":"@colbymchenry/codegraph","codeGraphVersion":"1.6.4"},
   "semanticBaseline": {
-    "modelDigest": "sha256:1265ff45c93c5b7432549b313fcbe2b48fbb948661243b249a8a96b2e44ab001",
+    "modelDigest": "sha256:21fcc98aa50db590d0d603b3fcff8ed42cc094eb5da090c073cdb982aacc866d",
     "capabilities": [
       {
         "capabilityId": "capability.organization.board",
@@ -75,7 +75,7 @@
           "component.task-fleet.task-inbox",
           "component.task-fleet.task-inbox-effects"
         ],
-        "semanticFingerprint": "sha256:b7bd6cb288df3ee6c14da151c605efa51b7ca0e379222cef548a8d36ac48a3b4",
+        "semanticFingerprint": "sha256:a4aec1d582d2968b6151992f9e405a64babf3a07abbac68a73af5a74586476fa",
         "flowProofFingerprint": "sha256:f5bb431b3d600b4a1793554f308047728a110f9a5bf4eb2137de897245752154",
         "proofStatus": {
           "p1": "proven",
@@ -87,10 +87,10 @@
           "interfaces": "sha256:8016036ff84926c68c4b55f7e989b6af21dd60e56541d150e72caa5b97aa2008",
           "lifecycle": "sha256:2115cdec461e738c2958f125d9b9e23dbed1fe62af275f4090881c62c8763abb",
           "names": "sha256:f58d0f1ad74ced1016f2b1c5547f74fb289e52a727f84f4738d1d4b3bae18ddf",
-          "ownership": "sha256:6afa6c9541851180b51beddf5e4eee5e851f4e65653f2bcaefe9eefdc4a5c88a",
+          "ownership": "sha256:d5298dd3ef1219db12837bbe1a52e35eb5596a207c4d962f193900c4ecf7329c",
           "placement": "sha256:11fc25095e1732ff583e79570aff53c9e509f43bb0e22e9f3e4574a786ef778f",
           "relations": "sha256:252bd7b769225bc05eae0f6de8f7afad9fc6701d04e25fd0447862be3910ee1a",
-          "responsibilities": "sha256:e1542082f4ef76a151fe6f575c667c1b5919e89441a8629408669c69790dac8c",
+          "responsibilities": "sha256:493b36610ff75d35fa5b264c9df2f7241fb012bfb171fcb1403f5ffb9bb3970d",
           "riskBoundaries": "sha256:05e8f0d5e8c09ace2285c778514c0a31345ce797a805d37477a48c43836a5a74"
         },
         "selectorEvidenceDigest": "sha256:31b2ed26dc28284151693991305ef5287d6d5de3692655b1ae99d887de6ac9b9"
