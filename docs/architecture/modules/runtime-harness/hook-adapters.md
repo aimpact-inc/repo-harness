@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:60b753ff1b6566097961d2c98513d764794c65ef3d00583768367c526a507916" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" rendererVersion="archcontext.docs-renderer/v6" outputDigest="sha256:bd87b67034df0ea6381852fad1141d403620a20af54cb8215772b8977782b01e" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`src/cli/hook/**`、`src/cli/installer/**`、`src/pi/**`、`src/effects/managed-tree.ts`、`src/cli/hook-entry.ts`、`src/effects/loop/**`、`src/effects/segmented-log.ts`、`src/effects/run-summary-retention.ts`、`src/cli/commands/install.ts`、`src/cli/commands/status.ts`、`src/cli/commands/security.ts`
@@ -88,6 +88,9 @@ flowchart LR
 | `component.hook-adapters.host-installer` | `entrypoint.hook-adapters.waza-rules` | `src/cli/installer/waza-rules.ts#syncWazaSharedRules` | `sink.hook-adapters.waza-rules` → `src/cli/installer/waza-rules.ts#fetchRules` |
 | `component.hook-adapters.primary` | `entrypoint.hook-adapters.handler-bindings` | `src/cli/hook/handler-registry.ts#handlers` | `sink.hook-adapters.mutation-guard` → `src/cli/hook/mutation-guard.ts#runMutationGuard`、`sink.hook-adapters.stop-handler` → `src/cli/hook/stop-handler.ts#runStopHandler` |
 | `component.hook-adapters.session-lifecycle` | `entrypoint.hook-adapters.stop` | `src/cli/hook/stop-handler.ts#runStopHandler` | `sink.hook-adapters.evidence-checkpoint` → `src/effects/evidence/checkpoint-store.ts#publishCheckpointFromLedger` |
+| `component.hook-adapters.session-lifecycle` | `entrypoint.hook-adapters.session-context` | `src/cli/hook/session-context.ts#buildSessionStartSections` | `sink.hook-adapters.session-state-section` → `src/cli/hook/session-context.ts#projectEffectiveStateSessionSection` |
+| `component.hook-adapters.session-lifecycle` | `entrypoint.hook-adapters.return-channel` | `src/cli/hook/return-channel.ts#runReturnChannel` | `sink.hook-adapters.return-channel-standing-orders` → `src/cli/hook/standing-orders-context.ts#appendStandingOrders` |
+| `component.hook-adapters.session-lifecycle` | `entrypoint.hook-adapters.subagent-context` | `src/cli/hook/subagent-context.ts#runSubagentContext` | `sink.hook-adapters.subagent-standing-orders` → `src/cli/hook/standing-orders-context.ts#appendStandingOrders` |
 
 ### 1.3 規模信號
 
@@ -178,7 +181,7 @@ flowchart LR
 
 | 組件 | 名稱 | 規模量級 | 宣告入口 |
 | --- | --- | --- | --- |
-| `component.hook-adapters.contracts` | Hook Contracts | `5–10` 個文件 / `200–500` 行 | 未宣告 |
+| `component.hook-adapters.contracts` | Hook Contracts | `5–10` 個文件 / `500–1000` 行 | 未宣告 |
 | `component.hook-adapters.edit-guards` | Edit Guard Handlers | `5–10` 個文件 / `2000–5000` 行 | 未宣告 |
 | `component.hook-adapters.hook-root` | Hook Composition Root | `1–2` 個文件 / `100–200` 行 | 未宣告 |
 | `component.hook-adapters.host-config` | Host Config Write Gate | `5–10` 個文件 / `1000–2000` 行 | 未宣告 |
@@ -187,7 +190,7 @@ flowchart LR
 | `component.hook-adapters.host-installer-effects` | Host Adapter Installer (effects) | `5–10` 個文件 / `200–500` 行 | 未宣告 |
 | `component.hook-adapters.primary` | Hook Route Runtime | `2–5` 個文件 / `500–1000` 行 | `entrypoint.hook-adapters.handler-bindings` |
 | `component.hook-adapters.primary-effects` | Hook Route Runtime (effects) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
-| `component.hook-adapters.session-lifecycle` | Session Lifecycle Handlers | `5–10` 個文件 / `500–1000` 行 | `entrypoint.hook-adapters.stop` |
+| `component.hook-adapters.session-lifecycle` | Session Lifecycle Handlers | `5–10` 個文件 / `500–1000` 行 | `entrypoint.hook-adapters.stop`、`entrypoint.hook-adapters.session-context`、`entrypoint.hook-adapters.return-channel`、`entrypoint.hook-adapters.subagent-context` |
 | `component.hook-adapters.session-lifecycle-effects` | Session Lifecycle Handlers (effects) | `2–5` 個文件 / `200–500` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
