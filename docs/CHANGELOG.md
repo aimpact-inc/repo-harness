@@ -2,6 +2,46 @@
 
 All notable changes to this skill are documented here.
 
+## [0.38.0] - 2026-11-27
+
+### Added
+
+- Auto-pilot control plane: `rh autopilot start [--cadence <minutes>]`, `rh autopilot stop [--reason <text>]` and `rh autopilot status` keep one strict local state at `<git-common-dir>/repo-harness/autopilot.json` (mode `0600`, atomic rename under an exclusive lock, shared by linked worktrees). The state takes only the owner's local command as its activation source, and it fails closed on a symlinked or corrupt file. While auto-pilot is on, the resident attention watcher runs one hourly `[advisor-plan]` tick that inspects batch parents and standalone open issues, resolves the live advisor by repository and seat labels, defers while that seat is working, blocked or in an open seat reset, and stamps `last_advisor_tick_at` only after a confirmed send. A triage may raise an omitted `max_parallel_writers` to `target_parallel_workers` within `ISSUE_FLOW_WORKER_LIMIT`. (#3586)
+- Auto-pilot merge bar and non-blocking parking: `rh board post hold --target <number> --park <category> --reason "<decision>"` records one typed park, and `rh autopilot status` names the decision that each active park needs. With auto-pilot on, merge order skips an earlier parked unit when the later PR holds no open `blocked-by` path or stack dependency on it, and the shared attention hold check silences A1, A14, A15 and A20 on a held PR. A Medium or High PR that merges under this bar needs `Required / CI`, answered review-bot comments, a rollback line and two distinct claimed `PASS` rows on the current head with at least one `different-family` row. Low keeps the verified accept-seat skip. An I1, I2 or release High-list signal, a linked `touches:credentials` item or incomplete path evidence parks the PR instead of merging it. (#3615)
+- Auto-pilot documentation in the rules and in the `repo-harness-issue-flow` skill: activation and stop by a local owner command, the hourly tick, the merge bar, parking, council restraint (no member by default, then one cross-family member) and the soft target of about 5 working seats and 5 CI runs. (#3630)
+- Node 26 support: repo-harness declares Node `>=24 <27`, so a host whose only Node is 26 runs protected helpers with `REPO_HARNESS_NODE_BIN` and `npm install -g repo-harness` prints no engine warning, and `bun.lock` again records the `libc` filters of six `@rolldown/binding-linux-*` entries and `hasInstallScript` of `@google/genai`. `archctx` and `archctx-contracts` move from `0.18.4` to `0.18.5`, which declares Node `>=22.22 <27`, so `rh update` and the architecture commands install and run the pinned provider on Node 26. (#3567, #3572, #3573, #3582)
+- Recommended CLIs in the operator console: the tool catalog gains a `cli` kind and a `research` category, `gemini-notebook-mcp-cli` joins the recommended list and the CLI seed, and the `#cli` and `#tools` pages render the CLI group with EN and ZH labels. (#3569)
+
+### Fixed
+
+- On native Windows, the Pi probe and the Pi CLI run pass through `resolveWindowsLaunchTarget()`, the single launcher rule from 0.37.5, so `rh doctor` reports `pi-package`, `pi-cli-version` and `pi-capability` accurately or fails closed with a clear error. The rule unwraps an npm `cmd-shim` and a classic `.CMD` or `.BAT` shim with no shell fallback, and it keeps the checkout exclusion on the shim, on the target and on the interpreter. (#3570)
+- `rh seats council` honors a stored `seats.council.runtime: "agy"` for a member that has a native `agy` route, so a `carbon` member starts as `gemini-4-carbon-high` on `agy`, while `fable` and `astra` keep their routes. (#3590)
+- The ArchContext projection provider fixture keeps the product runtime selection outside its provider process-tree clock, which removes the native Windows flake of a slow Node runtime probe. No product timeout, retry or assertion kind changed. (#3614)
+
+### Changed
+
+- ArchContext entrypoint routing: nine refactors declare and move component entrypoints, with no behavior change. (#3583, #3584, #3585, #3591, #3592, #3598, #3600, #3601, #3602)
+- God-file splits: 16 of the 19 recorded `low-cohesion-god-file` findings clear, with one responsibility per file, public exports in place and no re-export shim, alias or entrypoint bypass. (#3616, #3617, #3621, #3623, #3624, #3625, #3626, #3627, #3628, #3631, #3633, #3634, #3636)
+
+### Known open
+
+- `src/cli/installer/install-profile.ts` stays recorded unresolved under #3607. Its remaining cluster has one caller at `src/cli/runtime-transaction.ts`, and a sibling file for that cluster adds an entrypoint bypass instead of a fix. A later fix needs a decision on the installer public surface.
+- `src/core/board/seats-settings.ts` stays recorded unresolved under #3632. Its smaller cluster is public API that the larger cluster already calls, and its 84 exported declarations exceed the threshold on their own, so a clear needs a cross-module public-API split. Its two sibling files cleared in the same work. (#3636)
+- `assets/templates/helpers/capability-resolver.ts` is assessed and kept under #3611. `scripts/sync-helper-sources.ts` generates it as one file, and the tarball smoke, the state-boundary check and the workflow contract read it as one file, so a split needs a downstream migration.
+- The 15 `co-change-coupling` findings are classified, not fixed, under #3613. 13 of them reproduce at main, and all 13 are expected feature coupling: the release drift-check group, the seat-settings contract, hook contracts with their handlers, install and uninstall symmetry, and the layer splits that the one-layer-per-node model requires. Two IDs are already gone. The repository scan hides all of them behind the 25-recommendation cap (archctx#659).
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.38.0.
+- Auto-pilot is opt-in by a local command: run `rh autopilot start` on the orchestrator host, and `rh autopilot stop` to end it. No comment, repository file or update turns it on, and the board keeps its current merge rules while it is off.
+- A host whose only Node is 26 runs the protected helpers without an engine warning after the update. A host below Node 24 stays unsupported.
+- `rh seats council` starts a `carbon` member on native `agy` only when the seat configuration stores `seats.council.runtime: "agy"`; without that value the existing route stays.
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.37.5 has no auto-pilot state, no parking and no auto-pilot merge bar, and it declares Node `>=24 <26`. Keep 0.38.0 on upgraded hosts; if you must return to 0.37.5, reinstall 0.37.5 and run `rh update`, and accept that a host whose only Node is 26 cannot run the protected helpers.
+
 ## [0.37.5] - 2026-11-26
 
 ### Fixed
