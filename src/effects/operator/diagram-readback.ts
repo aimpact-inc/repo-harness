@@ -9,6 +9,7 @@ import { diagramSourceIssues, type DocsDiagramFailure, type DocsDiagramIssueV1 }
 import { repoHarnessHome } from '../repo-harness-home';
 import { diagramHash } from './diagram-renderer';
 import { probeRenderCapability, renderDiagramPass, type RenderPassOptions, type RenderPassResult } from './diagram-render';
+export type { RenderPassOptions, RenderPassResult } from './diagram-render';
 
 export type DiagramReadback =
   | { readonly ok: true; readonly hash: string; readonly png: string }

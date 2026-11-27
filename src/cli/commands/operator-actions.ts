@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import type { RenderPassOptions, RenderPassResult } from '../../effects/operator/diagram-render';
-import { readbackDiagram, readbackExitCode } from '../../effects/operator/diagram-readback';
+import { readbackDiagram, readbackExitCode, type RenderPassOptions, type RenderPassResult } from '../../effects/operator/diagram-readback';
 import { fileURLToPath } from 'node:url';
 import { version as PACKAGE_VERSION } from '../../../package.json';
 import { OPERATOR_WEB_PACKAGE_NAME } from '../../core/skill-surface/plugin-manifest';
@@ -11,19 +10,16 @@ import { globalRuntimeContextHosts, inspectGlobalContext, parseReportLanguageFla
 import { readRecordedInstallState } from '../installer/install-state';
 import { recordedAntigravityRules } from '../installer/targets/antigravity';
 import { antigravityGlobalRulesPath, resolveUserConfigFile } from '../../effects/host-config/gate';
-import type { OperatorLanguageSettingsAdapter } from '../../effects/operator/language-settings-route';
 import { OperatorWriteRefusal } from '../../effects/operator/write-run';
 import { acquireRuntimeTransactionLock, globalRuntimeScope } from '../../effects/locking/runtime-transaction-lock';
 import { ExclusiveLockContentionError } from '../../effects/locking/exclusive-directory-lock';
-import { RUNTIME_CAPTURE_PYTHON_UNAVAILABLE } from '../../effects/operator/runtime-capture-pty';
-import { runRuntimeCapture } from '../../effects/operator/runtime-capture';
-import { RUNTIME_CAPTURE_OWNERSHIP_UNSUPPORTED } from '../../effects/operator/runtime-capture-writer';
+import { runRuntimeCapture, RUNTIME_CAPTURE_OWNERSHIP_UNSUPPORTED, RUNTIME_CAPTURE_PYTHON_UNAVAILABLE } from '../../effects/operator/runtime-capture';
 import { runtimeCaptureId, type NativeRuntimeProvider } from '../../core/operator/runtime-capture';
 import { readRepoHarnessRegistryStrictSnapshot } from '../../effects/repo-registry';
-import { runCleanupInvestigationJob, type CleanupReviewHost } from '../../effects/operator/worktree-cleanup-investigation';
 import type { CliUsageSource } from '../../effects/setup/cli-inventory';
 import { HOOK_EVENT_TELEMETRY_PATH } from '../hook/event-telemetry';
-import { OperatorServerError, startOperatorServer, type OperatorServerOptions } from '../../effects/operator/server';
+import { OperatorServerError, runCleanupInvestigationJob, startOperatorServer, type CleanupReviewHost, type OperatorLanguageSettingsAdapter, type OperatorServerOptions } from '../../effects/operator/server';
+export type { CleanupReviewHost } from '../../effects/operator/server';
 import { OPERATOR_DEFAULT_HOST, OPERATOR_DEFAULT_MAX_CONCURRENCY, OPERATOR_DEFAULT_PORT, OPERATOR_DEFAULT_TIMEOUT_MS } from '../../core/review/operator-console-port';
 
 export interface OperatorServeRawOptions {
