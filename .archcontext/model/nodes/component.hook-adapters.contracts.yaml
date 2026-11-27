@@ -9,6 +9,7 @@ summary: "Shared contracts for hook dispatch, host adapters and handlers."
 responsibilities:
   - Define the ordered hook routes and host support for each route.
   - Parse payloads and define hook identity, handlers and host output.
+  - Own the host adapter table, Antigravity payload decode and render rules, environment filter and repository resolver.
   - Define the context budget, denial shape and protected directory list.
 source:
   include:
@@ -16,6 +17,7 @@ source:
     - src/cli/hook/handler-contract.ts
     - src/cli/hook/hook-input.ts
     - src/cli/hook/hook-protocol.ts
+    - src/cli/hook/host-adapter.ts
     - src/cli/hook/mutation-protected-dirs.ts
     - src/cli/hook/route-registry.ts
     - src/cli/hook/session-context-budget.ts
