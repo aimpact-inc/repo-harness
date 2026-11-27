@@ -1,37 +1,34 @@
 import { gitExecFileSync } from '../git/runner';
-import { spawnSync } from 'child_process';
-import {
-  assessRequiredCheckFailure,
-  type RequiredCheckAttemptObservationV1,
-  type RequiredCheckChildObservationV1,
-  type RequiredCheckFailureEvidenceV1,
-} from '../../core/evidence/required-check-evidence';
 import type { RequiredCheckTestExecutionV1 } from '../../core/evidence/test-execution-evidence';
-import { parseWorkflowGraph, placeFailedJobs } from '../../core/evidence/workflow-needs';
-import {
-  readTestExecutionEvidence,
-} from './test-execution-evidence';
 import {
   projectPullRequestMergeReadiness,
-  rollbackParent,
   unobservedStackDetail,
   type MergeReadinessObservation,
   type MergeReadinessStackDetailV1,
-  type MergeReadinessStackEntryV1,
   type PullRequestReadinessV2,
   type PullRequestSelectionV2,
   type ProviderMergeReadinessFactsV1,
-  type RequiredCheckBucketV1,
-  type RequiredCheckCoverageFactsV1,
 } from '../../core/publication/merge-readiness';
+import type { PolicyFileAtRef } from '../../core/publication/acceptance-merge-policy';
 import {
-  PUBLICATION_POLICY_PATH,
-  policyFileFromContents,
-  publicationPolicyBlocksAtRef,
-  type PolicyFileAtRef,
-} from '../../core/publication/acceptance-merge-policy';
-import type { GeneratedArtifactsFactsV1 } from '../../core/publication/generated-artifacts';
-import { observeGeneratedArtifacts } from './generated-artifacts';
+  collectRequiredCheckFailures,
+  protectedChecks,
+} from './merge-readiness-checks';
+import { observeBasePolicyFacts } from './merge-readiness-policy';
+import {
+  identityBytes,
+  parseProviderPullRequestIdentity,
+  parseProviderReadinessFacts,
+  providerReviewArgs,
+} from './merge-readiness-reviews';
+import { observeRollbackBoundary } from './merge-readiness-rollback';
+import { observeStack } from './merge-readiness-stack';
+import {
+  createProviderReader,
+  validSha,
+  type ProviderReader,
+} from './merge-readiness-transport';
+
 export type MergeReadinessErrorCode =
   | 'provider_unavailable'
   | 'provider_data_incomplete';
@@ -48,6 +45,14 @@ export class MergeReadinessError extends Error {
     this.name = 'MergeReadinessError';
     this.detail = detail ?? message;
   }
+}
+
+function failReadiness(code: MergeReadinessErrorCode, message: string, cause?: unknown, detail?: string): never {
+  throw new MergeReadinessError(code, message, cause, detail);
+}
+
+function readerFor(input: PublicationReadinessInput): ProviderReader {
+  return createProviderReader(input, failReadiness);
 }
 
 /** Registry-bound adapters must bind local PR authority before querying the provider.
@@ -115,873 +120,31 @@ export interface ProviderIdentity {
   readonly base_ref: string;
   readonly body: string;
   readonly review_decision: string | null;
-  /** The provider's changed-file count for this head; drives the exact page count. */
+  /** Provider changed-file count for this head; drives exact REST file pagination. */
   readonly changed_files: number;
   readonly mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
 }
 
-const PROVIDER_SYNCHRONOUS_TIMEOUT_MS = 30_000;
-
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new MergeReadinessError('provider_data_incomplete', `${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function string(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new MergeReadinessError('provider_data_incomplete', `${label} is required`);
-  }
-  return value;
-}
-
-function validSha(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && value !== '0'.repeat(40);
-}
-
-function githubArguments(input: PublicationReadinessInput, args: readonly string[]): readonly string[] {
-  if (args[0] === 'api') return [...args, '--hostname', 'github.com'];
-  if (input.repository) {
-    const repository = `github.com/${input.repository}`;
-    if (args[0] === 'repo' && args[1] === 'view') return [...args.slice(0, 2), repository, ...args.slice(2)];
-    if (args[0] === 'pr') return [...args, '--repo', repository];
-  }
-  return args;
-}
-
-interface GhObservation {
-  readonly status: number;
-  readonly value: unknown;
-}
-
-function ghObserve(input: PublicationReadinessInput, args: readonly string[], accepted: readonly number[]): GhObservation {
-  args = githubArguments(input, args);
-  const injected = input.gh_runner?.(args);
-  const result = injected ?? spawnSync(input.gh_bin ?? process.env.REPO_HARNESS_GH_BIN ?? 'gh', [...args], {
-    cwd: input.repo_root,
-    env: { ...process.env, GH_HOST: 'github.com' },
-    encoding: 'utf-8',
-    timeout: PROVIDER_SYNCHRONOUS_TIMEOUT_MS,
-    killSignal: 'SIGKILL',
-  });
-  if (('error' in result && result.error) || result.status === null || !accepted.includes(result.status)) {
-    const cause = 'error' in result ? result.error : undefined;
-    throw new MergeReadinessError(
-      'provider_unavailable',
-      `provider observation failed: gh ${args.join(' ')}: ${(result.stderr || cause?.message || `exit ${result.status}`).trim()}`,
-      cause,
-    );
-  }
-  try {
-    return { status: result.status, value: JSON.parse(result.stdout) };
-  } catch (error) {
-    throw new MergeReadinessError('provider_data_incomplete', `provider returned invalid JSON: gh ${args.join(' ')}`, error,
-      'provider response is not valid JSON');
-  }
-}
-
-function gh(input: PublicationReadinessInput, args: readonly string[], accepted = [0]): unknown {
-  const observed = ghObserve(input, args, accepted);
-  if (args[0] === 'api' && accepted.includes(1)) {
-    if (observed.status !== 0 && (observed.value as { status?: unknown } | null)?.status !== '404') {
-      throw new MergeReadinessError('provider_unavailable', 'rollback reporter activation unavailable');
-    }
-    if (observed.status === 0 && (observed.value as { status?: unknown } | null)?.status === '404') {
-      throw new MergeReadinessError('provider_data_incomplete', 'rollback reporter activation HTTP status is inconsistent');
-    }
-  }
-  return observed.value;
-}
-
-/** A provider read where 404 is a real answer: a missing policy file, not a provider outage. */
-function ghOptional(input: PublicationReadinessInput, args: readonly string[]): unknown | null {
-  const observed = ghObserve(input, args, [0, 1]);
-  if (observed.status === 0) {
-    if ((observed.value as { status?: unknown } | null)?.status === '404') {
-      throw new MergeReadinessError('provider_data_incomplete', 'provider returned a 404 with a success status');
-    }
-    return observed.value;
-  }
-  if ((observed.value as { status?: unknown } | null)?.status === '404') return null;
-  throw new MergeReadinessError('provider_unavailable', `provider observation failed: gh ${args.join(' ')}: HTTP ${observed.status}`);
-}
-
-function identityBytes(identity: ProviderIdentity): string {
-  const { body: _body, ...fences } = identity;
-  return JSON.stringify(fences);
-}
-
-/** The provider's changed-file count; it must be present, because it sets the exact page count. */
-function changedFiles(value: unknown): number {
-  if (!Number.isSafeInteger(value) || Number(value) < 0) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider PR changedFiles is invalid');
-  }
-  return Number(value);
-}
-
-function parseProviderPullRequestIdentity(prNumber: number, repoValue: unknown, prValue: unknown): ProviderIdentity {
-  const repo = object(repoValue, 'provider repository');
-  const pr = object(prValue, 'provider PR');
-  const number = pr.number;
-  if (!Number.isInteger(number) || number !== prNumber) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider PR number does not match the requested PR');
-  }
-  if (typeof pr.isDraft !== 'boolean') throw new MergeReadinessError('provider_data_incomplete', 'provider PR isDraft is invalid');
-  if (!['OPEN', 'CLOSED', 'MERGED'].includes(String(pr.state))) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider PR state is unknown');
-  }
-  // gh pr view serializes an absent GraphQL review decision as an empty string.
-  const reviewDecision = pr.reviewDecision === '' ? null : pr.reviewDecision;
-  if (reviewDecision !== null && (typeof reviewDecision !== 'string'
-    || !['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'].includes(reviewDecision))) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider PR reviewDecision is unknown');
-  }
-  if (pr.mergeable !== 'MERGEABLE' && pr.mergeable !== 'CONFLICTING' && pr.mergeable !== 'UNKNOWN') {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider PR mergeable is invalid');
-  }
-  const identity: ProviderIdentity = Object.freeze({
-    provider_repo_id: string(repo.id, 'provider repository id'),
-    repo_name_with_owner: string(repo.nameWithOwner, 'provider repository nameWithOwner'),
-    pr_number: number as number,
-    pr_url: string(pr.url, 'provider PR URL'),
-    state: string(pr.state, 'provider PR state'),
-    is_draft: pr.isDraft,
-    head_sha: string(pr.headRefOid, 'provider PR head OID'),
-    head_ref: string(pr.headRefName, 'provider PR head ref'),
-    base_sha: string(pr.baseRefOid, 'provider PR base OID'),
-    base_ref: string(pr.baseRefName, 'provider PR base ref'),
-    body: typeof pr.body === 'string' ? pr.body : '',
-    review_decision: reviewDecision,
-    changed_files: changedFiles(pr.changedFiles),
-    mergeable: pr.mergeable,
-  });
-  return identity;
-}
-
-function threadComments(thread: Record<string, unknown>): { readonly connection: Record<string, unknown>; readonly nodes: readonly unknown[] } {
-  const connection = object(thread.comments, 'provider review thread comments');
-  if (!Array.isArray(connection.nodes)) throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comments are invalid');
-  return { connection, nodes: connection.nodes };
-}
-
-function commentAuthorType(comment: unknown): string | null {
-  const author = object(comment, 'provider review thread comment').author;
-  if (author === null) return null;
-  const type = object(author, 'provider review thread comment author').__typename;
-  if (typeof type !== 'string') throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comment author type is invalid');
-  return type;
-}
-
-/**
- * Review bots (Codex, Copilot, CodeRabbit and others) post advisory threads, so
- * a thread that a GitHub App account started does not count as unresolved. A
- * thread with no first comment or a deleted author still does.
- */
-function botStartedThread(comments: readonly unknown[]): boolean {
-  return comments[0] !== undefined && commentAuthorType(comments[0]) === 'Bot';
-}
-
-/**
- * Life-cycle rule (2) needs a response to each review-bot thread: a later
- * comment from an author that is not a bot. A deleted author is not proof of a
- * response. The comment pages matter only when the read nodes hold no response.
- */
-function botThreadAnswered(comments: ReturnType<typeof threadComments>): boolean {
-  if (comments.nodes.slice(1).some(comment => { const type = commentAuthorType(comment); return type !== null && type !== 'Bot'; })) return true;
-  if (object(comments.connection.pageInfo, 'provider review thread comments pageInfo').hasNextPage !== false) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider review thread comments were not exhaustively observed');
-  }
-  return false;
-}
-
-function parseProviderReadinessFacts(
+export function observeProviderReadinessFacts(
   identity: ProviderIdentity,
-  checksValue: unknown,
-  rollbackBoundary: ProviderMergeReadinessFactsV1['rollback_boundary'],
-  graphValue: unknown,
-  checkFailures: readonly RequiredCheckFailureEvidenceV1[],
-  coverage: RequiredCheckCoverageFactsV1,
-  generated: GeneratedArtifactsFactsV1,
-): ProviderMergeReadinessFactsV1 {
-  if (!Array.isArray(checksValue)) throw new MergeReadinessError('provider_data_incomplete', 'provider required checks must be an array');
-  const checks = checksValue.map(providerCheck).map(({ name, bucket }) => Object.freeze({ name, bucket }));
-  const graph = object(graphValue, 'provider GraphQL result');
-  if (graph.errors !== undefined && (!Array.isArray(graph.errors) || graph.errors.length > 0)) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider review query has errors');
-  }
-  const node = object(object(graph.data, 'provider GraphQL data').node, 'provider repository node');
-  const pr = object(node.pullRequest, 'provider review PR');
-  if (node.id !== identity.provider_repo_id || pr.number !== identity.pr_number
-    || pr.headRefOid !== identity.head_sha || pr.baseRefOid !== identity.base_sha) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider reviews do not bind this PR/head/base');
-  }
-  if (pr.reviewDecision !== identity.review_decision) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider review decision changed during read');
-  }
-  const threads = object(pr.reviewThreads, 'provider review threads');
-  const reviews = object(pr.latestOpinionatedReviews, 'provider latest opinionated reviews');
-  for (const connection of [threads, reviews]) {
-    if (object(connection.pageInfo, 'provider review pageInfo').hasNextPage !== false || !Array.isArray(connection.nodes)) {
-      throw new MergeReadinessError('provider_data_incomplete', 'provider reviews and threads were not exhaustively observed');
-    }
-  }
-  let unresolved = 0;
-  let unansweredBot = 0;
-  for (const entry of threads.nodes as unknown[]) {
-    const thread = object(entry, 'provider review thread');
-    if (typeof thread.isResolved !== 'boolean') throw new MergeReadinessError('provider_data_incomplete', 'provider review thread isResolved is invalid');
-    if (thread.isResolved) continue;
-    const comments = threadComments(thread);
-    if (!botStartedThread(comments.nodes)) unresolved++;
-    else if (!botThreadAnswered(comments)) unansweredBot++;
-  }
-  let changesRequested = pr.reviewDecision === 'CHANGES_REQUESTED';
-  for (const entry of reviews.nodes as unknown[]) {
-    const review = object(entry, 'provider review');
-    if (!['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'].includes(String(review.state))) {
-      throw new MergeReadinessError('provider_data_incomplete', 'provider review state is unknown');
-    }
-    if (review.state === 'CHANGES_REQUESTED') changesRequested = true;
-  }
-  return Object.freeze({
-    state: identity.state,
-    is_draft: identity.is_draft,
-    head_sha: identity.head_sha,
-    base_sha: identity.base_sha,
-    review_decision: changesRequested ? 'CHANGES_REQUESTED' : identity.review_decision,
-    unresolved_thread_count: unresolved,
-    unanswered_bot_thread_count: unansweredBot,
-    rollback_boundary: rollbackBoundary,
-    checks: Object.freeze(checks),
-    check_failures: Object.freeze([...checkFailures]),
-    required_check_coverage: coverage,
-    generated_artifacts: generated,
-    mergeable: identity.mergeable,
-  });
-}
-
-function providerReviewArgs(identity: ProviderIdentity): string[] {
-  // Latest opinionated reviews preserve a change request across later comment-only reviews.
-  const query = 'query($repoId:ID!,$number:Int!){node(id:$repoId){id ... on Repository{pullRequest(number:$number){number headRefOid baseRefOid reviewDecision latestOpinionatedReviews(first:100){pageInfo{hasNextPage}nodes{state}} reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved comments(first:100){pageInfo{hasNextPage}nodes{author{__typename}}}}}}}}}';
-  return ['api', 'graphql', '-f', `query=${query}`, '-F', `repoId=${identity.provider_repo_id}`, '-F', `number=${identity.pr_number}`];
-}
-
-type ProviderCheckBucket = RequiredCheckBucketV1;
-
-interface ProviderCheck {
-  readonly name: string;
-  readonly bucket: ProviderCheckBucket;
-  readonly link: string;
-  readonly workflow: string;
-}
-
-function providerCheck(value: unknown): ProviderCheck {
-  const check = object(value, 'provider required check');
-  if (typeof check.bucket !== 'string'
-    || !['pass', 'fail', 'pending', 'skipping', 'cancel'].includes(check.bucket)) {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider required check bucket is unknown');
-  }
-  return Object.freeze({
-    name: string(check.name, 'provider required check name'),
-    bucket: check.bucket as ProviderCheckBucket,
-    // External status checks need no Actions link.
-    link: typeof check.link === 'string' ? check.link : '',
-    workflow: typeof check.workflow === 'string' ? check.workflow : '',
-  });
-}
-
-function checkArray(value: unknown): ProviderCheck[] {
-  if (!Array.isArray(value)) throw new MergeReadinessError('provider_data_incomplete', 'provider required checks must be an array');
-  return value.map(providerCheck);
-}
-
-function protectedChecks(identity: ProviderIdentity, prNumber: number, input: PublicationReadinessInput): ProviderCheck[] {
-  const required = input.required_status_checks_at_base === undefined
-    ? object(gh(input, ['api', `repos/${identity.repo_name_with_owner}/branches/${encodeURIComponent(identity.base_ref)}/protection`]), 'base protection').required_status_checks
-    : input.required_status_checks_at_base;
-  const contexts = object(required, 'base required status checks').contexts;
-  if (!Array.isArray(contexts) || contexts.length === 0) {
-    throw new MergeReadinessError('provider_data_incomplete', 'base protection must require at least one status check context');
-  }
-  const names = new Set(contexts.map(context => string(context, 'protected check context')));
-  const checks = checkArray(gh(input, [
-    'pr', 'checks', String(prNumber), '--required', '--json', 'name,bucket,link,workflow',
-  ], [0, 1, 8]));
-  for (const name of names) {
-    if (!checks.some(check => check.name === name)) {
-      throw new MergeReadinessError('provider_data_incomplete', `protected check context is missing: ${name}`, undefined,
-        'a base protection required_status_checks context is missing from the required checks');
-    }
-  }
-  return checks;
-}
-
-interface RequiredCheckLink {
-  readonly run_id: number;
-  readonly job_id: number;
-  readonly run_api_path: string;
-  readonly job_url: string;
-}
-
-function checkLink(identity: ProviderIdentity, link: string): RequiredCheckLink {
-  let url: URL;
-  try { url = new URL(link); } catch { throw new MergeReadinessError('provider_data_incomplete', 'required Actions check URL unavailable'); }
-  const segments = url.pathname.split('/').filter(Boolean);
-  const [owner, repo] = identity.repo_name_with_owner.split('/');
-  if (url.protocol !== 'https:' || url.hostname !== 'github.com' || segments.length !== 7
-    || segments[0] !== owner || segments[1] !== repo || segments[2] !== 'actions'
-    || segments[3] !== 'runs' || segments[5] !== 'job' || !/^\d+$/.test(segments[4]!) || !/^\d+$/.test(segments[6]!)) {
-    throw new MergeReadinessError('provider_data_incomplete', 'required check is not a repository Actions check');
-  }
-  return Object.freeze({
-    run_id: Number(segments[4]),
-    job_id: Number(segments[6]),
-    run_api_path: `repos/${identity.repo_name_with_owner}/actions/runs/${segments[4]}`,
-    job_url: link,
-  });
-}
-
-interface RequiredCheckRunFacts {
-  readonly path: string;
-  readonly head_sha: string;
-  readonly run_attempt: number;
-  readonly workflow_id: number | null;
-}
-
-function requiredCheckRunFacts(identity: ProviderIdentity, value: unknown, label: string): RequiredCheckRunFacts {
-  const run = object(value, label);
-  if (typeof run.path !== 'string' || run.path.trim() === '' || typeof run.event !== 'string'
-    || run.head_sha !== identity.head_sha
-    || !Array.isArray(run.pull_requests) || !run.pull_requests.some(pr => pr?.number === identity.pr_number
-      && pr.head?.sha === identity.head_sha && pr.base?.sha === identity.base_sha)) {
-    throw new MergeReadinessError('provider_data_incomplete', `${label} does not bind this PR/head/base`);
-  }
-  const attempt = run.run_attempt === undefined ? 1 : run.run_attempt;
-  if (!Number.isSafeInteger(attempt) || Number(attempt) < 1) {
-    throw new MergeReadinessError('provider_data_incomplete', `${label} attempt is invalid`);
-  }
-  return Object.freeze({
-    path: run.path,
-    head_sha: run.head_sha,
-    run_attempt: Number(attempt),
-    workflow_id: Number.isSafeInteger(run.workflow_id) && Number(run.workflow_id) > 0 ? Number(run.workflow_id) : null,
-  });
-}
-
-type AttemptConclusion = 'success' | 'failure' | 'timed_out' | 'cancelled' | 'skipped' | 'unknown';
-
-function attemptConclusion(value: unknown): AttemptConclusion {
-  return ['success', 'failure', 'timed_out', 'cancelled', 'skipped'].includes(String(value))
-    ? value as AttemptConclusion : 'unknown';
-}
-
-interface AttemptJob {
-  readonly id: number;
-  readonly name: string;
-  readonly conclusion: AttemptConclusion;
-  readonly check_run_id: number | null;
-  readonly steps: readonly { readonly name: string; readonly conclusion: AttemptConclusion }[];
-}
-
-function attemptJob(value: unknown): AttemptJob {
-  const job = object(value, 'required check attempt job');
-  if (!Number.isSafeInteger(job.id) || Number(job.id) < 1 || typeof job.name !== 'string' || job.name.trim() === '') {
-    throw new MergeReadinessError('provider_data_incomplete', 'required check attempt job identity is incomplete');
-  }
-  if (!Array.isArray(job.steps)) throw new MergeReadinessError('provider_data_incomplete', 'required check attempt steps are unavailable');
-  const steps = job.steps.map(entry => {
-    const step = object(entry, 'required check attempt step');
-    return Object.freeze({ name: string(step.name, 'required check attempt step name'), conclusion: attemptConclusion(step.conclusion) });
-  });
-  const checkRun = typeof job.check_run_url === 'string'
-    ? /^https:\/\/api\.github\.com\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/check-runs\/(\d+)$/u.exec(job.check_run_url)
-    : null;
-  return Object.freeze({ id: Number(job.id), name: job.name, conclusion: attemptConclusion(job.conclusion),
-    check_run_id: checkRun ? Number(checkRun[1]) : null, steps: Object.freeze(steps) });
-}
-
-function attemptJobs(value: unknown): AttemptJob[] {
-  const page = object(value, 'required check attempt jobs');
-  if (!Array.isArray(page.jobs) || !Number.isSafeInteger(page.total_count) || Number(page.total_count) < 1
-    || Number(page.total_count) >= 100) {
-    throw new MergeReadinessError('provider_data_incomplete', 'required check attempt jobs were not exhaustively observed');
-  }
-  const jobs = page.jobs.map(attemptJob);
-  if (jobs.length !== page.total_count) throw new MergeReadinessError('provider_data_incomplete', 'required check attempt jobs were not exhaustively observed');
-  return jobs;
-}
-
-interface ProviderRequest {
-  /** Provider read arguments. Exactly one of args and test_execution is set. */
-  readonly args?: readonly string[];
-  /** Best-effort evidence: a missing annotation feed is not a provider outage. */
-  readonly optional?: boolean;
-  /** Read test-level execution evidence for one attempt; the transport answers it. */
-  readonly test_execution?: TestExecutionReadRequest;
-}
-
-interface AnnotationEvidence {
-  readonly excerpt: string | null;
-  readonly tests: readonly string[];
-}
-
-/** A test reporter names the failed child in the annotation title or first message line. */
-const TEST_IDENTIFIER = /(?:[^\s]+\.(?:test|spec)\.[cm]?[jt]sx?(?::\d+)?|\S+\s+>\s+\S+)/u;
-
-function annotationEvidence(value: unknown): AnnotationEvidence {
-  if (!Array.isArray(value)) return Object.freeze({ excerpt: null, tests: Object.freeze([]) });
-  const messages: string[] = [];
-  const tests: string[] = [];
-  for (const entry of value) {
-    const annotation = object(entry, 'job annotation');
-    if (typeof annotation.title === 'string') {
-      const title = annotation.title.trim();
-      if (title !== '' && TEST_IDENTIFIER.test(title)) tests.push(title);
-    }
-    if (typeof annotation.message !== 'string') continue;
-    const message = annotation.message.trim();
-    if (message === '') continue;
-    messages.push(message);
-    const firstLine = message.split(/\r?\n/u)[0]!.trim();
-    if (TEST_IDENTIFIER.test(firstLine)) tests.push(firstLine);
-  }
-  const joined = messages.slice(0, 3).join('\n');
-  return Object.freeze({
-    excerpt: joined === '' ? null : joined.length > 4_000 ? `${joined.slice(0, 4_000)}…` : joined,
-    tests: Object.freeze([...new Set(tests)]),
-  });
-}
-
-const FAILED_ATTEMPT_CONCLUSIONS: ReadonlySet<AttemptConclusion> = new Set(['failure', 'timed_out', 'cancelled']);
-
-function jobFailed(job: AttemptJob): boolean {
-  return FAILED_ATTEMPT_CONCLUSIONS.has(job.conclusion) || job.steps.some(step => FAILED_ATTEMPT_CONCLUSIONS.has(step.conclusion));
-}
-
-const WORKFLOW_PATH = /^\.github\/workflows\/[A-Za-z0-9._-]+\.ya?ml$/u;
-
-/** The workflow file content at the run revision; null when it is unavailable or unreadable. */
-function workflowDefinitionText(value: unknown): string | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const file = value as Record<string, unknown>;
-  if (file.type !== 'file' || file.encoding !== 'base64' || typeof file.content !== 'string') return null;
-  try {
-    const text = Buffer.from(file.content.replace(/\s/gu, ''), 'base64').toString('utf8');
-    return text.trim() === '' ? null : text;
-  } catch {
-    return null;
-  }
-}
-
-function attemptObservation(
-  job: AttemptJob,
-  attempt: number,
-  runUrl: string,
-  link: RequiredCheckLink,
-  annotation: AnnotationEvidence | undefined,
-): RequiredCheckAttemptObservationV1 {
-  const skipped = job.steps.filter(step => step.conclusion === 'skipped').map(step => step.name);
-  const executed = [job.name, ...job.steps.filter(step => step.conclusion !== 'skipped').map(step => step.name)];
-  return Object.freeze({
-    run_id: link.run_id,
-    attempt,
-    job_id: job.id,
-    job_name: job.name,
-    run_url: runUrl,
-    job_url: job.id === link.job_id ? link.job_url : `${runUrl}/job/${job.id}`,
-    conclusion: job.conclusion,
-    steps: Object.freeze(job.steps.filter(step => FAILED_ATTEMPT_CONCLUSIONS.has(step.conclusion)).map(step => step.name)),
-    failed_tests: annotation?.tests ?? Object.freeze([]),
-    logs_available: false,
-    failure_excerpt: annotation?.excerpt ?? null,
-    platform_evidence: Object.freeze([]),
-    scope: Object.freeze({ executed: Object.freeze(executed), skipped: Object.freeze(skipped) }),
-    test_execution: null,
-  });
-}
-
-/**
- * Reads the attempt history of one required check. A rerun keeps one run id
- * and increments the attempt; this collector follows that link. The linked job
- * is the check itself. When other jobs failed in the same attempt, the
- * collector reads the workflow revision's declared needs and preserves the
- * proven failed children. Without proof the association stays unknown and the
- * summary job keeps the reported failure point.
- */
-function* checkEvidence(
-  identity: ProviderIdentity,
-  check: ProviderCheck,
-  run: RequiredCheckRunFacts,
-  link: RequiredCheckLink,
-): Generator<ProviderRequest, RequiredCheckFailureEvidenceV1 | null, unknown> {
-  // A first-attempt green or pending check has no failure history to record.
-  if (run.run_attempt === 1 && (check.bucket === 'pass' || check.bucket === 'pending')) return null;
-  const pages: AttemptJob[][] = [];
-  for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
-    pages.push(attemptJobs(yield { args: ['api', `${link.run_api_path}/attempts/${attempt}/jobs?per_page=100`] }));
-  }
-  const linked = pages.flat().find(job => job.id === link.job_id);
-  if (!linked) throw new MergeReadinessError('provider_data_incomplete', 'required check job link does not resolve');
-  const linkedJobs = pages.map((page, index) => page.find(job => job.name === linked.name)
-    ?? (index + 1 === run.run_attempt ? linked : undefined));
-  if (linkedJobs.some(job => job === undefined)) {
-    throw new MergeReadinessError('provider_data_incomplete', 'required check rerun did not preserve the failed job');
-  }
-  const attemptsJobs = linkedJobs as AttemptJob[];
-  const checkFailed = attemptsJobs.some(jobFailed);
-  const succeededEveryAttempt = !checkFailed && attemptsJobs.every(job => job.conclusion === 'success');
-  const otherFailed = pages.flatMap((page, index) =>
-    page.filter(job => job.id !== attemptsJobs[index]!.id && FAILED_ATTEMPT_CONCLUSIONS.has(job.conclusion)));
-
-  let association: 'direct' | 'declared_needs' | 'unknown' = 'direct';
-  const childAssociations = new Map<string, 'declared_needs' | 'unknown'>();
-  if (otherFailed.length > 0) {
-    const contentsPath = WORKFLOW_PATH.test(run.path) ? run.path : null;
-    const definitions: (string | null)[] = [];
-    for (const ref of contentsPath === null ? [] : [run.head_sha, identity.base_sha]) {
-      definitions.push(workflowDefinitionText(yield {
-        args: ['api', `repos/${identity.repo_name_with_owner}/contents/${contentsPath}?ref=${ref}`],
-        optional: true,
-      }));
-    }
-    // A pull_request run takes its jobs from the merge commit; the head copy
-    // is that graph only when the base copy is the same text.
-    const [head, base] = definitions;
-    const graph = head == null || head !== base ? null : parseWorkflowGraph(head);
-    const placement = graph === null ? null
-      : placeFailedJobs(graph, linked.name, otherFailed.map(job => job.name));
-    // Old failures are not evidence for this check only when it succeeded in
-    // every attempt and each failed job resolves outside its full needs graph.
-    if (placement !== null && [...placement.failed.values()].every(where => where === 'outside')
-      && succeededEveryAttempt) return null;
-    const needed = otherFailed.filter(job => placement?.failed.get(job.name) === 'needed');
-    if (needed.length > 0) {
-      association = 'declared_needs';
-      for (const job of needed) childAssociations.set(job.name, 'declared_needs');
-    } else if (!(placement?.direct && checkFailed)) {
-      // A check with no needs stays direct only when one of its own attempts failed.
-      association = 'unknown';
-      for (const job of otherFailed) childAssociations.set(job.name, 'unknown');
-    }
-  }
-
-  // Annotations are read once per failed job identity, never invented.
-  const annotationJobs = new Map<number, AttemptJob>();
-  const noteAnnotations = (job: AttemptJob | undefined): void => {
-    if (job === undefined || !FAILED_ATTEMPT_CONCLUSIONS.has(job.conclusion) || job.check_run_id === null) return;
-    annotationJobs.set(job.id, job);
-  };
-  for (const job of attemptsJobs) noteAnnotations(job);
-  for (const name of childAssociations.keys()) {
-    for (const page of pages) noteAnnotations(page.find(job => job.name === name));
-  }
-  const annotations = new Map<number, AnnotationEvidence>();
-  for (const job of annotationJobs.values()) {
-    annotations.set(job.id, annotationEvidence(yield {
-      args: ['api', `repos/${identity.repo_name_with_owner}/check-runs/${job.check_run_id}/annotations?per_page=100`],
-      optional: true,
-    }));
-  }
-
-  const runUrl = `https://github.com/${identity.repo_name_with_owner}/actions/runs/${link.run_id}`;
-  const attempts = attemptsJobs.map((job, index) => attemptObservation(
-    job, index + 1, runUrl, link, annotations.get(job.id),
-  ));
-  const children: RequiredCheckChildObservationV1[] = [...childAssociations.entries()].map(([name, childAssociation]) => ({
-    job_name: name,
-    association: childAssociation,
-    attempts: pages.flatMap((page, index) => {
-      const job = page.find(entry => entry.name === name);
-      return job === undefined ? [] : [attemptObservation(job, index + 1, runUrl, link, annotations.get(job.id))];
-    }),
-  }));
-  // Without failure evidence of its own or of a declared need, a check that is
-  // not green now stays blocked by its bucket; a green check with an attempt
-  // that did not succeed reaches the fail-closed assessment.
-  if (!checkFailed && association !== 'declared_needs'
-    && (check.bucket !== 'pass' || (children.length === 0 && succeededEveryAttempt))) return null;
-  if (attemptsJobs.length > 1 && attemptsJobs[attemptsJobs.length - 1]!.conclusion === 'success') {
-    const latestTestExecution = (yield { test_execution: {
-      repository: identity.repo_name_with_owner,
-      run_id: link.run_id,
-      attempt: run.run_attempt,
-    } }) as RequiredCheckTestExecutionV1;
-    const last = attempts[attempts.length - 1]!;
-    attempts[attempts.length - 1] = Object.freeze({ ...last, test_execution: latestTestExecution });
-  }
-  return assessRequiredCheckFailure({
-    check_name: check.name,
-    head_sha: identity.head_sha,
-    base_sha: identity.base_sha,
-    merge_tree_sha: null,
-    workflow: Object.freeze({ path: run.path, id: run.workflow_id, revision: run.head_sha }),
-    attempts: Object.freeze(attempts),
-    association,
-    children: Object.freeze(children),
-    declared_cause: null,
-  });
-}
-
-/** Read protocol for required-check failures; `driveRequestsSync` answers its requests. */
-function* requiredCheckFailures(
-  identity: ProviderIdentity,
-  checks: readonly ProviderCheck[],
-): Generator<ProviderRequest, RequiredCheckFailureEvidenceV1[], unknown> {
-  const evidence: RequiredCheckFailureEvidenceV1[] = [];
-  const runs = new Map<string, RequiredCheckRunFacts>();
-  for (const check of checks) {
-    if (check.workflow === '' && !/^https?:\/\/github\.com\/[^/]+\/[^/]+\/actions\//u.test(check.link)) continue;
-    const link = checkLink(identity, check.link);
-    let run = runs.get(link.run_api_path);
-    if (run === undefined) {
-      run = requiredCheckRunFacts(identity, yield { args: ['api', link.run_api_path] }, 'required check run');
-      runs.set(link.run_api_path, run);
-    }
-    const failure = yield* checkEvidence(identity, check, run, link);
-    if (failure) evidence.push(failure);
-  }
-  return evidence;
-}
-
-function readTestExecutionSync(input: PublicationReadinessInput, request: TestExecutionReadRequest): RequiredCheckTestExecutionV1 {
-  try {
-    if (input.test_execution_reader !== undefined) return input.test_execution_reader(request);
-    return readTestExecutionEvidence({
-      repository: request.repository,
-      run_id: request.run_id,
-      attempt: request.attempt,
-      repo_root: input.repo_root,
-      gh_bin: input.gh_bin,
-    });
-  } catch {
-    // Test-level evidence is best effort: a failed read is unavailable, never a pass.
-    return Object.freeze({ status: 'unavailable' });
-  }
-}
-
-/** The one read driver: a protocol yields requests, the transport answers them. */
-function driveRequestsSync<T>(protocol: Generator<ProviderRequest, T, unknown>, input: PublicationReadinessInput): T {
-  let request = protocol.next();
-  while (!request.done) {
-    let value: unknown = null;
-    try {
-      value = request.value.test_execution !== undefined
-        ? readTestExecutionSync(input, request.value.test_execution)
-        : gh(input, request.value.args!);
-    } catch (error) {
-      if (!request.value.optional || input.fatal_read_error?.(error)) throw error;
-    }
-    request = protocol.next(value);
-  }
-  return request.value;
-}
-
-const CHANGED_FILE_PAGE_SIZE = 100;
-/** GitHub caps the PR file list at 3000 entries; a longer list fails closed instead of looping. */
-const CHANGED_FILE_LIMIT = 3000;
-
-interface ChangedFilePage {
-  readonly files: readonly { readonly filename: string; readonly previous_filename?: string }[];
-}
-
-/**
- * One page of the REST pull-request files view. It is the only provider view
- * that reports a rename source (`previous_filename`), so a protected path
- * cannot be lost by a rename.
- *
- * The page cannot carry a head/base SHA. The enclosing identity fence binds it:
- * readiness reads the PR identity before and after the facts, and a head or
- * base move during the read discards the round as `changed_during_read`.
- */
-function changedFilePage(value: unknown): ChangedFilePage {
-  if (!Array.isArray(value)) throw new MergeReadinessError('provider_data_incomplete', 'changed files must be an array');
-  const files = value.map((entry) => {
-    const file = object(entry, 'changed file');
-    return Object.freeze({
-      filename: string(file.filename, 'changed file name'),
-      ...(file.previous_filename === undefined || file.previous_filename === null
-        ? {} : { previous_filename: string(file.previous_filename, 'changed file previous name') }),
-    });
-  });
-  return Object.freeze({ files: Object.freeze(files) });
-}
-
-/**
- * Every changed path of the PR head, including rename sources. Read only when
- * the coverage block is active. The page count comes from the provider's
- * changed-file count in the identity read, so it is exactly
- * ceil(changed_files / 100): 0 files cost no page and 3000 files cost 30.
- */
-function* changedPaths(identity: ProviderIdentity): Generator<ProviderRequest, string[], unknown> {
-  if (identity.changed_files > CHANGED_FILE_LIMIT) {
-    throw new MergeReadinessError('provider_data_incomplete',
-      `the PR reports ${identity.changed_files} changed files; the provider lists at most ${CHANGED_FILE_LIMIT}`, undefined,
-      'provider PR changedFiles exceeds the file list limit');
-  }
-  const pages = Math.ceil(identity.changed_files / CHANGED_FILE_PAGE_SIZE);
-  const files: { readonly filename: string; readonly previous_filename?: string }[] = [];
-  for (let page = 1; page <= pages; page++) {
-    const parsed = changedFilePage(yield {
-      args: ['api', `repos/${identity.repo_name_with_owner}/pulls/${identity.pr_number}/files?per_page=${CHANGED_FILE_PAGE_SIZE}&page=${page}`],
-    });
-    files.push(...parsed.files);
-  }
-  if (files.length !== identity.changed_files) {
-    throw new MergeReadinessError('provider_data_incomplete',
-      `the PR reported ${identity.changed_files} changed files but the provider listed ${files.length}`, undefined,
-      'provider PR file list does not match changedFiles');
-  }
-  const paths = files.flatMap((file) => file.previous_filename === undefined ? [file.filename] : [file.filename, file.previous_filename]);
-  return [...new Set(paths)].sort();
-}
-
-function policyAtRef(contents: unknown, ref: string): PolicyFileAtRef {
-  const file = policyFileFromContents(contents);
-  if (file === null) throw new MergeReadinessError('provider_data_incomplete', `${PUBLICATION_POLICY_PATH} at ${ref} is not a readable file`, undefined,
-    `${PUBLICATION_POLICY_PATH} at the base is not a readable file`);
-  return file;
-}
-
-function reusedPolicyFile(input: PublicationReadinessInput, ref: string): PolicyFileAtRef | null {
-  if (input.policy_file_at_base === undefined) return null;
-  const expectedBase = 'expected_base_sha' in input ? (input as { readonly expected_base_sha?: unknown }).expected_base_sha : undefined;
-  // The executor read this file at the expected base. A moved base is a cache
-  // miss, not a refusal: the normal read reports base_moved_since_verification.
-  return expectedBase === ref ? input.policy_file_at_base : null;
-}
-
-type PublicationPolicyBlocks = ReturnType<typeof publicationPolicyBlocksAtRef>;
-
-/** One policy read per readiness round answers the declared blocks at the base. */
-function publicationPolicyFile(input: PublicationReadinessInput, ref: string): PolicyFileAtRef {
-  const reused = reusedPolicyFile(input, ref);
-  if (reused !== null) return reused;
-  const contents = ghOptional(input, ['api', `repos/${input.repository}/contents/${PUBLICATION_POLICY_PATH}?ref=${ref}`]);
-  return contents === null ? { status: 'missing' } : policyAtRef(contents, ref);
-}
-
-/**
- * The all-checks read is the only view that shows a declared check which branch
- * protection does not require. A declared matrix job is usually such a check:
- * it appears in the PR rollup as skipped, and the required list never names it.
- *
- * Read budget for one readiness round:
- * - inactive block: zero extra reads when the executor passes
- *   `policy_file_at_base`, otherwise one policy contents read;
- * - active block: that policy read, exactly ceil(changed_files / 100) REST file
- *   pages from the provider's changed-file count (0 files cost no page, 100
- *   files cost one, 3000 files cost 30) and one all-checks read.
- * So an active PR costs two extra reads with one file page and three with two
- * pages on the executor path, plus the policy read on the standalone path.
- */
-function observedCheckFacts(checks: readonly ProviderCheck[]): readonly { readonly name: string; readonly bucket: RequiredCheckBucketV1 }[] {
-  return Object.freeze(checks.map(({ name, bucket }) => Object.freeze({ name, bucket })));
-}
-
-const ALL_CHECKS_ARGS = (identity: ProviderIdentity): string[] =>
-  ['pr', 'checks', String(identity.pr_number), '--json', 'name,bucket,link'];
-
-function coverageFacts(identity: ProviderIdentity, input: PublicationReadinessInput, policy: PublicationPolicyBlocks): RequiredCheckCoverageFactsV1 {
-  if (policy.coverage.status !== 'active') return policy.coverage;
-  const changed = driveRequestsSync(changedPaths(identity), input);
-  const observed = observedCheckFacts(checkArray(gh(input, ALL_CHECKS_ARGS(identity), [0, 1, 8])));
-  return Object.freeze({ status: 'active', policy: policy.coverage.policy, changed_paths: Object.freeze(changed), observed_checks: observed });
-}
-
-/**
- * Run the declared regeneration on the merge tree. The check is synchronous
- * and bounded by the declared timeout: the child runs in a process group and
- * is killed at the deadline. Every failure is a typed blocker, never a
- * provider outage.
- */
-function generatedArtifactsFacts(
-  identity: ProviderIdentity,
+  receipt: Pick<PullRequestSelectionV2, 'pr_number'>,
   input: PublicationReadinessInput,
-  policy: PublicationPolicyBlocks,
-): GeneratedArtifactsFactsV1 {
-  const block = policy.generated_artifacts;
-  if (block.status !== 'active') return block;
-  return Object.freeze({
-    status: 'active',
-    policy: block.policy,
-    check: observeGeneratedArtifacts({
-      repo_root: input.repo_root,
-      base_sha: identity.base_sha,
-      head_sha: identity.head_sha,
-      policy: block.policy,
-      ...(input.git_bin === undefined ? {} : { git_bin: input.git_bin }),
-    }),
-  });
-}
-
-/** Read protocol for the rollback boundary; reads only the current commit boundary. */
-function* rollbackBoundary(identity: ProviderIdentity): Generator<string, ProviderMergeReadinessFactsV1['rollback_boundary'], unknown> {
-  const validSha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && value !== '0'.repeat(40);
-  if (!validSha(identity.base_sha)) throw new MergeReadinessError('provider_data_incomplete', 'rollback base SHA is invalid');
-  const root = `repos/${identity.repo_name_with_owner}`;
-  const activation = object(yield `${root}/contents/.github/workflows/ci-report.yml?ref=${identity.base_sha}`, 'rollback reporter activation');
-  if (activation.status === '404') return Object.freeze({ status: 'not_active' });
-  if (activation.status || activation.type !== 'file' || activation.path !== '.github/workflows/ci-report.yml' || !validSha(activation.sha)) {
-    throw new MergeReadinessError('provider_data_incomplete', 'rollback reporter activation unavailable');
-  }
-  const associations = yield `${root}/commits/${identity.base_sha}/pulls?per_page=100`;
-  if (!Array.isArray(associations) || associations.length >= 100) throw new MergeReadinessError('provider_data_incomplete', 'parent PR associations incomplete');
-  const merged = associations.map(entry => {
-    const pr = object(entry, 'parent PR association');
-    const base = object(pr.base, 'parent PR base');
-    if (typeof base.ref !== 'string' || (pr.merged_at !== null && (typeof pr.merged_at !== 'string' || pr.merged_at.trim() === ''))
-      || (pr.merge_commit_sha !== null && !validSha(pr.merge_commit_sha))) {
-      throw new MergeReadinessError('provider_data_incomplete', 'parent PR association is incomplete');
-    }
-    return pr;
-  }).filter(pr => pr.merged_at !== null && (pr.base as Record<string, unknown>).ref === identity.base_ref && pr.merge_commit_sha === identity.base_sha);
-  const prNumber = merged[0]?.number;
-  if (merged.length !== 1 || typeof prNumber !== 'number' || !Number.isSafeInteger(prNumber) || prNumber < 1) {
-    throw new MergeReadinessError('provider_data_incomplete', 'activated reporter parent is not an exact single merged PR');
-  }
-  const commit = object(yield `${root}/git/commits/${identity.base_sha}`, 'base parent commit');
-  if (commit.sha !== identity.base_sha || !Array.isArray(commit.parents)) {
-    throw new MergeReadinessError('provider_data_incomplete', 'rollback base commit is incomplete');
-  }
-  const detail = object(yield `${root}/pulls/${prNumber}`, 'merged parent PR detail');
-  if (detail.number !== prNumber || detail.merged !== true || detail.merge_commit_sha !== identity.base_sha
-    || object(detail.base, 'merged parent PR detail base').ref !== identity.base_ref) {
-    throw new MergeReadinessError('provider_data_incomplete', 'merged parent PR detail does not match the rollback boundary');
-  }
-  const before = rollbackParent(identity.base_sha, commit.parents);
-  if (before === null) {
-    throw new MergeReadinessError('provider_data_incomplete', 'rollback parent is not a single commit');
-  }
-  const parentAssociations = yield `${root}/commits/${before}/pulls?per_page=100`;
-  if (!Array.isArray(parentAssociations) || parentAssociations.length >= 100) {
-    throw new MergeReadinessError('provider_data_incomplete', 'rollback parent PR associations incomplete');
-  }
-  const parentPRs = parentAssociations.map(entry => {
-    const pr = object(entry, 'rollback parent PR association');
-    if (typeof pr.number !== 'number' || !Number.isSafeInteger(pr.number) || pr.number < 1) {
-      throw new MergeReadinessError('provider_data_incomplete', 'rollback parent PR number unavailable');
-    }
-    return pr.number;
-  });
-  if (parentPRs.includes(prNumber)) {
-    throw new MergeReadinessError('provider_data_incomplete', `Automatic rollback cannot revert only the last commit of multi-commit rebase PR #${prNumber}`,
-      undefined, 'rollback parent PR is a multi-commit rebase PR');
-  }
-  return Object.freeze({ status: 'ready', pr_number: prNumber, before_sha: before, after_sha: identity.base_sha });
-}
-
-export function observeProviderReadinessFacts(identity: ProviderIdentity, receipt: Pick<PullRequestSelectionV2, 'pr_number'>, input: PublicationReadinessInput): ProviderMergeReadinessFactsV1 {
-  const checks = protectedChecks(identity, receipt.pr_number, input);
-  const checkFailures = driveRequestsSync(requiredCheckFailures(identity, checks), input);
-  const policyFile = publicationPolicyFile(input, identity.base_sha);
-  const policy = publicationPolicyBlocksAtRef(policyFile);
-  const coverage = coverageFacts(identity, input, policy);
-  const generated = generatedArtifactsFacts(identity, input, policy);
-  const boundary = rollbackBoundary(identity);
-  let request = boundary.next();
-  while (!request.done) request = boundary.next(gh(input, ['api', request.value], request.value.includes('/contents/') ? [0, 1] : [0]));
-  return parseProviderReadinessFacts(identity, checks, request.value, gh(input, providerReviewArgs(identity)), checkFailures, coverage, generated);
+): ProviderMergeReadinessFactsV1 {
+  const reader = readerFor(input);
+  const checks = protectedChecks(identity, receipt.pr_number, input.required_status_checks_at_base, reader);
+  const checkFailures = collectRequiredCheckFailures(identity, checks, reader);
+  const { coverage, generated } = observeBasePolicyFacts(identity, input, reader);
+  const boundary = observeRollbackBoundary(identity, reader);
+  return parseProviderReadinessFacts(
+    identity,
+    checks,
+    boundary,
+    reader.gh(providerReviewArgs(identity)),
+    checkFailures,
+    coverage,
+    generated,
+    reader,
+  );
 }
 
 export interface PullRequestReadinessInput extends PublicationReadinessInput {
@@ -993,20 +156,37 @@ export interface PullRequestReadinessInput extends PublicationReadinessInput {
 }
 
 export function validatePullRequestSelection(value: unknown): PullRequestSelectionV2 {
-  const selection = object(value, 'PR selection');
-  if (Object.keys(selection).sort().join(',') !== ['provider_repository_id','repository','pr_number','expected_head_sha','expected_base_sha'].sort().join(',')) throw new MergeReadinessError('provider_data_incomplete', 'PR selection fields are invalid');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new MergeReadinessError('provider_data_incomplete', 'PR selection must be an object');
+  }
+  const selection = value as Record<string, unknown>;
+  if (Object.keys(selection).sort().join(',') !== ['provider_repository_id', 'repository', 'pr_number', 'expected_head_sha', 'expected_base_sha'].sort().join(',')) {
+    throw new MergeReadinessError('provider_data_incomplete', 'PR selection fields are invalid');
+  }
   if (typeof selection.repository !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(selection.repository)
     || typeof selection.provider_repository_id !== 'string' || !/^[1-9][0-9]*$/.test(selection.provider_repository_id)
     || !Number.isSafeInteger(selection.pr_number) || Number(selection.pr_number) < 1
-    || ![selection.expected_head_sha,selection.expected_base_sha].every(sha => typeof sha === 'string' && /^[0-9a-f]{40}$/.test(sha) && sha !== '0'.repeat(40))) throw new MergeReadinessError('provider_data_incomplete', 'explicit PR identity and expected head/base are required');
-  return Object.freeze({ provider_repository_id: selection.provider_repository_id, repository: selection.repository,
-    pr_number: Number(selection.pr_number), expected_head_sha: selection.expected_head_sha as string, expected_base_sha: selection.expected_base_sha as string });
+    || ![selection.expected_head_sha, selection.expected_base_sha].every(validSha)) {
+    throw new MergeReadinessError('provider_data_incomplete', 'explicit PR identity and expected head/base are required');
+  }
+  return Object.freeze({
+    provider_repository_id: selection.provider_repository_id,
+    repository: selection.repository,
+    pr_number: Number(selection.pr_number),
+    expected_head_sha: selection.expected_head_sha as string,
+    expected_base_sha: selection.expected_base_sha as string,
+  });
 }
 
 function selectionOf(input: PullRequestReadinessInput): PullRequestSelectionV2 {
   if ('publication_id' in input) throw new MergeReadinessError('provider_data_incomplete', 'publication_id is not a provider selection');
-  return validatePullRequestSelection({ provider_repository_id: input.provider_repository_id, repository: input.repository,
-    pr_number: input.pr_number, expected_head_sha: input.expected_head_sha, expected_base_sha: input.expected_base_sha });
+  return validatePullRequestSelection({
+    provider_repository_id: input.provider_repository_id,
+    repository: input.repository,
+    pr_number: input.pr_number,
+    expected_head_sha: input.expected_head_sha,
+    expected_base_sha: input.expected_base_sha,
+  });
 }
 
 interface ProviderReadinessTarget {
@@ -1014,12 +194,19 @@ interface ProviderReadinessTarget {
   readonly default_branch: string;
 }
 
-function confirmRepositoryIdentity(input: PullRequestReadinessInput, identity: ProviderIdentity, rest: unknown): string {
-  const repository = object(rest, 'REST repository');
-  const defaultBranch = string(repository.default_branch, 'REST repository default_branch');
+function confirmRepositoryIdentity(
+  input: PullRequestReadinessInput,
+  identity: ProviderIdentity,
+  rest: unknown,
+  reader: ProviderReader,
+): string {
+  const repository = reader.object(rest, 'REST repository');
+  const defaultBranch = reader.string(repository.default_branch, 'REST repository default_branch');
   if (!Number.isSafeInteger(repository.id) || Number(repository.id) < 1 || String(repository.id) !== input.provider_repository_id
     || repository.node_id !== identity.provider_repo_id || repository.full_name !== input.repository
-    || identity.repo_name_with_owner !== input.repository) throw new MergeReadinessError('provider_data_incomplete', 'provider repository or default-branch target does not match selection');
+    || identity.repo_name_with_owner !== input.repository) {
+    throw new MergeReadinessError('provider_data_incomplete', 'provider repository or default-branch target does not match selection');
+  }
   return defaultBranch;
 }
 
@@ -1035,142 +222,61 @@ const PR_IDENTITY_FIELDS = 'number,url,state,isDraft,headRefOid,headRefName,base
  * needs it to decide membership; the strict identity adapter below rejects a
  * non-default base for every other consumer.
  */
-function observeProviderReadinessTarget(input: PullRequestReadinessInput): ProviderReadinessTarget {
+function observeProviderReadinessTarget(input: PullRequestReadinessInput, reader: ProviderReader): ProviderReadinessTarget {
   selectionOf(input);
-  const identity = parseProviderPullRequestIdentity(input.pr_number,
-    gh(input, ['repo', 'view', '--json', 'id,nameWithOwner']),
-    gh(input, ['pr', 'view', String(input.pr_number), '--json', PR_IDENTITY_FIELDS]));
-  return { identity, default_branch: confirmRepositoryIdentity(input, identity, gh(input, ['api', `repos/${input.repository}`])) };
+  const identity = parseProviderPullRequestIdentity(
+    input.pr_number,
+    reader.gh(['repo', 'view', '--json', 'id,nameWithOwner']),
+    reader.gh(['pr', 'view', String(input.pr_number), '--json', PR_IDENTITY_FIELDS]),
+    reader,
+  );
+  return { identity, default_branch: confirmRepositoryIdentity(input, identity, reader.gh(['api', `repos/${input.repository}`]), reader) };
 }
 
 export function observeProviderReadinessIdentity(input: PullRequestReadinessInput): ProviderIdentity {
-  const target = observeProviderReadinessTarget(input);
-  if (target.identity.base_ref !== target.default_branch) throw new MergeReadinessError('provider_data_incomplete', 'provider repository or default-branch target does not match selection');
+  const target = observeProviderReadinessTarget(input, readerFor(input));
+  if (target.identity.base_ref !== target.default_branch) {
+    throw new MergeReadinessError('provider_data_incomplete', 'provider repository or default-branch target does not match selection');
+  }
   return target.identity;
 }
 
-const STACK_DEPTH_LIMIT = 20;
-/** GitHub returns at most 100 PRs for one list request; a full page is not exhaustive. */
-const STACK_PR_LIST_LIMIT = 100;
-const STACK_PR_FIELDS = 'number,state,headRefOid,headRefName,baseRefOid,baseRefName,isCrossRepository';
-
-interface ProviderStackPullRequest {
-  readonly pr_number: number;
-  readonly state: 'OPEN' | 'CLOSED' | 'MERGED';
-  readonly head_ref: string;
-  readonly head_sha: string;
-  readonly base_ref: string;
-  readonly base_sha: string;
-  readonly cross_repository: boolean;
-}
-
-function providerStackPullRequest(value: unknown): ProviderStackPullRequest {
-  const pr = object(value, 'provider stack pull request');
-  if (!Number.isSafeInteger(pr.number) || Number(pr.number) < 1
-    || !['OPEN', 'CLOSED', 'MERGED'].includes(String(pr.state))
-    || typeof pr.headRefName !== 'string' || pr.headRefName.trim() === ''
-    || typeof pr.baseRefName !== 'string' || pr.baseRefName.trim() === ''
-    || !validSha(pr.headRefOid) || !validSha(pr.baseRefOid)
-    || typeof pr.isCrossRepository !== 'boolean') {
-    throw new MergeReadinessError('provider_data_incomplete', 'provider stack pull request is incomplete');
-  }
+function readinessProjection(
+  input: PullRequestReadinessInput,
+  round: ReadinessRound | null,
+  observation: MergeReadinessObservation,
+  observationDetail?: string,
+): PullRequestReadinessV2 {
   return Object.freeze({
-    pr_number: Number(pr.number), state: String(pr.state) as ProviderStackPullRequest['state'],
-    head_ref: pr.headRefName, head_sha: pr.headRefOid, base_ref: pr.baseRefName, base_sha: pr.baseRefOid,
-    cross_repository: pr.isCrossRepository,
+    protocol: 2,
+    kind: 'repo-harness-pull-request-readiness',
+    ...selectionOf(input),
+    ...projectPullRequestMergeReadiness({
+      expected_head_sha: input.expected_head_sha,
+      expected_base_sha: input.expected_base_sha,
+      integration_mode: round?.facts?.state === 'MERGED' ? 'ancestor' : 'unmerged',
+      observation,
+      ...(observationDetail === undefined ? {} : { observation_detail: observationDetail }),
+      provider: round?.facts ?? null,
+      stack: round?.stack ?? unobservedStackDetail(),
+    }),
   });
-}
-
-function providerStackList(value: unknown): readonly ProviderStackPullRequest[] {
-  if (!Array.isArray(value)) throw new MergeReadinessError('provider_data_incomplete', 'provider stack pull request list is invalid');
-  if (value.length >= STACK_PR_LIST_LIMIT) throw new MergeReadinessError('provider_data_incomplete', 'provider stack pull request list is not exhaustive');
-  return Object.freeze(value.map(providerStackPullRequest));
-}
-
-function stackFailure(status: MergeReadinessStackDetailV1['status'], chain: readonly MergeReadinessStackEntryV1[]): MergeReadinessStackDetailV1 {
-  return Object.freeze({ member: true, depth: chain.length - 1, chain: Object.freeze([...chain]), final_base_sha: null, status });
-}
-
-/**
- * Follow the baseRefName chain from the observed PR to the default branch.
- * Every request names the branch observed on the previous link. The loop stops
- * on a repeated PR number or branch, a missing or closed base PR, a foreign PR,
- * or the depth bound; none of these returns a complete chain.
- */
-function* stackProtocol(
-  identity: ProviderIdentity,
-  defaultBranch: string,
-): Generator<string, MergeReadinessStackDetailV1, readonly ProviderStackPullRequest[]> {
-  if (identity.base_ref === defaultBranch) {
-    return Object.freeze({ member: false, depth: 0, chain: Object.freeze([]), final_base_sha: null, status: 'not_member' as const });
-  }
-  const member: MergeReadinessStackEntryV1 = Object.freeze({
-    pr_number: identity.pr_number, head_ref: identity.head_ref, head_sha: identity.head_sha,
-    base_ref: identity.base_ref, base_sha: identity.base_sha,
-  });
-  const chain: MergeReadinessStackEntryV1[] = [member];
-  const seenNumbers = new Set<number>([identity.pr_number]);
-  // Only branches used as a lookup key form the chain; a head ref is not a cycle
-  // by itself, and a PR from the default branch is still a member.
-  const seenRefs = new Set<string>([identity.base_ref]);
-  let baseRef = identity.base_ref;
-  for (;;) {
-    if (baseRef === defaultBranch) {
-      return Object.freeze({
-        member: true, depth: chain.length - 1, chain: Object.freeze([...chain]),
-        final_base_sha: chain[chain.length - 1]!.base_sha, status: 'complete' as const,
-      });
-    }
-    if (chain.length - 1 >= STACK_DEPTH_LIMIT) return stackFailure('depth_exceeded', chain);
-    const matching = (yield baseRef).filter(pr => pr.head_ref === baseRef);
-    const open = matching.filter(pr => pr.state === 'OPEN');
-    if (open.length === 0) return stackFailure(matching.length === 0 ? 'base_pr_missing' : 'base_pr_not_open', chain);
-    if (open.length > 1) {
-      throw new MergeReadinessError('provider_data_incomplete', `provider returned ${open.length} open pull requests for stack base ${baseRef}`,
-        undefined, 'stack base has more than one open pull request');
-    }
-    const base = open[0]!;
-    if (base.cross_repository) return stackFailure('foreign_pr', chain);
-    if (seenNumbers.has(base.pr_number) || seenRefs.has(base.base_ref)) return stackFailure('cycle', chain);
-    const entry: MergeReadinessStackEntryV1 = Object.freeze({
-      pr_number: base.pr_number, head_ref: base.head_ref, head_sha: base.head_sha,
-      base_ref: base.base_ref, base_sha: base.base_sha,
-    });
-    chain.push(entry);
-    seenNumbers.add(entry.pr_number);
-    seenRefs.add(entry.base_ref);
-    baseRef = entry.base_ref;
-  }
-}
-
-function observeStack(target: ProviderReadinessTarget, input: PublicationReadinessInput): MergeReadinessStackDetailV1 {
-  const protocol = stackProtocol(target.identity, target.default_branch);
-  let request = protocol.next();
-  while (!request.done) {
-    const list = gh(input, ['pr', 'list', '--head', request.value, '--state', 'all', '--json', STACK_PR_FIELDS, '--limit', String(STACK_PR_LIST_LIMIT)]);
-    request = protocol.next(providerStackList(list));
-  }
-  return request.value;
-}
-
-function readinessProjection(input: PullRequestReadinessInput, round: ReadinessRound | null, observation: MergeReadinessObservation, observationDetail?: string): PullRequestReadinessV2 {
-  return Object.freeze({ protocol: 2, kind: 'repo-harness-pull-request-readiness', ...selectionOf(input),
-    ...projectPullRequestMergeReadiness({ expected_head_sha: input.expected_head_sha, expected_base_sha: input.expected_base_sha,
-      integration_mode: round?.facts?.state === 'MERGED' ? 'ancestor' : 'unmerged', observation,
-      ...(observationDetail === undefined ? {} : { observation_detail: observationDetail }), provider: round?.facts ?? null,
-      stack: round?.stack ?? unobservedStackDetail() }) });
 }
 
 /** One observation loop for exact merged-PR evidence. The stack is fenced with the identity. */
-function stablePullRequestRound<T>(input: PullRequestReadinessInput, observeExtra: (identity: ProviderIdentity) => T) {
+function stablePullRequestRound<T>(
+  input: PullRequestReadinessInput,
+  reader: ProviderReader,
+  observeExtra: (identity: ProviderIdentity) => T,
+) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const before = observeProviderReadinessTarget(input);
+    const before = observeProviderReadinessTarget(input, reader);
     const extra = observeExtra(before.identity);
-    const stack = observeStack(before, input);
+    const stack = observeStack(before.identity, before.default_branch, reader);
     const facts = observeProviderReadinessFacts(before.identity, input, input);
-    const after = observeProviderReadinessTarget(input);
+    const after = observeProviderReadinessTarget(input, reader);
     const extraAfter = observeExtra(after.identity);
-    const stackAfter = observeStack(after, input);
+    const stackAfter = observeStack(after.identity, after.default_branch, reader);
     if (identityBytes(before.identity) === identityBytes(after.identity)
       && JSON.stringify(extra) === JSON.stringify(extraAfter)
       && JSON.stringify(stack) === JSON.stringify(stackAfter)) {
@@ -1190,20 +296,20 @@ interface ReadinessRound {
  * checks, reviews and coverage are not read: that evidence proves the PR only
  * against its feature base, not against the default branch.
  */
-function stableReadinessRound(input: PullRequestReadinessInput): ReadinessRound | null {
+function stableReadinessRound(input: PullRequestReadinessInput, reader: ProviderReader): ReadinessRound | null {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const before = observeProviderReadinessTarget(input);
-    const stack = observeStack(before, input);
+    const before = observeProviderReadinessTarget(input, reader);
+    const stack = observeStack(before.identity, before.default_branch, reader);
     if (stack.member) {
-      const after = observeProviderReadinessTarget(input);
-      const stackAfter = observeStack(after, input);
+      const after = observeProviderReadinessTarget(input, reader);
+      const stackAfter = observeStack(after.identity, after.default_branch, reader);
       if (identityBytes(before.identity) === identityBytes(after.identity)
         && JSON.stringify(stack) === JSON.stringify(stackAfter)) return { facts: null, stack: stackAfter };
       continue;
     }
     const facts = observeProviderReadinessFacts(before.identity, input, input);
-    const after = observeProviderReadinessTarget(input);
-    const stackAfter = observeStack(after, input);
+    const after = observeProviderReadinessTarget(input, reader);
+    const stackAfter = observeStack(after.identity, after.default_branch, reader);
     if (identityBytes(before.identity) === identityBytes(after.identity)
       && JSON.stringify(stack) === JSON.stringify(stackAfter)) return { facts, stack: stackAfter };
   }
@@ -1213,8 +319,9 @@ function stableReadinessRound(input: PullRequestReadinessInput): ReadinessRound 
 /** Ordinary default-branch PRs consume the shared provider decoder without a receipt or Lease. */
 export function collectPullRequestMergeReadiness(input: PullRequestReadinessInput): PullRequestReadinessV2 {
   selectionOf(input);
+  const reader = readerFor(input);
   try {
-    const round = stableReadinessRound(input);
+    const round = stableReadinessRound(input, reader);
     return round ? readinessProjection(input, round, 'stable') : readinessProjection(input, null, 'changed_during_read');
   } catch (error) {
     if (!(error instanceof MergeReadinessError)) throw error;
@@ -1223,46 +330,56 @@ export function collectPullRequestMergeReadiness(input: PullRequestReadinessInpu
   }
 }
 
-
 export interface PullRequestIntegrationInput extends PullRequestReadinessInput {
   readonly issue_id: string;
   readonly issue_number: number;
 }
 
 /** Provider proof only. The integration consumer must also prove exact local tree and ancestry. */
-export function collectPullRequestIntegration(input: PullRequestIntegrationInput): { readonly merge_commit_sha: string; readonly merge_tree_sha: string } {
+export function collectPullRequestIntegration(
+  input: PullRequestIntegrationInput,
+): { readonly merge_commit_sha: string; readonly merge_tree_sha: string } {
   if (!Number.isSafeInteger(input.issue_number) || input.issue_number < 1 || !input.issue_id?.trim()) {
     throw new MergeReadinessError('provider_data_incomplete', 'explicit issue identity is required');
   }
-  const round = stablePullRequestRound(input, identity => {
+  const reader = readerFor(input);
+  const round = stablePullRequestRound(input, reader, identity => {
     const root = `repos/${input.repository}`;
-    const issue = object(gh(input, ['api', `${root}/issues/${input.issue_number}`]), 'selected issue');
+    const issue = reader.object(reader.gh(['api', `${root}/issues/${input.issue_number}`]), 'selected issue');
     if (!Number.isSafeInteger(issue.id) || Number(issue.id) < 1 || String(issue.id) !== input.issue_id || issue.number !== input.issue_number || 'pull_request' in issue) {
       throw new MergeReadinessError('provider_data_incomplete', 'selected issue identity changed');
     }
-    const detail = object(gh(input, ['api', `${root}/pulls/${input.pr_number}`]), 'merged PR');
-    const base = object(detail.base, 'merged PR base');
-    const head = object(detail.head, 'merged PR head');
-    const validSha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && value !== '0'.repeat(40);
+    const detail = reader.object(reader.gh(['api', `${root}/pulls/${input.pr_number}`]), 'merged PR');
+    const base = reader.object(detail.base, 'merged PR base');
+    const head = reader.object(detail.head, 'merged PR head');
     if (identity.state !== 'MERGED' || detail.merged !== true || detail.number !== input.pr_number
-      || String(object(base.repo, 'merged PR repository').id) !== input.provider_repository_id
-      || object(base.repo, 'merged PR repository').node_id !== identity.provider_repo_id
+      || String(reader.object(base.repo, 'merged PR repository').id) !== input.provider_repository_id
+      || reader.object(base.repo, 'merged PR repository').node_id !== identity.provider_repo_id
       || base.ref !== identity.base_ref || base.sha !== input.expected_base_sha || head.sha !== input.expected_head_sha
-      || !validSha(detail.merge_commit_sha)) throw new MergeReadinessError('provider_data_incomplete', 'exact merged PR identity is unavailable');
-    const commit = object(gh(input, ['api', `${root}/git/commits/${detail.merge_commit_sha}`]), 'provider merge commit');
-    const tree = object(commit.tree, 'provider merge tree');
+      || !validSha(detail.merge_commit_sha)) {
+      throw new MergeReadinessError('provider_data_incomplete', 'exact merged PR identity is unavailable');
+    }
+    const commit = reader.object(reader.gh(['api', `${root}/git/commits/${detail.merge_commit_sha}`]), 'provider merge commit');
+    const tree = reader.object(commit.tree, 'provider merge tree');
     if (commit.sha !== detail.merge_commit_sha || !validSha(tree.sha) || !Array.isArray(commit.parents)
-      || commit.parents.length === 0 || !commit.parents.every(parent => validSha(object(parent, 'merge parent').sha))) {
+      || commit.parents.length === 0 || !commit.parents.every(parent => validSha(reader.object(parent, 'merge parent').sha))) {
       throw new MergeReadinessError('provider_data_incomplete', 'merge commit/tree or parents are unavailable');
     }
     return { issue_id: String(issue.id), issue_number: issue.number, merge_commit_sha: detail.merge_commit_sha, merge_tree_sha: tree.sha };
   });
   if (!round) throw new MergeReadinessError('provider_data_incomplete', 'integration selection changed during read');
-  const verdict = projectPullRequestMergeReadiness({ expected_head_sha: input.expected_head_sha,
-    expected_base_sha: input.expected_base_sha, integration_mode: 'ancestor', observation: 'stable', provider: round.facts,
-    stack: round.stack });
+  const verdict = projectPullRequestMergeReadiness({
+    expected_head_sha: input.expected_head_sha,
+    expected_base_sha: input.expected_base_sha,
+    integration_mode: 'ancestor',
+    observation: 'stable',
+    provider: round.facts,
+    stack: round.stack,
+  });
   // These blockers describe merge lifecycle, not CI/review acceptance of an already merged PR.
   const blockers = verdict.blockers.filter(blocker => !['already_integrated', 'pr_not_open', 'not_mergeable', 'mergeability_pending'].includes(blocker.code));
-  if (blockers.length) throw new MergeReadinessError('provider_data_incomplete', `integrated PR evidence refused: ${blockers.map(blocker => blocker.code).join(', ')}`);
+  if (blockers.length) {
+    throw new MergeReadinessError('provider_data_incomplete', `integrated PR evidence refused: ${blockers.map(blocker => blocker.code).join(', ')}`);
+  }
   return Object.freeze({ merge_commit_sha: round.extra.merge_commit_sha, merge_tree_sha: round.extra.merge_tree_sha });
 }
