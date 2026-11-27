@@ -383,13 +383,20 @@ function installedPiExtension(env: NodeJS.ProcessEnv): string {
   return extension;
 }
 
-function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, env: NodeJS.ProcessEnv): SeatConfigV1 {
-  const magpieRoute = resolveCatalogRoute(member, 'magpie');
+function councilMemberRoute(member: CouncilMember, seats: SeatsConfigV1, env: NodeJS.ProcessEnv) {
   const nativeRoute = resolveCatalogRoute(member, 'native');
-  const piInstalled = Bun.which('pi', { PATH: env.PATH ?? '' }) !== null;
-  const useMagpie = magpieRoute !== null
-    && (magpieRoute.runtime !== 'pi' || (piInstalled && magpieExtensionInstalled(env) && unavailablePiSeat(magpieRoute, seats.routing) === null));
-  const selected = useMagpie ? magpieRoute! : (nativeRoute ?? magpieRoute!);
+  if (seats.council?.runtime === 'agy' && nativeRoute?.runtime === 'agy') return nativeRoute;
+  const magpieRoute = resolveCatalogRoute(member, 'magpie');
+  if (magpieRoute === null) return nativeRoute!;
+  if (magpieRoute.runtime !== 'pi') return magpieRoute;
+  const piAvailable = Bun.which('pi', { PATH: env.PATH ?? '' }) !== null
+    && magpieExtensionInstalled(env)
+    && unavailablePiSeat(magpieRoute, seats.routing) === null;
+  return piAvailable ? magpieRoute : (nativeRoute ?? magpieRoute);
+}
+
+function resolveCouncilMemberSeat(member: CouncilMember, seats: SeatsConfigV1, env: NodeJS.ProcessEnv): SeatConfigV1 {
+  const selected = councilMemberRoute(member, seats, env);
   const stored = seats.council;
   const matchesStored = stored !== null && stored.runtime === selected.runtime && stored.model === selected.model;
   return {
