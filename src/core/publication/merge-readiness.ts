@@ -1,11 +1,7 @@
-import {
-  validateRequiredCheckFailureEvidence,
-  type RequiredCheckFailureEvidenceV1,
-} from '../evidence/required-check-evidence';
-import {
-  GENERATED_ARTIFACTS_FAILURE_CODES,
-  type GeneratedArtifactsFactsV1,
-  type GeneratedArtifactsFailureCode,
+import type { RequiredCheckFailureEvidenceV1 } from '../evidence/required-check-evidence';
+import type {
+  GeneratedArtifactsFactsV1,
+  GeneratedArtifactsFailureCode,
 } from './generated-artifacts';
 import {
   buildRequiredCheckCoverageEvidence,
@@ -13,6 +9,16 @@ import {
   type RequiredCheckCoverageEvidenceV1,
   type RequiredCheckCoveragePolicyV1,
 } from './required-check-coverage';
+import {
+  evaluateGeneratedArtifactsFacts,
+  isValidRollbackBoundary,
+  validateCheckFailureEvidenceList,
+} from './merge-readiness-facts';
+import {
+  STACK_FAILURE_BLOCKERS,
+  observedStack,
+  validSha,
+} from './merge-readiness-stack';
 
 export type MergeReadinessAttentionOwner = 'agent' | 'user' | 'external';
 export type MergeReadinessVerdictAttentionOwner = MergeReadinessAttentionOwner | 'none';
@@ -257,23 +263,6 @@ function verdictAttentionOwner(blockers: readonly MergeReadinessBlockerV1[]): Me
   return 'none';
 }
 
-const STACK_STATUSES = [
-  'not_member', 'complete', 'depth_exceeded', 'cycle', 'base_pr_missing', 'base_pr_not_open', 'foreign_pr', 'unobserved',
-] as const;
-
-/** Each observed chain failure keeps its own typed blocker. */
-const STACK_FAILURE_BLOCKERS: Partial<Record<MergeReadinessStackStatus, MergeReadinessBlockerCode>> = {
-  depth_exceeded: 'stack_depth_exceeded',
-  cycle: 'stack_cycle',
-  base_pr_missing: 'stack_base_pr_missing',
-  base_pr_not_open: 'stack_base_pr_not_open',
-  foreign_pr: 'stack_foreign_pr',
-};
-
-function validSha(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && value !== '0'.repeat(40);
-}
-
 export function notStackMemberDetail(): MergeReadinessStackDetailV1 {
   return Object.freeze({ member: false, depth: 0, chain: Object.freeze([]), final_base_sha: null, status: 'not_member' });
 }
@@ -281,65 +270,6 @@ export function notStackMemberDetail(): MergeReadinessStackDetailV1 {
 /** A torn or unavailable read proves no chain. The observation blocker fails the verdict closed. */
 export function unobservedStackDetail(): MergeReadinessStackDetailV1 {
   return Object.freeze({ member: false, depth: 0, chain: Object.freeze([]), final_base_sha: null, status: 'unobserved' });
-}
-
-function stackEntry(value: unknown): MergeReadinessStackEntryV1 | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const entry = value as Record<string, unknown>;
-  if (!Number.isSafeInteger(entry.pr_number) || Number(entry.pr_number) < 1
-    || typeof entry.head_ref !== 'string' || entry.head_ref.trim() === '' || !validSha(entry.head_sha)
-    || typeof entry.base_ref !== 'string' || entry.base_ref.trim() === '' || !validSha(entry.base_sha)) return null;
-  return Object.freeze({
-    pr_number: Number(entry.pr_number), head_ref: entry.head_ref, head_sha: entry.head_sha,
-    base_ref: entry.base_ref, base_sha: entry.base_sha,
-  });
-}
-
-/**
- * The projection accepts chain bytes only as observed evidence. It re-binds the
- * first link to the expected head/base, requires every link to name the next
- * base branch, and rejects a member whose chain does not prove its base edge.
- * A member still cannot become ready, even when the whole chain is valid.
- */
-function observedStack(
-  value: unknown,
-  expectedHeadSha: string,
-  expectedBaseSha: string,
-): MergeReadinessStackDetailV1 | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const detail = value as Record<string, unknown>;
-  const status = detail.status as MergeReadinessStackStatus;
-  if (!STACK_STATUSES.includes(status) || typeof detail.member !== 'boolean'
-    || !Number.isSafeInteger(detail.depth) || Number(detail.depth) < 0 || !Array.isArray(detail.chain)
-    || (detail.final_base_sha !== null && !validSha(detail.final_base_sha))) return null;
-  const chain: MergeReadinessStackEntryV1[] = [];
-  for (const raw of detail.chain) {
-    const entry = stackEntry(raw);
-    if (entry === null) return null;
-    chain.push(entry);
-  }
-  const depth = Number(detail.depth);
-  const finalBaseSha = detail.final_base_sha as string | null;
-  if (!detail.member) {
-    if ((status !== 'not_member' && status !== 'unobserved') || depth !== 0 || chain.length !== 0 || finalBaseSha !== null) return null;
-    return Object.freeze({ member: false, depth: 0, chain: Object.freeze([]), final_base_sha: null, status });
-  }
-  if (status === 'not_member' || chain.length === 0 || depth !== chain.length - 1) return null;
-  if (chain[0]!.head_sha !== expectedHeadSha || chain[0]!.base_sha !== expectedBaseSha) return null;
-  const numbers = new Set<number>();
-  const refs = new Set<string>();
-  for (const entry of chain) {
-    if (numbers.has(entry.pr_number) || refs.has(entry.head_ref)) return null;
-    numbers.add(entry.pr_number);
-    refs.add(entry.head_ref);
-  }
-  for (let index = 0; index + 1 < chain.length; index++) {
-    if (chain[index]!.base_ref !== chain[index + 1]!.head_ref) return null;
-  }
-  if (status === 'complete') {
-    if (depth < 1 || finalBaseSha === null || finalBaseSha !== chain[chain.length - 1]!.base_sha) return null;
-  } else if (finalBaseSha !== null) return null;
-  return Object.freeze({ member: true, depth, chain: Object.freeze(chain), final_base_sha: finalBaseSha, status });
 }
 
 /**
@@ -364,23 +294,12 @@ export function projectPullRequestMergeReadiness(input: PullRequestMergeReadines
     push(blockers, 'provider_data_incomplete', 'provider generated_artifacts status is missing or unknown');
   }
   const checkFailures = Array.isArray(input.provider?.check_failures) ? input.provider.check_failures : [];
-  // An indexed loop visits every slot: a hole in a sparse array is validated as undefined and fails closed.
-  for (let index = 0; index < checkFailures.length; index++) {
-    const failure = checkFailures[index]!;
-    try {
-      validateRequiredCheckFailureEvidence(failure);
-    } catch {
-      push(blockers, 'provider_data_incomplete', `provider check_failures[${index}] is invalid`);
-      continue;
-    }
-    const mismatched = [
-      ...(failure.head_sha === input.expected_head_sha ? [] : [`check_failures[${index}].head_sha`]),
-      ...(failure.base_sha === input.expected_base_sha ? [] : [`check_failures[${index}].base_sha`]),
-    ];
-    if (mismatched.length > 0) {
-      push(blockers, 'provider_data_incomplete', `provider ${mismatched.join(' and ')} does not match the expected value`);
-    }
-  }
+  validateCheckFailureEvidenceList(
+    checkFailures,
+    input.expected_head_sha,
+    input.expected_base_sha,
+    (detail) => push(blockers, 'provider_data_incomplete', detail),
+  );
   if (!validSha(input.expected_head_sha) || !validSha(input.expected_base_sha)) {
     push(blockers, 'provider_data_incomplete', 'expected head or base SHA is invalid');
   }
@@ -409,13 +328,7 @@ export function projectPullRequestMergeReadiness(input: PullRequestMergeReadines
     if (provider.is_draft) push(blockers, 'draft');
     if (provider.head_sha !== input.expected_head_sha) push(blockers, 'head_moved');
     if (provider.base_sha !== input.expected_base_sha) push(blockers, 'base_moved_since_verification');
-    const boundary = provider.rollback_boundary;
-    if (!boundary || typeof boundary !== 'object' || Array.isArray(boundary)
-      || (boundary.status !== 'not_active' && boundary.status !== 'ready')
-      || (boundary.status === 'ready' && (!Number.isSafeInteger(boundary.pr_number) || boundary.pr_number < 1
-        || !validSha(boundary.before_sha) || !validSha(boundary.after_sha)
-        || boundary.before_sha === boundary.after_sha
-        || boundary.after_sha !== provider.base_sha || boundary.after_sha !== input.expected_base_sha))) {
+    if (!isValidRollbackBoundary(provider.rollback_boundary, provider.base_sha, input.expected_base_sha)) {
       push(blockers, 'provider_data_incomplete', 'provider rollback_boundary is invalid or does not bind the expected base');
     }
     // GitHub owns review state; local review, lease and acceptance artifacts do not grant merge permission.
@@ -450,25 +363,14 @@ export function projectPullRequestMergeReadiness(input: PullRequestMergeReadines
         push(blockers, 'required_check_coverage_missing', failures.map((failure) => failure.message).join('; '));
       }
     }
-    if (generated?.status === 'invalid') {
-      push(blockers, 'generated_artifacts_policy_invalid',
-        `generated-artifact policy is invalid: ${generated.message}; fix publication.generated_artifacts in .ai/harness/policy.json on the base branch`);
-    } else if (generated?.status === 'active') {
-      const check = generated.check;
-      if (!check || typeof check !== 'object' || Array.isArray(check)
-        || check.head_sha !== provider.head_sha || check.base_sha !== provider.base_sha
-        || check.head_sha !== input.expected_head_sha || check.base_sha !== input.expected_base_sha) {
-        push(blockers, 'provider_data_incomplete', 'generated-artifact check does not bind the expected head and base');
-      } else if (check.failure !== null) {
-        const failure = check.failure;
-        if (!GENERATED_ARTIFACTS_FAILURE_CODES.includes(failure?.code as GeneratedArtifactsFailureCode)
-          || typeof failure.message !== 'string' || failure.message.trim() === '') {
-          push(blockers, 'provider_data_incomplete', 'generated-artifact check failure is malformed');
-        } else {
-          push(blockers, failure.code, failure.message);
-        }
-      }
-    }
+    evaluateGeneratedArtifactsFacts(
+      generated,
+      provider.head_sha,
+      provider.base_sha,
+      input.expected_head_sha,
+      input.expected_base_sha,
+      (code, detail) => push(blockers, code, detail),
+    );
   }
   return Object.freeze({
     ready: blockers.length === 0,

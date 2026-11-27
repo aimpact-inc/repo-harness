@@ -12,6 +12,12 @@ responsibilities:
 source:
   include:
     - src/effects/publication/merge-readiness.ts
+    - src/effects/publication/merge-readiness-transport.ts
+    - src/effects/publication/merge-readiness-checks.ts
+    - src/effects/publication/merge-readiness-reviews.ts
+    - src/effects/publication/merge-readiness-policy.ts
+    - src/effects/publication/merge-readiness-rollback.ts
+    - src/effects/publication/merge-readiness-stack.ts
     - src/effects/publication/test-execution-evidence.ts
     - src/effects/publication/generated-artifacts.ts
     - src/effects/publication/draft-pull-request.ts
