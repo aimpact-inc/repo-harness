@@ -9,6 +9,7 @@ responsibilities:
   - Own the general repository read and write tools, CodeGraph routing, and access-policy enforcement.
 source:
   include:
+    - src/cli/mcp/reader-tools.ts
     - src/cli/mcp/general-repo-access.ts
     - src/cli/mcp/general-repo-access/**
     - assets/mcp/**

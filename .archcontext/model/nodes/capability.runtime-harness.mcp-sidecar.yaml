@@ -16,7 +16,8 @@
     ],
     "exclude": [
       "src/cli/mcp/general-repo-access.ts",
-      "src/cli/mcp/general-repo-access/**"
+      "src/cli/mcp/general-repo-access/**",
+      "src/cli/mcp/reader-tools.ts"
     ],
     "entrypoints": [
       {

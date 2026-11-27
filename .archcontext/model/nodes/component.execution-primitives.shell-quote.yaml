@@ -1,0 +1,13 @@
+schemaVersion: archcontext.node/v2
+id: component.execution-primitives.shell-quote
+kind: component
+name: POSIX Shell Quoting
+status: active
+parent: capability.workflow-engine.execution-primitives
+layer: core
+summary: Quotes one POSIX shell word as pure core code with no imports.
+responsibilities:
+  - Own the shared POSIX single-quote helper (shellQuote) used by CLI commands, hook adapters, host installers, MCP doctor, filesystem transactions and review runners.
+source:
+  include:
+    - src/core/shell-quote.ts

@@ -3,7 +3,7 @@ import { homedir } from 'os';
 import { basename, join, resolve } from 'path';
 import { isPathInside } from '../../effects/path-containment';
 import { readRegisteredRepoHarnessRepos } from '../../effects/repo-registry';
-import { numberArg } from './general-repo-access';
+import { numberArg } from './reader-tools';
 import { canonicalDirectory } from './paths';
 import { currentGitBranch, isRepoHarnessAdopted, resolveMcpRepoRoot } from './repo';
 import type { McpToolContext } from './tools';

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.c3520236724949f6",
+  "fingerprint": "sha256:4a6dce70dad603a26c663a2862cd95e234158b4704c84fe96b4ae1b73b1e21e6",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "entrypoint-bypass",
+  "subject": {
+    "selectorKind": "node",
+    "stableKey": "node:capability.runtime-harness.mcp-sidecar",
+    "subjectSelectorId": "subject.node.80f838736ffab037"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-harness.mcp-sidecar"
+  ],
+  "affectedNodeCount": 1,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "entrypointBypassCount": 1
+  },
+  "reason": "Assigned src/cli/mcp/reader-tools.ts to capability.runtime-mcp.general-repo-access (#3580).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-27T08:40:04.000Z",
+  "provenance": {
+    "headSha": "62d830741f43be8d22a766c97d86bc6db4ea12e2",
+    "assessmentDigest": "sha256:57da74e6ddd2badab784b2077f6b3b6ebcaaa5c8b566835d6111a568df5044bd",
+    "baselineSnapshotDigest": "sha256:598c74b8158e2a312aa9cfd7a0d7b0aaa517d24dcbb0495c463ea512f6064c51"
+  },
+  "snapshotDigest": "sha256:598c74b8158e2a312aa9cfd7a0d7b0aaa517d24dcbb0495c463ea512f6064c51",
+  "evidenceDigest": "sha256:57da74e6ddd2badab784b2077f6b3b6ebcaaa5c8b566835d6111a568df5044bd",
+  "resolutionDigest": "sha256:40e915b08d37c1925eb0a727d57930ba9e924422081701d320ae32eff87bca36",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "module.entrypointBypassCount",
+      "subjectSelectorId": "subject.node.80f838736ffab037",
+      "nodeId": "capability.runtime-harness.mcp-sidecar",
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.6e0cc417aad7cec5"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.854a86d079ee9bec",
+  "fingerprint": "sha256:631e4dfbd5560b2048e72307036bdedde247600812071b2dffedbd36d3cdca71",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "entrypoint-bypass",
+  "subject": {
+    "selectorKind": "node",
+    "stableKey": "node:capability.runtime-mcp.general-repo-access",
+    "subjectSelectorId": "subject.node.8734f546a0413cce"
+  },
+  "affectedNodeIds": [
+    "capability.runtime-mcp.general-repo-access"
+  ],
+  "affectedNodeCount": 1,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "entrypointBypassCount": 2
+  },
+  "reason": "Assigned src/cli/mcp/reader-tools.ts to capability.runtime-mcp.general-repo-access and routed repo-discovery numberArg import through src/cli/mcp/reader-tools.ts (#3580).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-27T08:40:04.000Z",
+  "provenance": {
+    "headSha": "62d830741f43be8d22a766c97d86bc6db4ea12e2",
+    "assessmentDigest": "sha256:fd3ac1ca534db6bc47c6d626e1c9ef251a216ce44b7b3665971df0fe41c6af72",
+    "baselineSnapshotDigest": "sha256:1d098b6b4838a11a89b8637f8e84cef5bf8bbeb946c2bfa44be359dcbde5f172"
+  },
+  "snapshotDigest": "sha256:1d098b6b4838a11a89b8637f8e84cef5bf8bbeb946c2bfa44be359dcbde5f172",
+  "evidenceDigest": "sha256:fd3ac1ca534db6bc47c6d626e1c9ef251a216ce44b7b3665971df0fe41c6af72",
+  "resolutionDigest": "sha256:2df718fdcc0291d904b1fdd49232162023817b3b74babc259ec7a21d43f13272",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "module.entrypointBypassCount",
+      "subjectSelectorId": "subject.node.8734f546a0413cce",
+      "nodeId": "capability.runtime-mcp.general-repo-access",
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.43f97c4443f5b1bc"
+    }
+  ]
+}
