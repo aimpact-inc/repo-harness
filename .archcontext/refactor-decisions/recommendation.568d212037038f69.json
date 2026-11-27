@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "archcontext.refactor-decision/v1",
+  "namespace": "product.repo-harness",
+  "recommendationId": "recommendation.568d212037038f69",
+  "fingerprint": "sha256:a576e6e4cffc7173e332a659699939198bade8c12aa2c8e133f014cda5b340a8",
+  "fingerprintSchemaVersion": "archcontext.recommendation-fingerprint/v3",
+  "category": "structural_observation",
+  "kind": "entrypoint-bypass",
+  "subject": {
+    "selectorKind": "node",
+    "stableKey": "node:component.global-runtime-reconciliation.cli-root",
+    "subjectSelectorId": "subject.node.82661fe40545bd0d"
+  },
+  "affectedNodeIds": [
+    "component.global-runtime-reconciliation.cli-root"
+  ],
+  "affectedNodeCount": 1,
+  "regressesFrom": null,
+  "status": "resolved",
+  "observationMetrics": {
+    "entrypointBypassCount": 1
+  },
+  "reason": "Declared entrypoint.global-runtime-reconciliation.cli-root-program on src/cli/index.ts (#3578).",
+  "actor": {
+    "kind": "cli",
+    "id": "cli-user"
+  },
+  "decidedAt": "2026-11-27T07:52:28.000Z",
+  "provenance": {
+    "headSha": "fcdc245fd7115c09f5c2ac8c035ec3081821b06f",
+    "assessmentDigest": "sha256:1cd081729118180d85fb7a7ef0b53074c4adb5e1e73f5712df215ee976f368f7",
+    "baselineSnapshotDigest": "sha256:dd06d91c404fe3bd3bf85e5d8f12ed2622a4d218f47cb4d417d7e89a390e6742"
+  },
+  "snapshotDigest": "sha256:dd06d91c404fe3bd3bf85e5d8f12ed2622a4d218f47cb4d417d7e89a390e6742",
+  "evidenceDigest": "sha256:1cd081729118180d85fb7a7ef0b53074c4adb5e1e73f5712df215ee976f368f7",
+  "resolutionDigest": "sha256:1efaa0b3c1982a694c84d3acd289954aec9b8acba70569b1eec7667c84f94c23",
+  "scope": {
+    "kind": "repository"
+  },
+  "targetOutcomes": [
+    {
+      "metric": "module.entrypointBypassCount",
+      "subjectSelectorId": "subject.node.82661fe40545bd0d",
+      "nodeId": "component.global-runtime-reconciliation.cli-root",
+      "operator": "absent",
+      "value": null,
+      "required": true,
+      "outcomeId": "outcome.f0d966bb15ecc4dd"
+    }
+  ]
+}
