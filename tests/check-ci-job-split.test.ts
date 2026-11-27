@@ -1495,20 +1495,51 @@ describe('released CHANGELOG sections', () => {
     expect(sections.has('Unreleased')).toBe(false);
   });
 
+  // A section counts as released only with its `v<version>` tag: a version heading that no tag holds is
+  // still unreleased, so both fixture sections are tagged here.
+  const TAGGED = new Set(['0.31.0', '0.30.0']);
+
   test('an entry that a merge placed inside a released section is drift', () => {
-    expect(sectionDrift(CHANGELOG, PLACED_INSIDE)).toEqual([{ version: '0.31.0', reason: 'changed' }]);
+    expect(sectionDrift(CHANGELOG, PLACED_INSIDE, TAGGED)).toEqual([{ version: '0.31.0', reason: 'changed' }]);
   });
 
   test('an [Unreleased] entry and a new version section are not drift', () => {
     const entryOnly = CHANGELOG.replace('- New entry. (#3)', '- New entry. (#3) and a second sentence.');
-    expect(sectionDrift(CHANGELOG, entryOnly)).toEqual([]);
-    expect(sectionDrift(CHANGELOG, RELEASE)).toEqual([]);
+    expect(sectionDrift(CHANGELOG, entryOnly, TAGGED)).toEqual([]);
+    expect(sectionDrift(CHANGELOG, RELEASE, TAGGED)).toEqual([]);
   });
 
   test('a removed released section is drift, and a duplicate version heading fails closed', () => {
     const removed = CHANGELOG.replace(/## \[0\.30\.0\][\s\S]*$/, '');
-    expect(sectionDrift(CHANGELOG, removed)).toEqual([{ version: '0.30.0', reason: 'removed' }]);
+    expect(sectionDrift(CHANGELOG, removed, TAGGED)).toEqual([{ version: '0.30.0', reason: 'removed' }]);
+    // The same removal with no tag on that section is free, because the section is not released yet.
+    expect(sectionDrift(CHANGELOG, removed, new Set(['0.31.0']))).toEqual([]);
     expect(() => releasedSections(`${CHANGELOG}\n## [0.31.0] - 2026-11-13\n`)).toThrow('two sections for version 0.31.0');
+  });
+
+  // #3639 prepared an `[0.38.0]` section above a tagged release, the owner withdrew it, and the withdrawing
+  // revert could not pass a check that read the untagged heading as released. (#3642)
+  test('a base section counts as released only with its version tag, and a checkout without tags fails closed', () => {
+    const { repo, git, write, commit } = cutoverRepository('rh-changelog-tags-');
+    try {
+      write('docs/CHANGELOG.md', CUT);
+      const base = commit('the base');
+      // The base holds two version headings and no tag. Passing here would leave both sections unprotected.
+      expect(() => checkReleasedSections(base, base, repo)).toThrow('holds no v<x.y.z> release tag');
+      git('tag', 'v0.30.0', base);
+      git('checkout', '-q', '-b', 'withdraw');
+      // The untagged section is withdrawn, as the 0.38.0 revert does with its unreleased section.
+      write('docs/CHANGELOG.md', CUT.replace(/## \[0\.31\.0\][\s\S]*?(?=## \[0\.30\.0\])/u, ''));
+      const head = commit('withdraw the untagged section');
+      const report = checkReleasedSections(base, head, repo);
+      expect(report.drift).toEqual([]);
+      expect(report.fragmentFaults).toEqual([]);
+      expect(report.untaggedSections).toEqual(['0.31.0']);
+      expect(report.sectionsAtBase).toBe(1);
+      // The same head drifts once that version holds its tag, so the tag is the only difference.
+      git('tag', 'v0.31.0', base);
+      expect(checkReleasedSections(base, head, repo).drift).toEqual([{ version: '0.31.0', reason: 'removed' }]);
+    } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 
   // The real fault from #2622: the released section at the base of the merge result, not of the branch.
@@ -1536,8 +1567,13 @@ describe('released CHANGELOG sections', () => {
       git('checkout', '-q', 'main');
       const base = commit('docs/CHANGELOG.md', RELEASE, 'release 0.32.0');
       // git places the branch hunk by its context lines, so the entry lands inside the released 0.32.0 section.
+      // Each section is released only with its tag, so tag the three versions the fixture holds.
+      git('tag', 'v0.31.0', before);
+      git('tag', 'v0.30.0', before);
+      git('tag', 'v0.32.0', base);
       const report = checkReleasedSections(base, head, repo);
       expect(report.sectionsAtBase).toBe(3);
+      expect(report.untaggedSections).toEqual([]);
       expect(report.drift).toEqual([{ version: '0.32.0', reason: 'changed' }]);
       // The same head against the pre-release base keeps the entry under [Unreleased], so there is no drift:
       // the release commit, not the branch, moved the entry into a released section.
@@ -1584,6 +1620,8 @@ describe('released CHANGELOG sections', () => {
       // One root commit, then a fresh branch per case: each case starts from the base text it names.
       write('docs/CHANGELOG.md', BASE_B);
       const root = commit('the root commit');
+      // One section is released, so the check reads the base as a release and not as a tagless checkout.
+      git('tag', 'v0.31.0', root);
       // An unchanged file gives an empty diff, which is a real case here, so the commits allow it.
       const commitCase = (message: string) => { git('add', '-A'); git('commit', '-qm', message, '--allow-empty'); return git('rev-parse', 'HEAD'); };
       const faultsOf = (baseText: string, headText: string, name: string) => {
@@ -1637,6 +1675,8 @@ describe('released CHANGELOG sections', () => {
     try {
       write('docs/CHANGELOG.md', CUT);
       const base = commit('the cutover');
+      // One section is released, so the check reads the base as a release and not as a tagless checkout.
+      git('tag', 'v0.31.0', base);
       git('checkout', '-q', '-b', 'fragments');
       // Contract item 2: a fragment holds "one or more - bullet lines", so two entries of one category are legal.
       write('docs/changelog.d/31.added.md', '- An added entry. (#31)\n- A second entry of the same category. (#31)\n');
@@ -1695,10 +1735,12 @@ describe('released CHANGELOG sections', () => {
   // A tree from before the fragment form has no `docs/changelog.d`, and git does not track an empty one.
   // Both states must read as zero fragments, with no error and no section.
   test('assemble with no docs/changelog.d and with an empty one gives no error and no section', () => {
-    const { repo, write, commit } = cutoverRepository('rh-changelog-assemble-empty-');
+    const { repo, git, write, commit } = cutoverRepository('rh-changelog-assemble-empty-');
     try {
       write('docs/CHANGELOG.md', CUT);
       const base = commit('a tree with no fragment directory');
+      // One section is released, so the check reads the base as a release and not as a tagless checkout.
+      git('tag', 'v0.31.0', base);
       expect(fragmentPaths(repo)).toEqual([]);
       const absent = assemble({ version: '0.32.0', date: '2026-11-14', root: repo });
       expect(absent).toEqual({ version: '0.32.0', section: '', removed: [] });

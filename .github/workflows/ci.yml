@@ -307,6 +307,8 @@ jobs:
         with:
           ref: ${{ needs.selection.outputs.sha }}
           fetch-depth: 0
+          # The CHANGELOG check reads refs/tags/v<version>.
+          fetch-tags: true
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
