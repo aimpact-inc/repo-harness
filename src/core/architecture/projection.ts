@@ -3,8 +3,6 @@ import {
   INDEX_SEED_SCHEMA_VERSION,
   NATIVE_CONTEXT_PROFILE,
   NATIVE_CONTEXT_SCHEMA_VERSION,
-  nativeContextSchemaResolver,
-  jsonSchemaResolver,
   type ArchContextError,
   type ArchitectureDocsProjectionManifestTargetV4,
   type IndexSeedResultV1,
@@ -12,13 +10,11 @@ import {
   architectureDebtReportIssues,
   docsAnchorsReportIssues,
   projectionResultInvariantIssues,
-  validateJsonSchema,
   type ArchitectureDebtDeltaReportV1,
   type ArchitectureDebtReportV1,
   type ArchitectureFlowSelectorCheckV1,
   type DependencyConstraintEvaluationV1,
   type DocsAnchorsReportV1,
-  type Json,
   type ProjectionFreshnessReasonCode,
   type ProjectionResultV3,
   type RefImpactV1,
@@ -26,33 +22,21 @@ import {
   type RuntimeVerifyV1,
   type ProjectionSliceV1,
 } from 'archctx-contracts';
-import projectionResultSchema from 'archctx-contracts/schemas/runtime/projection-result.schema.json';
-import docsAnchorsSchema from 'archctx-contracts/schemas/runtime/docs-anchors.schema.json';
-import architectureDebtSchema from 'archctx-contracts/schemas/runtime/architecture-debt.schema.json';
-import architectureDebtDeltaSchema from 'archctx-contracts/schemas/runtime/architecture-debt-delta.schema.json';
-import flowSelectorCheckSchema from 'archctx-contracts/schemas/runtime/flow-selector-check.schema.json';
-import dependencyConstraintEvaluationSchema from 'archctx-contracts/schemas/runtime/dependency-constraint-evaluation.schema.json';
-import refImpactSchema from 'archctx-contracts/schemas/runtime/ref-impact.schema.json';
-import refImpactBatchSchema from 'archctx-contracts/schemas/runtime/ref-impact-batch.schema.json';
-import runtimeVerifySchema from 'archctx-contracts/schemas/runtime/runtime-verify.schema.json';
-import projectionSliceSchema from 'archctx-contracts/schemas/runtime/projection-slice.schema.json';
-import stateMachineCheckSchema from 'archctx-contracts/schemas/runtime/state-machine-check.schema.json';
-import projectionPrVerificationSchema from 'archctx-contracts/schemas/runtime/projection-pr-verification.schema.json';
-import nativeContextExportSchema from 'archctx-contracts/schemas/runtime/native-context-export.schema.json';
-import indexSeedSchema from 'archctx-contracts/schemas/runtime/index-seed.schema.json';
-import nodeSchema from 'archctx-contracts/schemas/repo/architecture-node.schema.json';
-import relationSchema from 'archctx-contracts/schemas/repo/architecture-relation.schema.json';
-import flowSchema from 'archctx-contracts/schemas/repo/architecture-flow.schema.json';
 import { dependencies } from '../../../package.json';
 import type { ArchitectureProjectionPolicy } from './contracts';
+import {
+  ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS,
+  buildArchctxCommandDispositions,
+  hasStandaloneSyncFlag,
+} from './archctx-command-policy';
+import {
+  ARCHCTX_SCHEMAS,
+  decodeArchctxSchema,
+  record,
+  validateNativeContextPayload,
+} from './projection-schemas';
 
 export const ARCHCTX_REQUIRED_VERSION = dependencies.archctx;
-
-// Resolve published references offline, including in the bundled CLI.
-const resolveSchema = jsonSchemaResolver([
-  architectureDebtSchema, dependencyConstraintEvaluationSchema, docsAnchorsSchema,
-  flowSelectorCheckSchema, projectionPrVerificationSchema, refImpactSchema, stateMachineCheckSchema,
-] as Parameters<typeof jsonSchemaResolver>[0]);
 
 /**
  * A delivery view of archctx's per-target output decisions. `changes[]` has one entry per targetId;
@@ -192,11 +176,7 @@ export type NativeContextSource = { readonly kind: 'worktree' } | { readonly kin
 /** Validate the provider contract and bind its snapshot to the requested source. */
 export function decodeNativeContextExport(value: unknown, source: NativeContextSource): NativeContextExportV1 {
   try {
-    type Schema = Parameters<typeof validateJsonSchema>[0];
-    const validation = validateJsonSchema(nativeContextExportSchema as unknown as Schema, value as Json, {
-      resolveSchema: nativeContextSchemaResolver({ node: nodeSchema as Schema, relation: relationSchema as Schema, flow: flowSchema as Schema }),
-    });
-    if (!validation.valid) throw new Error(validation.issues.slice(0, 5).map((issue) => `${issue.path} ${issue.message}`).join('; '));
+    validateNativeContextPayload(value);
     const context = value as NativeContextExportV1;
     if (context.schemaVersion !== NATIVE_CONTEXT_SCHEMA_VERSION || context.profile !== NATIVE_CONTEXT_PROFILE) throw new Error('schema version or profile mismatch');
     if (source.kind === 'ref') {
@@ -207,8 +187,6 @@ export function decodeNativeContextExport(value: unknown, source: NativeContextS
     throw new ArchctxClientError({ code: 'RH_ARCHCTX_NATIVE_CONTEXT_INVALID', action: 'update-repo-harness', message: `native context invalid: ${error instanceof Error ? error.message : String(error)}` });
   }
 }
-
-type JsonRecord = Record<string, unknown>;
 
 export function readArchitectureProjectionPolicy(value: unknown): ArchitectureProjectionPolicy {
   const root = record(value, 'policy');
@@ -238,7 +216,7 @@ export function assertArchctxVersion(value: unknown, requiredVersion: string = A
 
 /** ArchContext owns the result contract; repo-harness applies its published schema and invariants. */
 export function assertProjectionResult(value: unknown, expectedRequestId: string): ProjectionResultV3 {
-  const result = decode(projectionResultSchema, value, 'projection result') as unknown as ProjectionResultV3;
+  const result = decodeArchctxSchema<ProjectionResultV3>(ARCHCTX_SCHEMAS.projectionResult, value, 'projection result');
   const issues = projectionResultInvariantIssues(result);
   if (result.requestId !== expectedRequestId) issues.push('requestId mismatch');
   if (issues.length > 0) throw new Error(`projection result invalid: ${issues.join('; ')}`);
@@ -264,7 +242,7 @@ const PER_TARGET_FRESHNESS_REASONS: ReadonlySet<ProjectionFreshnessReasonCode> =
  * result. Only a check result carries `freshness`; any other result is refused.
  */
 export function decodeProjectionCheckFreshness(value: unknown): GeneratedSummaryFreshness {
-  const result = decode(projectionResultSchema, value, 'projection check result') as unknown as ProjectionResultV3;
+  const result = decodeArchctxSchema<ProjectionResultV3>(ARCHCTX_SCHEMAS.projectionResult, value, 'projection check result');
   const issues = projectionResultInvariantIssues(result);
   if (issues.length > 0) throw new Error(`projection check result invalid: ${issues.join('; ')}`);
   if (!result.freshness) throw new Error('projection result has no freshness; save the output of rh arch projection check');
@@ -277,14 +255,14 @@ export function decodeProjectionCheckFreshness(value: unknown): GeneratedSummary
 
 /** ArchContext owns the `index seed` result contract; this applies its published schema. */
 export function decodeIndexSeedResult(value: unknown): IndexSeedResultV1 {
-  const result = decode<IndexSeedResultV1>(indexSeedSchema, value, 'index seed result');
+  const result = decodeArchctxSchema<IndexSeedResultV1>(ARCHCTX_SCHEMAS.indexSeed, value, 'index seed result');
   if (result.schemaVersion !== INDEX_SEED_SCHEMA_VERSION) throw new Error('index seed result schema mismatch');
   return result;
 }
 
 /** ArchContext owns the `docs anchors` report contract; this applies its schema and invariants. */
 export function decodeDocsAnchorsReport(value: unknown): DocsAnchorsReportV1 {
-  const report = decode(docsAnchorsSchema, value, 'docs anchors report') as unknown as DocsAnchorsReportV1;
+  const report = decodeArchctxSchema<DocsAnchorsReportV1>(ARCHCTX_SCHEMAS.docsAnchors, value, 'docs anchors report');
   const issues = docsAnchorsReportIssues(report);
   if (issues.length > 0) throw new Error(`docs anchors report invalid: ${issues.join('; ')}`);
   return report;
@@ -295,14 +273,14 @@ export function decodeDocsAnchorsReport(value: unknown): DocsAnchorsReportV1 {
  * schema and invariants. The digest binds the whole report, so any change fails.
  */
 export function decodeArchitectureDebtReport(value: unknown): ArchitectureDebtReportV1 {
-  const report = decode<ArchitectureDebtReportV1>(architectureDebtSchema, value, 'architecture debt report');
+  const report = decodeArchctxSchema<ArchitectureDebtReportV1>(ARCHCTX_SCHEMAS.architectureDebt, value, 'architecture debt report');
   assertArchitectureDebtReport(report);
   return report;
 }
 
 /** Validate the native delta and bind its snapshots to the requested commits. */
 export function decodeArchitectureDebtDelta(value: unknown, baseSha: string, headSha: string): ArchitectureDebtDeltaReportV1 {
-  const report = decode<ArchitectureDebtDeltaReportV1>(architectureDebtDeltaSchema, value, 'architecture debt delta');
+  const report = decodeArchctxSchema<ArchitectureDebtDeltaReportV1>(ARCHCTX_SCHEMAS.architectureDebtDelta, value, 'architecture debt delta');
   if (report.base.ref !== baseSha || report.base.sha !== baseSha || report.head.sha !== headSha) throw new Error('architecture debt delta snapshot mismatch');
   assertArchitectureDebtReport(report.head.debt);
   return report;
@@ -314,25 +292,25 @@ function assertArchitectureDebtReport(report: ArchitectureDebtReportV1): void {
 }
 
 export function decodeRuntimeVerify(value: unknown, base: string, head: string): RuntimeVerifyV1 {
-  const report = decode<RuntimeVerifyV1>(runtimeVerifySchema, value, 'runtime verify report');
+  const report = decodeArchctxSchema<RuntimeVerifyV1>(ARCHCTX_SCHEMAS.runtimeVerify, value, 'runtime verify report');
   if (report.base !== base || report.baseSha !== base || report.headSha !== head) throw new Error('runtime verify report snapshot mismatch');
   return report;
 }
 
 export function decodeProjectionSlice(value: unknown, base: string, head: string): ProjectionSliceV1 {
-  const report = decode<ProjectionSliceV1>(projectionSliceSchema, value, 'projection slice');
+  const report = decodeArchctxSchema<ProjectionSliceV1>(ARCHCTX_SCHEMAS.projectionSlice, value, 'projection slice');
   if (report.base !== base || report.baseSha !== base || report.headSha !== head) throw new Error('projection slice snapshot mismatch');
   return report;
 }
 
 /** ArchContext owns the `flows check` report contract; this applies its published schema. */
 export function decodeFlowSelectorCheck(value: unknown): ArchitectureFlowSelectorCheckV1 {
-  return decode(flowSelectorCheckSchema, value, 'flows check report') as unknown as ArchitectureFlowSelectorCheckV1;
+  return decodeArchctxSchema<ArchitectureFlowSelectorCheckV1>(ARCHCTX_SCHEMAS.flowSelectorCheck, value, 'flows check report');
 }
 
 /** ArchContext owns the `constraints check` report contract; this applies its published schema. */
 export function decodeConstraintEvaluation(value: unknown): DependencyConstraintEvaluationV1 {
-  return decode(dependencyConstraintEvaluationSchema, value, 'constraints check report') as unknown as DependencyConstraintEvaluationV1;
+  return decodeArchctxSchema<DependencyConstraintEvaluationV1>(ARCHCTX_SCHEMAS.dependencyConstraintEvaluation, value, 'constraints check report');
 }
 
 /** `refs` reads commits. `paths` reads the worktree model at `head`. */
@@ -342,7 +320,7 @@ export type RefImpactSource =
 
 /** ArchContext owns the `impact` report contract; this applies its published schema and binds the snapshots to the request. */
 export function decodeRefImpact(value: unknown, source: RefImpactSource): RefImpactV1 {
-  const report = decode<RefImpactV1>(refImpactSchema, value, 'impact report');
+  const report = decodeArchctxSchema<RefImpactV1>(ARCHCTX_SCHEMAS.refImpact, value, 'impact report');
   bindRefImpact(report, source);
   return report;
 }
@@ -355,7 +333,7 @@ function bindRefImpact(report: RefImpactV1, source: RefImpactSource): void {
 }
 
 export function decodeRefImpactBatch(value: unknown, ids: readonly string[], head: string): ReadonlyMap<string, RefImpactBatchV1['items'][number]> {
-  const report = decode<RefImpactBatchV1>(refImpactBatchSchema, value, 'impact batch');
+  const report = decodeArchctxSchema<RefImpactBatchV1>(ARCHCTX_SCHEMAS.refImpactBatch, value, 'impact batch');
   const remaining = new Set(ids);
   const items = new Map<string, RefImpactBatchV1['items'][number]>();
   for (const item of report.items) {
@@ -378,80 +356,15 @@ export function managedArchctxAction(raw: string): string {
   return MANAGED_ARCHCTX_ACTIONS.get(action) ?? (/^archctx(\s|$)/.test(action) ? ARCHITECTURE_DEBT_COMMAND : action);
 }
 
-function decode<T = JsonRecord>(schema: unknown, value: unknown, label: string): T {
-  const validation = validateJsonSchema(schema as Parameters<typeof validateJsonSchema>[0], value as Json, { resolveSchema });
-  if (!validation.valid) throw new Error(`${label} invalid: ${validation.issues.slice(0, 5).map((issue) => `${issue.path} ${issue.message}`).join('; ')}`);
-  // SAFETY: The published schema above validates the report type selected by the caller.
-  return value as T;
-}
-
-function record(value: unknown, label: string): JsonRecord {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
-  return value as JsonRecord;
-}
-
 export type ArchctxDisposition = 'pass' | 'owned' | 'refused';
 export interface ArchctxCommandDisposition { readonly disposition: ArchctxDisposition; readonly use?: string }
-
-const passCommands = [
-  'capabilities', 'init', 'index', 'validate', 'check', 'model', 'context', 'status', 'repo', 'landscape', 'explore', 'prepare',
-  'practices', 'checkpoint', 'plan', 'apply', 'hash', 'review', 'complete', 'manifest', 'doctor', 'paths', 'export',
-  'resolve', 'impact', 'history', 'flows', 'state-machines', 'deps', 'constraints', 'docs',
-] as const;
-const owned = (use: string): ArchctxCommandDisposition => ({ disposition: 'owned', use });
-const refused = (use: string): ArchctxCommandDisposition => ({ disposition: 'refused', use });
 
 /**
  * One entry for each command of the pinned archctx help envelope, plus `docs`.
  * `rh arch` starts archctx only for `pass` (and read-only `sync --check`); a
  * test fails when the help list and these keys differ.
  */
-export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxCommandDisposition>> = {
-  ...Object.fromEntries(passCommands.map(name => [name, { disposition: 'pass' } as ArchctxCommandDisposition])),
-  sync: owned('rh arch projection apply (or rh arch sync --check)'),
-  projection: owned('rh arch projection'),
-  debt: owned('rh arch debt'),
-  verify: owned('rh arch verify'),
-  refactor: owned('rh arch refactor'),
-  recommendations: owned('rh arch refactor'),
-  scan: owned('rh arch refactor'),
-  decide: owned('rh arch refactor'),
-  install: refused('rh install'),
-  uninstall: refused('rh uninstall'),
-  update: refused('rh update'),
-  hooks: refused('rh install'),
-  hook: refused('rh install'),
-};
-
-/**
- * The archctx `projection` subcommands that `rh arch projection` does not
- * register. The read-only ones pass; the provider runs stay owned by the
- * registered check, plan and apply.
- */
-const ARCHCTX_PROJECTION_SUBCOMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxCommandDisposition>> = {
-  snapshot: { disposition: 'pass' },
-  freshness: { disposition: 'pass' },
-  'publish-status': { disposition: 'pass' },
-  'verify-pr': { disposition: 'pass' },
-  slice: { disposition: 'pass' },
-  run: owned('rh arch projection check|plan|apply'),
-};
-
-const SYNC_READONLY_FLAGS: ReadonlySet<string> = new Set(['--check', '--help', '-h']);
-const SYNC_VALUE_FLAGS: ReadonlySet<string> = new Set(['--changed', '--format']);
-
-function hasStandaloneSyncFlag(rest: readonly string[]): boolean {
-  for (let index = 0; index < rest.length; index += 1) {
-    const token = rest[index]!;
-    if (token === '--') return false;
-    if (SYNC_VALUE_FLAGS.has(token)) {
-      index += 1;
-      continue;
-    }
-    if (SYNC_READONLY_FLAGS.has(token)) return true;
-  }
-  return false;
-}
+export const ARCHCTX_COMMAND_DISPOSITIONS: Readonly<Record<string, ArchctxCommandDisposition>> = buildArchctxCommandDispositions();
 
 /** The refusal text for a command that `rh arch` does not start, or null when it starts. */
 export function archctxRefusal(args: readonly string[]): string | null {
