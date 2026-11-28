@@ -2,6 +2,27 @@
 
 All notable changes to this skill are documented here.
 
+## [0.38.1] - 2026-11-28
+
+### Added
+
+- Opt-in Pi Gemini App Neon route: a seat with `runtime: pi` and model `gemini-app/gemini-neon` starts on the Pi Gemini App provider, and the frontend seat rule accepts both Gemini App Neon and Magpie Neon. The new quota account `gemini_app` reports `unknown` with the reason `no Gemini App quota reader`, and the Antigravity quota reader runs only for Antigravity accounts, so a Gemini App seat causes no Antigravity read. The recommended defaults do not change: the catalog Pi route, the default seats and the recommended ranges stay on `magpie/agy-cli/gemini-4-neon`. (#3664, #3662)
+
+### Fixed
+
+- On native Windows, `rh update` reads the archctx launcher pair (`archctx.exe` and its `.bunx` record) before and after Bun installs the pinned package. The `.bunx` record must resolve to the `bin.archctx` target inside the managed package, and a partial, malformed or foreign entry fails before Bun runs. The step no longer reports `RH_ARCHCTX_BIN_READBACK` and rolls back, so a Windows host on Node 26 completes the update. macOS and Linux keep the symlink target proof. (#3663, #3661)
+
+### Upgrade
+
+- Run `rh update` once on each host after installing 0.38.1.
+- A native Windows host on Node 26 needs this release. 0.38.0 fails its `rh update` with `RH_ARCHCTX_BIN_READBACK` and rolls back.
+- The Gemini App Neon route is opt-in. A seat that stays on `magpie/agy-cli/gemini-4-neon` changes nothing, and its quota row is unchanged.
+
+### Rollback
+
+- Before publication, close the prep PR or run `git revert <squash-commit>` after merge. After publication, keep the tag and release a corrective patch.
+- Version 0.38.0 fails a Windows `rh update` with `RH_ARCHCTX_BIN_READBACK` and rolls back, and it has no `gemini-app/` model prefix and no `gemini_app` quota account. Keep 0.38.1 on upgraded hosts; if you must return to 0.38.0, reinstall 0.38.0 and run `rh update` on a macOS or Linux host.
+
 ## [0.38.0] - 2026-11-28
 
 ### Added
