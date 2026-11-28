@@ -11,6 +11,7 @@ export interface SeatAccountQuotas {
   readonly chatgpt: AccountQuota & { readonly mode: 'normal' | 'unknown'; readonly credits: CodexCreditMode };
   readonly agy_gemini: AccountQuota & { readonly mode: 'normal' | 'saving' | 'unknown' };
   readonly agy_other: AccountQuota;
+  readonly gemini_app: AccountQuota;
 }
 
 /**
@@ -42,6 +43,7 @@ export function seatAccountQuotas(accounts: readonly QuotaAccountReport[], routi
     agy_gemini: { ...agyGemini, mode: agyGemini.remaining === null ? 'unknown'
       : agyGemini.remaining < routing.agy_saving_below_remaining ? 'saving' : 'normal' },
     agy_other: quota('agy_other'),
+    gemini_app: quota('gemini_app'),
   };
 }
 

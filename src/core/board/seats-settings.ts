@@ -122,9 +122,11 @@ const AGY_NEON_MODEL = 'gemini-4-neon';
 export const AGY_NEON_XHIGH_MODEL = `${AGY_NEON_MODEL}-xhigh`;
 export const AGY_HYDROGEN_HIGH_MODEL = 'gemini-4-hydrogen-high';
 export const PI_NEON_MODEL = `${PI_AGY_MODEL_PREFIX}${AGY_NEON_MODEL}`;
+export const PI_GEMINI_APP_MODEL_PREFIX = 'gemini-app/';
+const PI_GEMINI_APP_NEON_MODEL = `${PI_GEMINI_APP_MODEL_PREFIX}gemini-neon`;
 
 export const isNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>
-  (seat.runtime === 'pi' && seat.model === PI_NEON_MODEL)
+  (seat.runtime === 'pi' && (seat.model === PI_NEON_MODEL || seat.model === PI_GEMINI_APP_NEON_MODEL))
   || (seat.runtime === 'agy' && seat.model?.startsWith(AGY_NEON_MODEL) === true);
 
 export const isClaudeOrNeonSeat = (seat: Pick<SeatConfigV1, 'runtime' | 'model'>): boolean =>

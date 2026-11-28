@@ -18,6 +18,7 @@ const NORMAL: SeatAccountQuotas = {
   chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' },
   agy_gemini: { state: 'unknown', remaining: null, mode: 'unknown' },
   agy_other: { state: 'unknown', remaining: null },
+  gemini_app: { state: 'unknown', remaining: null },
 };
 const comment = (body: string, created_at = '2026-11-09T10:00:00Z'): BoardCommentV1 =>
   ({ url: `https://example.test/${created_at}`, created_at, author_association: 'OWNER', body });

@@ -35,6 +35,7 @@ const QUOTA_ACCOUNT_SOURCES = {
   chatgpt: 'codex_app_server',
   agy_gemini: 'agy_account_usage',
   agy_other: 'agy_account_usage',
+  gemini_app: 'unavailable',
 } as const;
 const MAGPIE_QUOTA_SOURCE = 'magpie_quota' as const;
 

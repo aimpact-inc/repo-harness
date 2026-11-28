@@ -1,4 +1,4 @@
-import { AGY_HYDROGEN_HIGH_MODEL, AGY_NEON_XHIGH_MODEL, MODEL_FAMILY_LABELS, PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, type SeatId, type SeatModelEntryV1, type SeatRuntime } from './seats-settings';
+import { AGY_HYDROGEN_HIGH_MODEL, AGY_NEON_XHIGH_MODEL, MODEL_FAMILY_LABELS, PI_AGY_MODEL_PREFIX, PI_CODEX_MODEL_PREFIX, PI_GEMINI_APP_MODEL_PREFIX, type SeatId, type SeatModelEntryV1, type SeatRuntime } from './seats-settings';
 import type { QuotaAccount } from './quota';
 
 export const LOGICAL_MODEL_IDS = [
@@ -242,6 +242,7 @@ export function catalogSeatAccount(seat: { readonly runtime: SeatRuntime; readon
   if (seat.runtime === 'agy' && seat.model !== null) {
     return seat.model.startsWith('gemini-') ? 'agy_gemini' : 'agy_other';
   }
+  if (seat.runtime === 'pi' && seat.model?.startsWith(PI_GEMINI_APP_MODEL_PREFIX)) return 'gemini_app';
   if (seat.runtime === 'pi' && seat.model?.startsWith(PI_AGY_MODEL_PREFIX)) {
     return seat.model.startsWith(`${PI_AGY_MODEL_PREFIX}gemini-`) ? 'agy_gemini' : 'agy_other';
   }
