@@ -12,7 +12,7 @@ const RUNTIME_SCAN_FILES = [
   "README.zh-CN.md",
   "docs/reference-configs/external-tooling.md",
 ];
-const LOCALIZED_READMES = ["README.zh-CN.md", "README.ja.md", "README.es.md", "README.fr.md"];
+const LOCALIZED_READMES = ["README.zh-CN.md", "README.ja.md", "README.es.md", "README.fr.md", "README.tr.md"];
 const RUNTIME_RED_FLAGS = [
   /在 Claude Code/,
   /Claude Code skill/,
