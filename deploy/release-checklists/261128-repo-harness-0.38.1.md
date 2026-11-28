@@ -41,7 +41,13 @@ The prep branch `release/0.38.1` starts at `231a21d36`. The commands below ran i
 
 ## Acceptance environment
 
-Pending: the orchestrator runs `gh workflow run probe.yml --ref release/0.38.1 -f lane=release-rehearsal -f runner=ubuntu-latest` after a joint decision and green `Required / CI`, and records the run URL, `[rehearsal] OK: 0.38.0 -> 0.38.1`, `TARBALL SERVED repo-harness 0.38.1` and `TARBALL SERVED repo-harness-operator-web 0.38.1`.
+The upgrade rehearsal passed. Run: https://github.com/aimpact-inc/repo-harness/actions/runs/46118188312 (`probe.yml`, lane `release-rehearsal`, `ubuntu-latest`, ref `release/0.38.1` at `18c505f86c01601668316fb34a87353c7d89d620`, conclusion success). The job log holds these lines:
+
+- `[probe] head 18c505f86c01601668316fb34a87353c7d89d620`
+- `[rehearsal] parent 0.38.0 -> candidate 0.38.1 (archctx pin 0.18.5)`
+- `[rehearsal] OK: 0.38.0 -> 0.38.1`
+- `TARBALL SERVED repo-harness 0.38.1`
+- `TARBALL SERVED repo-harness-operator-web 0.38.1`
 
 The native Windows item (`#3661`, PR `#3663`) has no rehearsal runner. Its evidence is the staged M2 run recorded in the `#3567` comment 7235449689: Windows 11, Node 26.13.0, Bun 1.4.4, tarball sha256 `643bff5a…9de7` of `231a21d36`; `rh update --no-cli --version 0.38.0` exited 0, `archctx --version` printed 0.18.5, and the install ledger stayed consistent. The `#3567` issue stays open until M2 runs `rh update` to the published 0.38.1.
 
