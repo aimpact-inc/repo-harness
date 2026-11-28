@@ -2,57 +2,54 @@
 
 # repo-harness
 
-### Claude と Codex のための共有コンテキスト、hooks、レビュー証跡
+### AI エージェントに GitHub issue を渡す。実際にレビューできる PR が返ってくる。
 
 [![npm version](https://img.shields.io/npm/v/repo-harness.svg)](https://www.npmjs.com/package/repo-harness)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.4.0-black.svg)](https://bun.sh)
+[![Hosts](https://img.shields.io/badge/hosts-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-6b4fbb.svg)](README.md#supported-hosts)
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md)
-
-**GitHub issue と受け入れ条件を agent に渡します。変更内容と検証結果を PR に記録します。**
+[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md) | [Türkçe](README.tr.md)
 
 </div>
 
-`repo-harness` は、コンテキスト、レビュー証跡、handoff のための CLI、skills、
-hooks を提供します。GitHub issue と PR がタスクの内容、範囲、状態を管理します。
-リポジトリ内のファイルを使い、次のセッションで作業を再開できます。
+`repo-harness` は既存リポジトリを包み込む CLI、hooks、skills のセットです。**Claude、Codex、Pi** がセッション、マシン、worktree をまたいで長期のエンジニアリング作業を進め、人間が数分でレビューできる証跡を PR に残せます。GitHub issue と PR がタスクの正本を持ち、人間は変更を受け入れるかどうかの判断に集中できます。
 
 ## インストール
 
-前提条件は Git working tree、`bun`、利用可能な `herdr` です。前提条件の全体は
-[README.md](README.md#get-started) を参照してください。
+前提条件: Git 作業ツリー、[Bun](https://bun.sh) ≥ 1.4.0（インストーラーが導入・更新します）、[`hc`](https://herdr.dev/)（herdr-core）。macOS/Linux は `bash`、Windows は Git for Windows が必要です。Node.js は不要です。詳細は [README.md](README.md#quick-start) を参照してください。
 
 ```bash
-# macOS / Linux
+# 1. Install the CLI and user-level hook adapters
 curl -fsSL https://raw.githubusercontent.com/aimpact-inc/repo-harness/main/install.sh | sh
+```
 
+```powershell
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/aimpact-inc/repo-harness/main/install.ps1 | iex
 ```
 
-Bun がすでに PATH にある場合は、次のコマンドも使えます。
-
-```bash
-bunx -p repo-harness@latest rh install     # Bun one-shot bootstrap
-npx -y -p repo-harness@latest rh install   # npx fallback; the CLI still runs on Bun
-```
+すでに Bun がある場合は `bunx -p repo-harness@latest rh install` を使えます。
 
 ## 最初のコマンド
 
-対象リポジトリのルートで、まずプレビューし、次に適用します。
+対象リポジトリのルートでプレビューし、次に適用します。
 
 ```bash
-rh init --dry-run
+# 2. From the root of the repository you want to adopt: preview, then apply
+rh init --dry-run   # reports every file it would write; writes nothing
 rh init
 ```
 
-`--dry-run` は作成または更新するファイルを報告するだけで、ファイルを書き込みません。
+初期化の最後に `=== Migration Report ===` と `--- External Tooling ---` が表示されます。ヘルパースクリプトはリポジトリにコピーせず、`rh run <helper>` で呼び出します。
 
-## 完全なドキュメント
+## ドキュメント
 
-このページは入口ページです。英語の [README.md](README.md) が唯一の完全で最新の
-ドキュメントです。workflow、hooks、MCP connector、review、maintainer 向け情報を含みます。
+このページは概要です。仕組み、設計原則、コマンド一覧、オペレーターコンソール、skills、対応ホストの全文は英語の [README.md](README.md) を参照してください。
+
+- 導入詳細、アップグレード、アンインストール、hooks、MCP、メンテナー向け情報: [利用ガイド](docs/usage.md)
+- リリース履歴: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 
 ## ライセンス
 
-MIT
+MIT — [`LICENSE`](LICENSE) を参照してください。
