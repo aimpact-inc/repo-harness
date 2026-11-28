@@ -23,7 +23,7 @@ import { renderJsonObjectUpdate } from "../../core/evidence/json-object-update";
 import { retireUserExcludesBlock, writeRepositoryExcludes } from "../installer/repository-excludes";
 import { sha256Hex } from "../../core/evidence/sha256";
 import { tmpdir, userInfo } from "os";
-import { basename, delimiter, dirname, join, relative, resolve, sep } from "path";
+import { basename, delimiter, dirname, join, relative, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { syncWazaSharedRules } from "../installer/waza-rules";
 import { applyGlobalContextRefresh, GLOBAL_RULES_BEGIN, GLOBAL_RULES_END, globalContextPath, globalRuntimeContextHosts, preflightGlobalContextRefresh, type GlobalContextRefreshPlan, type ReportLanguageFlag } from "../installer/global-context";
@@ -498,6 +498,101 @@ function safeReadManagedRuntime(
   }
 }
 
+// Bun's V5 shim stores a UTF-16LE target, a quote and NUL, optional shebang
+// data and byte lengths, and a final u16 of flags. A global bin uses a relative target.
+// See Bun 1.4.4's src/install/windows-shim/BinLinkingShim.rs.
+function readBunxTarget(record: Buffer): string | null {
+  if (record.length < 6 || record.length % 2 !== 0) return null;
+  const flags = record.readUInt16LE(record.length - 2);
+  if ((flags & 0xfff8) !== (2739 << 4)) return null; // V5, relative target
+  let targetBytes = record.length - 6;
+  if ((flags & 4) !== 0) {
+    const metadata = record.length - 10; // Two u32 lengths followed by the flags.
+    if (metadata < 4) return null;
+    targetBytes = record.readUInt32LE(metadata);
+    const shebangBytes = record.readUInt32LE(metadata + 4);
+    if (shebangBytes === 0 || shebangBytes % 2 !== 0 || targetBytes + shebangBytes + 4 !== metadata) return null;
+  }
+  if (targetBytes === 0 || targetBytes % 2 !== 0 || record.readUInt16LE(targetBytes) !== 34 || record.readUInt16LE(targetBytes + 2) !== 0) return null;
+  const target = record.toString('utf16le', 0, targetBytes);
+  return win32.parse(target).root || /[\0":]/.test(target) ? null : target;
+}
+
+// Undefined means the entry is absent. Null means files exist but ownership is unproved.
+function readArchctxBinTarget(bunRoot: string, link: string, platform: NodeJS.Platform): string | null | undefined {
+  const bare = lstatSync(link, { throwIfNoEntry: false });
+  if (platform !== 'win32') {
+    if (!bare) return undefined;
+    try { return realpathSync(link); } catch { return null; }
+  }
+  const exe = lstatSync(`${link}.exe`, { throwIfNoEntry: false });
+  const record = lstatSync(`${link}.bunx`, { throwIfNoEntry: false });
+  if (!bare && !exe && !record) return undefined;
+  if (bare || !exe?.isFile() || !record?.isFile()) return null;
+  try {
+    const target = readBunxTarget(readFileSync(`${link}.bunx`));
+    // Bun resolves relative targets from the parent of the shim's directory.
+    return target === null ? null : realpathSync(join(bunRoot, target.replaceAll('\\', sep)));
+  } catch {
+    return null;
+  }
+}
+
+export function reconcileManagedArchctx(
+  globalPackageRoot: string,
+  cwd: string,
+  bunExecutable: string,
+  env: NodeJS.ProcessEnv,
+  initialDetail: string,
+  platform: NodeJS.Platform = process.platform,
+): GlobalRuntimeStep {
+  const step = 'verify managed runtime dependencies';
+  const bunRoot = env.BUN_INSTALL ?? join(homeDir(env), '.bun');
+  const link = join(bunRoot, 'bin', 'archctx');
+  const entry = platform === 'win32' ? `${link}.exe / ${link}.bunx` : link;
+  // Bun can keep another copy nested under repo-harness, which repo-harness imports.
+  // The launcher points to the package installed by `bun add -g archctx`.
+  const managedRoot = join(bunRoot, 'install', 'global', 'node_modules', 'archctx');
+  const managedPackage = (): { version: unknown; target: string } => {
+    const manifest = readPackageManifest(managedRoot);
+    const bin = recordValue(manifest.bin).archctx;
+    if (typeof bin !== 'string') throw new Error('archctx does not declare bin.archctx');
+    return { version: manifest.version, target: realpathSync(join(managedRoot, bin)) };
+  };
+  const conflictDetail = platform === 'win32'
+    ? `${link} or its .exe/.bunx files do not match the managed archctx entry. Move or remove the conflicting files, then rerun rh update.`
+    : `${link} is not the managed archctx link. Move or remove it, then rerun rh update.`;
+  const conflict: GlobalRuntimeStep = { step, status: 'failed', detail: `RH_ARCHCTX_BIN_CONFLICT: ${conflictDetail}` };
+  const inManagedRoot = (target: string): boolean => existsSync(managedRoot) && target.startsWith(realpathSync(managedRoot) + sep);
+  try {
+    const version = recordValue(readPackageManifest(globalPackageRoot).dependencies).archctx;
+    if (typeof version !== 'string') throw new Error('repo-harness does not pin archctx');
+    const globalManifest = readPackageManifest(join(bunRoot, 'install', 'global'));
+    const existingTarget = readArchctxBinTarget(bunRoot, link, platform);
+    if (existingTarget !== undefined) {
+      if (existingTarget === null || !inManagedRoot(existingTarget)) return conflict;
+      const current = managedPackage();
+      const matches = existingTarget === current.target;
+      if (platform === 'win32' && !matches) return conflict;
+      if (matches && current.version === version && recordValue(globalManifest.dependencies).archctx === version) return { step, status: 'ok', detail: initialDetail };
+    }
+    const install = runProcess(bunExecutable, ['add', '-g', `archctx@${version}`], cwd, env);
+    if (install.status !== 'ok') return withStepName(install, step, `archctx@${version}`);
+    try {
+      const installed = managedPackage();
+      const target = readArchctxBinTarget(bunRoot, link, platform);
+      if (installed.version !== version || target !== installed.target || (platform === 'win32' && !inManagedRoot(target))) {
+        throw new Error('installed version or entry target does not match');
+      }
+    } catch (error) {
+      return { step, status: 'failed', detail: `RH_ARCHCTX_BIN_READBACK: ${entry}: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    return { step, status: 'ok', detail: `${initialDetail}; archctx@${version}` };
+  } catch (error) {
+    return { step, status: 'failed', detail: `RH_ARCHCTX_BIN_INVALID: ${entry}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 function reconcileManagedRuntime(
   cwd: string,
   bunExecutable: string,
@@ -515,43 +610,7 @@ function reconcileManagedRuntime(
   const initial = safeReadManagedRuntime(globalPackageRoot, cwd, env, expectedHarnessVersion, plugins);
   if (initial.status === "ready") {
     if (linkArchctx && plugins.includes('architecture')) {
-      const bunRoot = env.BUN_INSTALL ?? join(homeDir(env), '.bun');
-      const link = join(bunRoot, 'bin', 'archctx');
-      // `bun add -g archctx` installs this package and links its bin. Bun can keep another copy nested
-      // under repo-harness, which repo-harness imports; the link never points there.
-      const managedRoot = join(bunRoot, 'install', 'global', 'node_modules', 'archctx');
-      const managedPackage = (): { version: unknown; target: string } => {
-        const manifest = readPackageManifest(managedRoot);
-        const bin = recordValue(manifest.bin).archctx;
-        if (typeof bin !== 'string') throw new Error('archctx does not declare bin.archctx');
-        return { version: manifest.version, target: realpathSync(join(managedRoot, bin)) };
-      };
-      try {
-        const version = recordValue(readPackageManifest(globalPackageRoot).dependencies).archctx;
-        if (typeof version !== 'string') throw new Error('repo-harness does not pin archctx');
-        const globalManifest = readPackageManifest(join(bunRoot, 'install', 'global'));
-        const existing = lstatSync(link, { throwIfNoEntry: false });
-        if (existing) {
-          let linkTarget: string | null = null;
-          try { linkTarget = realpathSync(link); } catch { /* A dangling link is also a conflict. */ }
-          // A link into the Bun global archctx package is managed, whatever its version; the install below moves it to the pin.
-          const managed = linkTarget !== null && existsSync(managedRoot) && linkTarget.startsWith(realpathSync(managedRoot) + sep);
-          if (!managed) return { step: 'verify managed runtime dependencies', status: 'failed', detail: `RH_ARCHCTX_BIN_CONFLICT: ${link} is not the managed archctx link. Move or remove it, then rerun rh update.` };
-          const current = managedPackage();
-          if (linkTarget === current.target && current.version === version && recordValue(globalManifest.dependencies).archctx === version) return { step: 'verify managed runtime dependencies', status: 'ok', detail: initial.detail };
-        }
-        const install = runProcess(bunExecutable, ['add', '-g', `archctx@${version}`], cwd, env);
-        if (install.status !== 'ok') return withStepName(install, 'verify managed runtime dependencies', `archctx@${version}`);
-        try {
-          const installed = managedPackage();
-          if (installed.version !== version || realpathSync(link) !== installed.target) throw new Error('installed version or link target does not match');
-        } catch (error) {
-          return { step: 'verify managed runtime dependencies', status: 'failed', detail: `RH_ARCHCTX_BIN_READBACK: ${link}: ${error instanceof Error ? error.message : String(error)}` };
-        }
-        return { step: 'verify managed runtime dependencies', status: 'ok', detail: `${initial.detail}; archctx@${version}` };
-      } catch (error) {
-        return { step: 'verify managed runtime dependencies', status: 'failed', detail: `RH_ARCHCTX_BIN_INVALID: ${link}: ${error instanceof Error ? error.message : String(error)}` };
-      }
+      return reconcileManagedArchctx(globalPackageRoot, cwd, bunExecutable, env, initial.detail);
     }
     return { step: "verify managed runtime dependencies", status: "ok", detail: initial.detail };
   }

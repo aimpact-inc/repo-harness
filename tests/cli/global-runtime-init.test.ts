@@ -7,7 +7,7 @@ import { spawnSync } from 'child_process';
 import { PassThrough, Writable } from 'stream';
 import { createHash } from 'crypto';
 import { checkMcpLocalConfigFile } from '../../src/cli/mcp/local-config-check';
-import { migrateSeatsConfiguration, runGlobalRuntimeSetup, verifyInstalledManagedRuntime } from '../../src/cli/commands/global-runtime';
+import { migrateSeatsConfiguration, reconcileManagedArchctx, runGlobalRuntimeSetup, verifyInstalledManagedRuntime } from '../../src/cli/commands/global-runtime';
 import { DEFAULT_SEATS_CONFIG, NATIVE_SEATS_PRESET, decodeSeatsConfig, type SeatsConfigV1 } from '../../src/core/board/seats-settings';
 import { SeatsConfigMigrationRequiredError } from '../../src/core/board/seats-settings-migration';
 import { buildSeatLaunch } from '../../src/core/board/seat-launch';
@@ -1473,6 +1473,72 @@ if [[ -n "$output" ]]; then printf '# refreshed rule\\n' > "$output"; else print
       rmSync(tmp, { recursive: true, force: true });
     }
   }, 15_000);
+
+  test('update verifies the Windows archctx launcher pair before and after installation', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-archctx-windows-'));
+    const home = join(tmp, 'home');
+    const fakeBin = join(tmp, 'bin');
+    const bunRoot = join(home, '.bun');
+    const globalRoot = join(bunRoot, 'install', 'global');
+    const harness = join(globalRoot, 'node_modules', 'repo-harness');
+    const link = join(bunRoot, 'bin', 'archctx');
+    const exe = `${link}.exe`;
+    const record = `${link}.bunx`;
+    const launcher = 'launcher fixture';
+    // Bun 1.4.4 record from M2: UTF-16LE target, shebang, lengths, and flags.
+    const sidecar = Buffer.from(
+      '69006e007300740061006c006c005c0067006c006f00620061006c005c006e006f00640065005f006d006f00640075006c00650073005c00' +
+      '61007200630068006300740078005c00620069006e005c0061007200630068006300740078002e006d006a00730022000000' +
+      '6e006f00640065002000660000000a00000037ab', 'hex');
+    const fixture = join(tmp, 'archctx.bunx');
+    const bunLog = join(tmp, 'bun.log');
+    const bun = join(fakeBin, 'bun');
+    try {
+      mkdirSync(fakeBin, { recursive: true });
+      setupManagedRuntimeReadback(tmp, home, fakeBin);
+      mkdirSync(dirname(link), { recursive: true });
+      writeFileSync(fixture, sidecar);
+      writeFileSync(exe, launcher);
+      writeFileSync(record, sidecar);
+      writeShellExecutableFixture(tmp, bun, [
+        '#!/bin/bash',
+        `printf '%s\\n' "$*" >> "${bunLog}"`,
+        `printf '%s' '${launcher}' > "${exe}"`,
+        `cp "${fixture}" "${record}"`,
+      ].join('\n'));
+      const env = { ...sanitizedChildEnv(home), BUN_INSTALL: bunRoot };
+      const reconcile = () => reconcileManagedArchctx(harness, tmp, bun, env, 'ready', 'win32');
+      const install = reconcile();
+      expect(install).toMatchObject({ status: 'ok', detail: `ready; archctx@${ARCHCTX_PIN}` });
+      expect(existsSync(link)).toBe(false);
+      expect(readFileSync(bunLog, 'utf8')).toBe(`add -g archctx@${ARCHCTX_PIN}\n`);
+
+      writeFileSync(join(globalRoot, 'package.json'), JSON.stringify({ dependencies: { archctx: ARCHCTX_PIN } }));
+      expect(reconcile()).toMatchObject({ status: 'ok', detail: 'ready' });
+
+      rmSync(record);
+      expect(reconcile().detail).toContain('RH_ARCHCTX_BIN_CONFLICT');
+      expect(existsSync(record)).toBe(false);
+
+      const truncated = sidecar.subarray(0, -2);
+      writeFileSync(record, truncated);
+      expect(reconcile().detail).toContain('RH_ARCHCTX_BIN_CONFLICT');
+      expect(readFileSync(record)).toEqual(truncated);
+
+      const other = join(globalRoot, 'node_modules', 'userbin', 'bin');
+      mkdirSync(other, { recursive: true });
+      writeFileSync(join(other, 'archctx.mjs'), 'user bin');
+      const foreign = Buffer.from(sidecar);
+      foreign.write('userbin', Buffer.byteLength('install\\global\\node_modules\\', 'utf16le'), 'utf16le');
+      writeFileSync(record, foreign);
+      expect(reconcile().detail).toContain('RH_ARCHCTX_BIN_CONFLICT');
+      expect(readFileSync(record)).toEqual(foreign);
+      expect(readFileSync(exe, 'utf8')).toBe(launcher);
+      expect(readFileSync(bunLog, 'utf8')).toBe(`add -g archctx@${ARCHCTX_PIN}\n`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 
   test('update mode preserves the working CLI and fails closed when Bun leaves a stale mandatory dependency tree', () => {
     registerArchitecturePlugin();
