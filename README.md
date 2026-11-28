@@ -11,7 +11,7 @@
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.4.0-black.svg)](https://bun.sh)
 [![Hosts](https://img.shields.io/badge/hosts-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-6b4fbb.svg)](#supported-hosts)
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Français](README.fr.md) | [Español](README.es.md) | [Türkçe](README.tr.md)
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Commands](#command-cheat-sheet) · [Usage guide](docs/usage.md) · [Changelog](docs/CHANGELOG.md)
 

@@ -47,6 +47,7 @@ const SCAN_SURFACES = [
   "README.ja.md",
   "README.fr.md",
   "README.es.md",
+  "README.tr.md",
   "docs/reference-configs",
   "docs/architecture",
   "evals",
