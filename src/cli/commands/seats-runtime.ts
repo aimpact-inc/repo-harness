@@ -61,7 +61,7 @@ export async function quotaCheckedSeat(id: LaunchSeatId, seats: SeatsConfigV1, c
       done.add(account);
       if (account === 'claude') readings.push(readClaudeQuota(env));
       else if (account === 'chatgpt') readings.push(await readCodexQuota(env, PACKAGE_VERSION));
-      else {
+      else if (AGY_QUOTA_ACCOUNTS.some(agyAccount => agyAccount === account)) {
         for (const agyAccount of AGY_QUOTA_ACCOUNTS) done.add(agyAccount);
         readings.push(...await readAgy());
       }

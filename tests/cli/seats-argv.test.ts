@@ -1253,6 +1253,20 @@ console.log(JSON.stringify(await seatResetLaunch({ seat: "advisor", repository: 
 });
 
 describe("rh seats argv", () => {
+  test("a configured Gemini App Neon frontend seat builds its Pi argv without reading agy quota", () => {
+    const workerNeon = { ...DEFAULT_SEATS_CONFIG["worker-neon"], model: "gemini-app/gemini-neon" };
+    withHome({ ...DEFAULT_SEATS_CONFIG, "worker-neon": workerNeon }, home => {
+      const agyLog = join(home, "agy-calls");
+      writeFileSync(join(home, ".quota-bin", "agy"), `#!/bin/sh\ntouch "${agyLog}"\n`, { mode: 0o755 });
+      const result = argv(home, "worker-neon", "--json");
+      expect(result.status, result.stderr).toBe(0);
+      const args: string[] = JSON.parse(result.stdout).argv;
+      const pi = args.indexOf("pi");
+      expect(args.slice(pi, pi + 7)).toEqual(["pi", "--provider", "gemini-app", "--model", "gemini-neon", "--thinking", "high"]);
+      expect(existsSync(agyLog)).toBe(false);
+    });
+  });
+
   test("a Pi seat launch refuses a shell that fails the heredoc probe, passes a good one and reports a shell that cannot start", () => {
     const seats = { ...DEFAULT_SEATS_CONFIG, "worker-light": { runtime: "pi", model: null, effort: null, tools: DEFAULT_SEATS_CONFIG.worker.tools, fleet: [] } };
     withHome(seats, home => {

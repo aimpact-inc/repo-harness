@@ -1283,6 +1283,7 @@ test('board read: every sub-issue page of the parent reaches the board and the m
       chatgpt: { state: 'normal', remaining: 30, mode: 'normal', credits: 'off' },
       agy_gemini: { state: 'unknown', remaining: null, mode: 'unknown' },
       agy_other: { state: 'unknown', remaining: null },
+      gemini_app: { state: 'unknown', remaining: null },
     } as const;
     return planDispatch({ seats: DEFAULT_SEATS_CONFIG, quota, terminals: [], parent }).coordinator;
   };

@@ -1095,6 +1095,24 @@ describe('rh quota', () => {
     expect(JSON.parse(launch.stderr)).toMatchObject({ error: 'seat_quota_exhausted', message: expect.stringContaining('agy_gemini account is exhausted') });
   });
 
+  test('Gemini App reports its own unknown quota without querying agy', () => {
+    const f = fixture(null, 'gemini-exhausted');
+    const model = 'gemini-app/gemini-neon';
+    const seats = { ...DEFAULT_SEATS_CONFIG,
+      advisor: { ...DEFAULT_SEATS_CONFIG.advisor, model },
+      'worker-neon': { ...DEFAULT_SEATS_CONFIG['worker-neon'], model },
+      'worker-neon-deep': { ...DEFAULT_SEATS_CONFIG['worker-neon-deep']!, model },
+    };
+    writeFileSync(join(f.home, '.repo-harness', 'config.json'), JSON.stringify({ seats }));
+    expect(seatAccount({ runtime: 'pi', model: 'gemini-app/other-model' })).toBe('gemini_app');
+    const result = quota(['--json'], f.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(decodeQuotaReport(JSON.parse(result.stdout)).accounts.slice(2)).toEqual([
+      { account: 'gemini_app', source: 'unavailable', state: 'unknown', reason: 'no Gemini App quota reader', observed_at: null, windows: [] },
+    ]);
+    expect(existsSync(f.agyLog)).toBe(false);
+  });
+
   test('does not start agy when no configured seat uses it', () => {
     const f = fixture(null, 'two');
     const seats = { ...DEFAULT_SEATS_CONFIG,

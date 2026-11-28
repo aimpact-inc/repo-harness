@@ -21,7 +21,8 @@ import {
   type QuotaReading,
   type QuotaReport,
 } from '../../core/board/quota';
-import { hasAgySeat } from '../../core/board/seat-routing';
+import { hasAgySeat, seatAccount } from '../../core/board/seat-routing';
+import { SEAT_IDS } from '../../core/board/seats-settings';
 import { readSeatsConfiguration, resolveAgyInstallation } from './seats-configuration';
 
 const CODEX_READ_TIMEOUT_MS = 20_000;
@@ -38,7 +39,11 @@ export async function readQuotaReport(env: NodeJS.ProcessEnv, exhaustedAtOrAbove
     readCodexQuota(env, PACKAGE_VERSION, CODEX_READ_TIMEOUT_MS, seats.routing),
     hasAgySeat(seats) ? readAgyQuota(env) : [],
   ]);
-  return buildQuotaReport([claude, codex, ...agy], Date.now(), exhaustedAtOrAboveUsed);
+  const readings = [claude, codex, ...agy];
+  if (SEAT_IDS.some(id => seats[id] !== null && seatAccount(seats[id]) === 'gemini_app')) {
+    readings.push(unknownQuotaReading('gemini_app', 'no Gemini App quota reader'));
+  }
+  return buildQuotaReport(readings, Date.now(), exhaustedAtOrAboveUsed);
 }
 
 /** Discard OAR account identity at the boundary. Only model-group quota windows leave it. */
